@@ -250,6 +250,40 @@ def next_slug(title, seen):
     return slug
 
 
+#  ⚠ **The sibling had this and this file did not.**  `lr_extract.abort_early()` gives up once a
+#     run is plainly failing, with the note "three hundred more confirmations of something twenty
+#     would have shown" (2026-08-21).  `distill_sessions` never got the same guard, so on
+#     2026-09-02 it ran all 391 sessions and failed 166 of them —— the rate climbed 1 → 21 → 78 →
+#     166 as it went, the signature of a rate limit, and it kept calling for another twenty
+#     minutes after that was obvious.  Each failure costs three LLM attempts (`call(tries=3)`).
+#
+#     Deliberately more lenient than lr_extract's: distillation failures are **recoverable** ——
+#     no completion marker is written, so re-running retries exactly the failures.  Giving up
+#     early therefore costs a re-run, not the work.
+#
+#  ⚠ **A trailing window, not a cumulative rate.**  The first version of this guard used the
+#     cumulative figure and a self-check written against the real run showed it would not have
+#     fired: 166/391 is 42%, under any sane cumulative threshold.  But the run was not failing
+#     at 42% —— it *deteriorated*, and the last 131 sessions failed at 67%.  A cumulative rate
+#     averages a collapsing run against its healthy beginning and so is at its most forgiving
+#     exactly when things are worst.  The window sees the present.
+ABORT_MIN_SAMPLE = 40        # never judge a short run
+ABORT_WINDOW = 60            # how many recent sessions the verdict looks at
+ABORT_RATE = 0.60
+
+
+def should_abort(recent):
+    """Is this run failing *now*?  `recent` is the outcome of the last calls, newest last.
+
+    Counts only —— the caller decides what to do.  Kept separate from the loop so a mutation
+    to it is catchable; inlined, the sibling's version could not be tested at all.
+    """
+    if len(recent) < ABORT_MIN_SAMPLE:
+        return False
+    w = recent[-ABORT_WINDOW:]
+    return sum(1 for x in w if x == "fail") / len(w) >= ABORT_RATE
+
+
 def write(rec, docs, seen):
     day = (rec.get("first_ts") or "")[:10]      # '2026-07-14T07:32:19.318Z' → '2026-07-14'
     made = []
@@ -322,6 +356,32 @@ def _selftest():
         assert distill(rec)[1] == "ok", "SKIP counted as failure —— a healthy session is retried forever"
     finally:
         globals()["call"], globals()["windows"], globals()["parse"] = orig_call, orig_win, orig_parse
+    #  ── a plainly failing run gives up ───────────────────────────────────────────────────
+    #  2026-09-02: 391 sessions, 166 failures, the rate climbing 1 → 21 → 78 → 166 as it went.
+    #  It kept calling for twenty minutes after that was obvious.  `lr_extract` has had this
+    #  guard since 2026-08-21; the sibling never got it.
+    assert not should_abort(["fail"] * 39), "it gave up on too short a run —— a slow start is not a failure"
+    assert not should_abort(["ok"] * 200), "a healthy run was stopped"
+    #  ⚠ A normal run has failures in it —— the first 80 sessions of the real run failed at 1%,
+    #     and 20% is still a run worth finishing.  Without this the threshold could be tightened
+    #     to something that stops healthy work, and no check would notice.
+    import itertools as _it
+    _tolerable = list(_it.islice(_it.cycle(["fail"] + ["ok"] * 4), 200))      # 20% failing
+    assert not should_abort(_tolerable), \
+        "a run failing at 20% was stopped —— that is ordinary, not a collapse"
+    #  ⚠ **the real 2026-09-02 run.**  A cumulative rate would not have fired (166/391 = 42%);
+    #     the window does, because the run deteriorated —— the last stretch failed at ~67%.
+    _real = (["ok"] * 80 + ["fail"] * 20 + ["ok"] * 60 + ["fail"] * 58
+             + ["ok"] * 43 + ["fail"] * 88)          # 391 total, 166 fail, worsening
+    assert should_abort(_real), \
+        "the window did not catch a run that deteriorated to 67% —— this is the case it exists for"
+    assert sum(1 for x in _real if x == "fail") / len(_real) < 0.5, \
+        "the fixture no longer reproduces the run it is modelled on (cumulative must stay under 50%)"
+    #  and a run that was bad early but recovered must be allowed to finish
+    assert not should_abort(["fail"] * 100 + ["ok"] * 60), \
+        "a run that recovered was stopped on its history"
+
+    print("  ✅ early abort —— a trailing window, so a deteriorating run is caught while a\n          recovered one finishes")
     print("  ✅ distill_sessions —— slug collisions · a partial window failure is not finalised")
 
 
@@ -392,7 +452,7 @@ def _main_distill():
     # Register the slugs a previous run created — so resuming does not overwrite the same names
     seen = {os.path.basename(f)[:-3]: 1
             for f in __import__("glob").glob(os.path.join(OUT, "*.md"))}
-    rows, done, empty, failed = [], 0, 0, 0
+    rows, done, empty, failed, aborted, recent = [], 0, 0, 0, False, []
     with cf.ThreadPoolExecutor(a.workers) as ex:
         futs = {ex.submit(distill, r): r for r in recs}
         for f in cf.as_completed(futs):
@@ -410,6 +470,17 @@ def _main_distill():
                 failed += 1
             if status != "fail":             # a failure leaves no marker → the next run picks it up again
                 open(os.path.join(DONE, f"{r.get('agent','claude')}-{r['session_id']}"), "w").close()
+            recent.append(status)
+            if should_abort(recent) and not aborted:
+                aborted = True
+                w = recent[-ABORT_WINDOW:]
+                nf = sum(1 for x in w if x == "fail")
+                print(f"  ⛔ {nf}/{len(w)} of the most recent failing ({nf/len(w)*100:.0f}%) "
+                      f"—— stopping ({failed}/{done} overall). "
+                      f"Nothing is lost: a failure leaves no marker, so re-running retries "
+                      f"exactly these.  Try fewer workers (`--workers 4`).", flush=True)
+                for fut in futs:
+                    fut.cancel()
             if done % 20 == 0 or done == len(recs):
                 el = time.time() - t0
                 print(f"  {done}/{len(recs)}  {len(rows)} document(s) · {empty} small-talk skip(s) · "
