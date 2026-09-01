@@ -1,0 +1,39 @@
+{
+  "name": "kal",
+  "version": "0.1.2",
+  "description": "Search a personal knowledge DB (Kallimachos) — retrieval over MCP, with the source and the timeline attached.",
+  "author": {
+    "name": "Taehyun Hwang"
+  },
+  "license": "AGPL-3.0-only",
+  "homepage": "https://github.com/HwangTaehyun/kallimachos",
+  "repository": "https://github.com/HwangTaehyun/kallimachos",
+  "keywords": [
+    "knowledge-base",
+    "retrieval",
+    "rag",
+    "lancedb",
+    "obsidian",
+    "mcp"
+  ],
+  "userConfig": {
+    "vault_dir": {
+      "type": "directory",
+      "title": "Vault path",
+      "description": "Absolute path to the note root to index.  Everything matching **/*.md under it is read (read-only).",
+      "required": true
+    },
+    "kal_dir": {
+      "type": "directory",
+      "title": "Knowledge DB location",
+      "description": "Where LanceDB and the cache live.  Usually ~/.kal.  Indexing has to be run once first.",
+      "required": true
+    },
+    "run_as": {
+      "type": "string",
+      "title": "Container uid:gid",
+      "description": "It has to be able to read the mounted folders.  The default works on macOS; on Linux your own values are needed —— check with `id -u`:`id -g`.",
+      "default": "1000:1000"
+    }
+  }
+}

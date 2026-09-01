@@ -1,0 +1,123 @@
+# Does the plugin **actually come up** —— checked without a person in the loop.
+#
+# Why it is needed: `just selftest` only looks at whether the Python functions run correctly.
+# Whether the plugin installs and starts was never looked at once, which is how the plan's
+# acceptance criterion read "passes in CI" with no CI.  (deep review 2026-08-23, completeness lens)
+name: plugin
+
+on:
+  push:
+    branches: [main]
+    #  ⚠ The `checks` job tests web, api, docs and the justfile, so those have to be
+    #     triggers too.  The old list was written from the probe job alone, so a web edit ran no CI.
+    paths: ['Dockerfile', 'pyproject.toml', 'uv.lock', 'src/**', '.mcp.json',
+            '.claude-plugin/**', 'skills/**', '.github/workflows/plugin.yml',
+            'web/**', 'api/**', 'plugin/**', 'docs/**', 'justfile', 'README.md',
+            #  `verify-links` reads the links in these documents too —— not being in the
+            #  trigger means a broken link can go in and no CI runs (2026-08-25 deep review).
+            'CONTRIBUTING.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md', 'CLA.md']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  #  ⚠ **Without this job the public repository's CI looks at nothing.**
+  #     The self-checks, the web tests and the document verification lived only in the
+  #     workspace root's `.github/workflows/kal.yml`, and that file is private, so it does
+  #     not come along.  A public contributor gets **a green check that ran almost nothing**.
+  #     (2026-08-25 deep review: completeness and consistency found it independently)
+  #     The justfile owns the list —— copying it here would split it again.
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.0.1
+        with: { enable-cache: true }
+      - uses: oven-sh/setup-bun@v2
+      #  ⚠ Go is installed **explicitly**.  There was no `setup-go` until now, so it ran on
+      #     whatever version the runner happened to carry —— `api/go.mod` asks for `go 1.25`
+      #     and that version changes without notice when the runner image is refreshed.
+      #     Measured (2026-08-25): a copy without `.tool-versions` died with `compile:
+      #     version "go1.25.3" does not match go tool version`.
+      #     `go-version-file` makes `go.mod` the source of truth —— copying the version
+      #     here would split one day.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: api/go.mod
+      - uses: extractions/setup-just@v4
+      - run: uv sync --frozen
+      - name: Self-checks (everything that runs without docker)
+        run: just selftest-py
+      - name: Web tests
+        run: cd web && bun install --frozen-lockfile && bun run test
+      #  ⚠ The runner has no knowledge DB.  `verify`'s number comparison opens the real DB,
+      #     so only the **link check** runs here —— the numbers are checked where the DB is.
+      #     (Round 2, measured: calling it plainly dies with `Table 'lr_entities' was not found`)
+      - name: Verify document links (the numbers need a DB —— done locally)
+        run: just verify-links
+      #  ⚠ 206 plugin tests were **running in no workflow at all.**
+      #     web and go were there and only this one was missing (2026-08-25 deep review).
+      #     `plugin/**` was already in both workflows' trigger paths, which seems to be why
+      #     nobody noticed it was not running.
+      - name: Plugin tests
+        run: cd plugin && npm ci && npm test
+      - name: Go tests
+        run: cd api && go test ./...
+
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # ⚠ An amd64 runner.  That this job passes is itself the answer to
+      #   "surely this only works on an arm64 Mac".
+      - name: Build the image
+        run: docker build -t kal:local .
+
+      - uses: actions/setup-python@v7
+        with: { python-version: '3.13' }
+
+      # The probe uses the standard library only —— no reason to fetch torch here.
+      - name: Manifest and skill guards (the part that runs without docker)
+        run: python src/plugin_probe.py --selftest
+
+      # It has to fail **in a sentence** even with an empty DB.  A traceback is a failure.
+      #
+      # ⚠ Do not pipe JSON-RPC by hand here —— stdin hits EOF immediately, so the server
+      #   answers initialize and dies.  The first draft of this workflow fell into exactly
+      #   that trap and looked like it passed.  plugin_probe alone knows the stdio dialogue.
+      - name: Does the empty-DB guidance appear
+        run: |
+          mkdir -p /tmp/emptydb /tmp/emptyvault
+          python src/plugin_probe.py --expect-empty --kal /tmp/emptydb --vault /tmp/emptyvault
+
+      # Checks the 5 tools against real data.  It builds a small vault on the spot.
+      - name: Index → acceptance test
+        run: |
+          mkdir -p /tmp/vault/notes /tmp/kal
+          #  The body of this fixture stays Korean on purpose.  Real vaults are Korean, and
+          #  this is the only place CI ever runs the image over CJK text —— chunking and
+          #  embedding have to not choke on it.  No assertion reads the body: plugin_probe
+          #  searches for "probe", which comes from the frontmatter tags.
+          cat > /tmp/vault/notes/a.md <<'MD'
+          ---
+          title: CI sample document
+          created: 2026-08-23
+          tags: [ci, probe]
+          ---
+          이 문서는 CI 가 색인·검색이 실제로 도는지 확인하려고 만든 것이다.
+          LanceDB 는 이 텍스트를 잘라 임베딩하고 전문 색인을 만든다.
+          MD
+          echo '{"entities":[],"relationships":[],"doc_hashes":{}}' > /tmp/kal/lr_kg.json
+          docker run --rm -v /tmp/kal:/data -v /tmp/vault:/vault:ro kal:local src/schema_v3.py
+          python src/plugin_probe.py --kal /tmp/kal --vault /tmp/vault
+
+  # Baked for both arches.  Pushing amd64 only means **an exec format error on one side**.
+  multiarch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build linux/amd64 · linux/arm64 (no push)
+        run: |
+          docker buildx build --platform linux/amd64,linux/arm64 -t kal:multi .

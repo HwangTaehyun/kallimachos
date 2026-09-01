@@ -1,0 +1,28 @@
+# Entity aliases a person confirmed —— only what normalisation cannot catch.
+#
+# Why not automatic
+#   Different writing systems (taehyun ↔ its Hangul spelling) can never be caught by string
+#   comparison, and embedding similarity does not reach the required precision: there are
+#   2,315 pairs at cosine ≥0.93 and all of them are distinct (docs/ENTITY_RESOLVE.md §6).
+#
+# Format
+#   The spelling to use as the representative:   ← this is the name the graph and search show
+#     - variant1
+#     - variant2
+#
+# Case, hyphen and space differences are absorbed automatically and need no entry here.
+# What belongs here is **a different writing system (Hangul ↔ Latin) or an abbreviation**.
+#
+# After editing, the graph has to be rebuilt for it to take effect:
+#   python src/refresh_kg.py --force
+#
+# To find candidates:
+#   python src/alias_suggest.py
+
+#  ⚠ Below this line is **data, not prose** —— the rules the pipeline reads.  The Hangul
+#     entries are the very thing this file exists for and must not be translated.
+Taehyun Hwang:
+  - taehyun
+  - 태현
+  - 황태현
+  - taehyun hwang

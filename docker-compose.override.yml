@@ -1,0 +1,54 @@
+# For development.  `docker compose up` layers this on automatically.
+# To leave it out in production:  docker compose -f docker-compose.yml up -d
+#
+# What changes
+#   web  → the vite dev server (HMR) instead of nginx serving static files
+#   api  → src/ is mounted, so editing Python takes effect on the next run
+#
+#          ⚠ **Not for the step catalog.**  Go reads `STEPS`/`GROUPS` out of status.py once
+#            at boot (api/main.go:213, into `s.steps`) and `GET /api/steps` serves that copy
+#            (api/main.go:516).  Everything the api shells out to per request —— status, and
+#            a step it actually runs —— does pick up an edit immediately; a new step, a
+#            renamed label or a changed group does not, until the api container restarts.
+#            Nothing errors: the screen just keeps showing the old catalog.
+
+services:
+  api:
+    volumes:
+      - ${KAL_DIR:-~/.kal}:/data/kal
+      - ${VAULT_DIR:?VAULT_DIR is not set —— set it with `just vault <path>`}:/vault
+      - ${CLAUDE_DIR:-~/.claude}:/data/kal/container-home/.claude:ro
+      - ./aliases.yml:/app/aliases.yml
+      - ./homonyms.yml:/app/homonyms.yml
+      # Python is not compiled —— mounting it means editing without a rebuild.
+      # Go is a binary, so mounting does nothing for it; that still needs a rebuild.
+      - ./src:/app/src:ro
+    ports:
+      # ⚠ Loopback, always.  There is no authentication (docs/STACK.md §7), so
+      #   opening 0.0.0.0 lets anyone on the same network run the pipeline,
+      #   edit the vault and wipe the DB.
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile.dev
+    command: bun run dev --host 0.0.0.0 --port 5173
+    environment:
+      KAL_API: http://api:8080
+    volumes:
+      - ./web:/app
+      # node_modules comes from the container —— the native binaries differ between the
+      # host (macOS arm64) and the container (linux).  This anonymous volume covers the bind above.
+      - /app/node_modules
+    # ⚠ compose **merges `ports` rather than replacing them.**  base's
+    #   `127.0.0.1:5173->80` (nginx) and this `->5173` (vite) both survive, and
+    #   asking for the same host port **collides, so no binding is created at all**
+    #   —— the container is running and the browser cannot open it.  `!override`
+    #   replaces the base list wholesale (compose v2.24+).
+    #
+    # ⚠ Loopback, always.  There is no authentication (docs/STACK.md §7) ——
+    #   opening 0.0.0.0 lets anyone on the same network run the pipeline,
+    #   edit the vault and wipe the DB.
+    ports: !override
+      - "127.0.0.1:${WEB_PORT:-5173}:5173"

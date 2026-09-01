@@ -1,0 +1,44 @@
+# For running steps one at a time —— **separate** from docker-compose.yml (the web UI).
+# This one is self-contained: give it a vault and indexing, search and MCP all work.
+#
+#   index     docker compose -f docker-compose.kal.yml run --rm kal src/schema_v3.py
+#   extract   docker compose -f docker-compose.kal.yml run --rm kal src/lr_extract.py
+#   check     docker compose -f docker-compose.kal.yml run --rm kal src/kal_mcp.py --selftest
+#
+# MCP is stdio, so compose does not start it —— Claude runs `docker run -i` itself.
+# The definitive copy is `.mcp.json` at the repository root (hardening flags included).
+
+services:
+  kal:
+    build: .
+    image: kal:local
+    volumes:
+      # The vault is **read-only**.  The pipeline does not write here.
+      # ⚠ The host-side path is **VAULT_DIR**.  It must not reuse the container-side name
+      #   (KAL_VAULT=/vault, in environment below) —— compose has both stacks reading the
+      #   same .env, so the moment KAL_VAULT=/vault (what Python expects) is written into
+      #   .env, this line would mount the host's /vault.  Same names as docker-compose.yml.
+      - ${VAULT_DIR:?VAULT_DIR is not set —— set it with `just vault <path>`}:/vault:ro
+      # The DB and cache.  **A host bind.**
+      #
+      # ⚠ This used to be a `kal-data` named volume.  That leaves a DB indexed by this stack
+      #   invisible to **both** the host CLI and the MCP in `.mcp.json` —— and not as an
+      #   error, only as "the results are empty", which is the slowest kind to diagnose.
+      #   Someone who indexed by following the README landed in exactly that state.
+      #   (deep review 2026-08-23, the completeness and consistency lenses)
+      - ${KAL_DIR:-${HOME}/.kal}:/data
+    environment:
+      KAL_PATH: /data/db
+      KAL_VAULT: /vault
+      KAL_HOME: /data
+      # Folders to leave out of indexing and transmission (vault-relative, colon-separated).
+      # ⚠ Without passing this through, writing it in .env does not reach the container ——
+      #   a folder excluded on the host goes out anyway when the container indexes.
+      KAL_SKIP: ${KAL_SKIP:-}
+      # If extraction needs an LLM, point at the host relay.  Inside the container
+      # host.docker.internal is the right name —— running on the host directly it is 127.0.0.1.
+      KAL_CLAUDE_RELAY: ${KAL_CLAUDE_RELAY:-}
+      KAL_RELAY_TOKEN: ${KAL_RELAY_TOKEN:-}
+      KAL_LOG: ${KAL_LOG:-WARNING}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

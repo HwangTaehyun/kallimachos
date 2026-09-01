@@ -1,0 +1,60 @@
+# ⚠ .gitignore **does not support end-of-line comments.**
+#   `bench/   # a note` becomes one whole pattern and matches nothing.
+#   A comment must have its own line.
+
+# ── Secrets ──
+.env
+.env.local
+
+# ── Separate repositories ──
+# github.com:HwangTaehyun/galaxy-view · 257MB
+# plugin/ used to be **a separate repository** (galaxy-view) and was ignored wholesale.
+# It was absorbed as a subtree on 2026-08-24 —— this repository manages it now.
+# Only the build output is ignored.
+plugin/node_modules/
+plugin/dist/
+plugin/main.js
+plugin/dev-vault/
+plugin/.hotreload
+
+# ── Build output ──
+web/node_modules/
+web/dist/
+web/public/galaxy/
+# `cd api && go build ./...` drops this here (a 9.1MB Mach-O).  It used to block `api/kal-api`,
+# and **nothing creates a file by that name** —— the justfile builds `-o /tmp/sb-api` and the
+# Dockerfile `-o /out/api`.  Meanwhile the real artifact rode along in 5 commits.
+# (r4-fresh, round 5, 2026-08-21)
+api/api
+__pycache__/
+*.pyc
+
+# ── Local tool state ──
+.omc/
+.claude/settings.local.json
+.playwright-mcp/
+
+# The tsc incremental build cache —— tracked since the first commit (8d54aef), but it is output.
+# It mixes into the diff on every build and hides the real changes.  (2026-08-21)
+web/tsconfig.tsbuildinfo
+plugin/tsconfig.tsbuildinfo
+
+# The project venv uv creates (1.4GB — torch)
+.venv/
+
+# The copy reset leaves behind —— it holds a token
+.env.bak
+.env.*.bak
+
+# ── Personal data ──────────────────────────────────────────────────────
+#  ⚠ This block lived only in the workspace root's `.gitignore`.  **The moment `kal/` becomes
+#     the repository root** that file does not come along, so the rules keeping artifacts with
+#     real names out disappear entirely —— in the public repository, of all places.
+#     (deep review 2026-08-25: consistency and fact-checker found it independently)
+# Real personal names in the query set's gold labels
+/bench/
+# Generated output.  person and organization names are in it in the clear.
+# Blocked per directory —— per filename, an export under a new name went straight in.
+/viewer/
+# Merge-group dumps — they hold real-name entities
+docs/entity_resolve_groups.txt

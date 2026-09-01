@@ -1,0 +1,52 @@
+{
+ "db": {
+  "path": "/data/kal/db",
+  "tables": {
+   "chunks": 3370,
+   "documents": 376,
+   "ix_doclen": 3370,
+   "ix_postings": 2107702,
+   "ix_terms": 159408,
+   "lr_entities": 8179,
+   "lr_relations": 12355,
+   "meta": 15
+  },
+  "disk_bytes": 1519206846,
+  "old_versions": 447,
+  "built_at": 1787281102,
+  "embedding_model": "intfloat/multilingual-e5-small",
+  "schema_version": "3",
+  "vault_path": "/vault"
+ },
+ "documents": {
+  "indexed": 376,
+  "origin": {
+   "vault": 98,
+   "session": 278
+  },
+  "added": [],
+  "modified": [],
+  "deleted": []
+ },
+ "kg": {
+  "entities": 8179,
+  "relations": 12355,
+  "stale": [],
+  "stale_ratio": 0.0,
+  "stale_error": "",
+  "drift_error": "",
+  "warn_ratio": 0.2,
+  "extracted_at": 1787275850,
+  "extract_drift": []
+ },
+ "artifacts": {
+  "mtimes": {
+   "graph_export": 1787290152,
+   "kal_graph_json": 1787290127,
+   "galaxy_html": 1787281329
+  },
+  "stale": []
+ },
+ "checked_at": 1787290705,
+ "recommend": []
+}

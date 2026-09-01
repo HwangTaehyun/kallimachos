@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "kal": {
+      "type": "stdio",
+      "command": "docker",
+      "args": [
+        "run",
+        "--rm",
+        "-i",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--tmpfs",
+        "/tmp",
+        "--user",
+        "${user_config.run_as}",
+        "-v",
+        "${user_config.kal_dir}/db:/data/db:ro",
+        "-v",
+        "${user_config.vault_dir}:/vault:ro",
+        "ghcr.io/hwangtaehyun/kal:0.1.2"
+      ]
+    }
+  }
+}

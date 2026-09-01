@@ -1,0 +1,362 @@
+{
+  "_meta": {
+    "purpose": "A pack of facts for a downstream writing pipeline to produce a project page for a personal website.  The course of the project, the iteration of its decisions, and the product and technical thinking are all here.  Narrative and voice are the writer's to choose; this file presumes no style.",
+    "language_note": "English throughout.  Every number quoted comes from the repository's WORKLOG.md, the git history or a benchmark JSON, and has been checked.",
+    "fidelity": "high — every fps / draw call / bundle size / date is either measured or a git record, never an estimate."
+  },
+  "project": {
+    "name": "Galaxy View",
+    "id": "galaxy-view",
+    "tagline_short": "Turns an Obsidian vault into a 3D galaxy you can fly through",
+    "tagline_long": "A cinematic 3D graph view for Obsidian — fly through your vault like NASA's Eyes on Asteroids",
+    "type": "An Obsidian community plugin (a replacement for the built-in 2D graph view)",
+    "license": "MIT",
+    "version": "0.1.0",
+    "repo": "https://github.com/Longwind1984/galaxy-view",
+    "status": "M0–M5 all complete and v0.1.0 released; mobile shipped with it; listing in the community store is an optional later step",
+    "build_window": "2026-06-12 to 2026-06-15 (4 days)",
+    "commit_count": 14,
+    "demo_inspiration_url": "https://eyes.nasa.gov/apps/asteroids/#/home"
+  },
+  "author_and_collaboration_model": {
+    "author": "Rick — a product manager at DiDi/99 (Brazil) working on safety and internationalisation; not a software developer",
+    "the_vault": "A personal PKM library, \"Rick's Second Brain\": 3,225 notes and about 19,500 deduplicated live backlinks measured (43k raw wikilinks)",
+    "guiding_philosophy": "In a PKM setting, looking good and being fun to play with are themselves part of being productive",
+    "collaboration_model": "Rick directed an AI coding agent (Claude) through the whole build, in his role as product manager.  The split: the AI did the technical research, the architecture and visual design, the implementation, and drove real-device testing and benchmark runs through computer use; Rick looked at the running build and gave product and visual feedback, ruled on direction, and tested on his own iPhone.  The whole project is rounds of \"the PM reacts to a build he can see running → the AI turns that reaction into an implementation\".",
+    "why_this_model_is_notable": "A product manager who writes no code drove a 4,000-line open-source plugin — faster than every predecessor — on visual judgement of the running artifact and iterative feedback.  The decisions stayed with the person; the execution and the engineering judgement were the AI's."
+  },
+  "problem_statement": {
+    "trigger": "Obsidian's built-in 2D graph view is neither striking nor much help at spotting a pattern between notes once the vault runs past a thousand.",
+    "scale_context": "At 3,000+ nodes and nearly 20,000 edges the 2D plane degenerates into a blur, and loses both its visual and its navigational value.",
+    "product_bet": "Move the graph into 3D and make it look cinematic, so that exploring your own knowledge turns from a chore into a pleasure —— looking good *is* productivity."
+  },
+  "research_phase": {
+    "method": "Before a line of code, five research agents ran in parallel (the competition / a teardown of NASA Eyes / picking a rendering engine / the Obsidian API / a reconnaissance of the real vault), then three design agents in parallel (architecture / visual / risk) produced an implementation plan gated at each milestone.",
+    "competitor_findings": {
+      "summary": "All four published Obsidian 3D graph plugins are thin wrappers around vasturiano/3d-force-graph, all MIT, all unmaintained for over ten months.",
+      "plugins": [
+        "AlexW00/obsidian-3d-graph (374 stars, last touched 2023-10)",
+        "HananoshikaYomaru/3D Graph New",
+        "Apoo711/New 3D Graph",
+        "kctekn/Tags Routes"
+      ],
+      "smoking_gun_quote": "The author of \"3D Graph New\" writes it plainly in the README: 'the underlying 3D graph has performance issue that I don't know how to fix', and adds a maximum-node-count setting to stop it locking up.",
+      "common_death_wall": "They all die against the same wall: per-object rendering (a Mesh per node, a Line per edge), which is about 22,000 draw calls at a real vault's size.",
+      "gap": "Not one of them does bloom, a cinematic camera, aggregate rendering or a starfield.  NASA's kind of composed, premium feel is an empty space in the market.",
+      "decision": "Build fresh rather than fork; all four are MIT, so they are free to read as reference code without inheriting their performance ceiling."
+    },
+    "nasa_eyes_teardown": {
+      "method": "Not hearsay —— NASA Eyes on Asteroids' production JS bundle was downloaded and grepped to confirm this directly.",
+      "confirmed_stack": "three.js r167 + WebGLRenderer",
+      "confirmed_recipe": [
+        "EffectComposer + UnrealBloomPass, with the bloom strength adjustable at runtime (= make it a user slider)",
+        "OutlinePass disabled by default, enabled only on selection",
+        "A custom ShaderMaterial starfield + a milky-way skybox",
+        "Tween-eased camera goTo transitions",
+        "DOM overlay labels (not in-canvas text)",
+        "Thin, low-saturation orbit lines (the glow comes from bloom)",
+        "LOD: sprite points far away, meshes near",
+        "No fog, no vignette, no grain"
+      ],
+      "key_insight": "The premium feel comes from restraint, not from piling on effects.  This became the charter for the whole visual system."
+    },
+    "engine_selection": {
+      "chosen": "three.js 0.184 (a WebGL baseline) + 3d-force-graph 1.80 (to start) + d3-force-3d 3.0.6 + three-spritetext 1.10",
+      "webgl_not_webgpu": "WebGPU cannot be relied on —— Obsidian users are broadly on older Electron versions, so WebGL has to be the baseline.",
+      "rejected_cosmos_gl": "cosmos.gl (GPU-accelerated force layout, the fastest engine there is) was rejected: it only does 2D, which does not meet the requirement.",
+      "rejected_babylon": "Babylon.js was rejected: no graph ecosystem, a heavier bundle, and no advantage at all here."
+    },
+    "obsidian_api_findings": "app.metadataCache.resolvedLinks/unresolvedLinks supplies the graph data; the built-in graph's colorGroups can be read from .obsidian/graph.json and inherited; the --graph-* CSS variables are readable, which is how the theme is followed; Platform.isMobile detects mobile."
+  },
+  "core_technical_decisions": [
+    {
+      "decision": "Build fresh; fork nothing",
+      "rationale": "They all die against the same wall and their dependencies have rotted for two and a half years; forking means inheriting the ceiling.  MIT competitors serve as reference.",
+      "rejected_alternative": "Fork the most active of them, Apoo711's"
+    },
+    {
+      "decision": "Aggregate rendering (THE breakthrough): every node is one THREE.Points draw call (with a custom radial-falloff glowing-orb shader); every link is one LineSegments.  A whole frame including bloom is under 20 draw calls.",
+      "rationale": "The predecessors die on a per-object pipeline of about 22,000 draw calls.  The point sprite's glow-falloff shader is at the same time where NASA's \"luminous orb\" look comes from —— beauty and performance converge in a single decision.",
+      "rejected_alternative": "Keep 3d-force-graph's default per-node Mesh / per-edge Line (= reproduce the predecessors' crime scene)",
+      "impact": "draw calls about 22,000 → 19; bundle 1.3MB → 606KB"
+    },
+    {
+      "decision": "Drop the 3d-force-graph runtime entirely —— an own three.js pipeline plus d3-force-3d driven directly",
+      "rationale": "The plan had been to demote 3d-force-graph to a \"layout shell\".  But once aggregate rendering owns the scene, driving d3 directly is simpler than the hack of writing coordinates back through fx/fy/fz —— and it removed the one mechanism in the whole design that had never been proven (risk R7).",
+      "current_state": "There is no 3d-force-graph import anywhere in src; it survives in package.json as a trace of history.  The runtime is pure three.js + d3-force-3d."
+    },
+    {
+      "decision": "Keep LayoutEngine and GraphRenderer behind interfaces from day one",
+      "rationale": "This is a defence aimed at what killed the predecessors, not abstraction for its own sake —— \"the second use case has already been paid for by four corpses\".  It lets the layout engine move from the main thread to a Web Worker, and the renderer from per-object to aggregate, without touching anything else.",
+      "principle": "The engineering default: no abstraction layer before a second real use case.  Here the second use case (swapping the implementation for performance) is known, and proven by the predecessors, so the abstraction holds."
+    },
+    {
+      "decision": "DOM overlay labels, not in-canvas text",
+      "rationale": "The same thing NASA's production code does; CJK stays legible, Obsidian's CSS variables can reskin it, and it is decoupled from any future rendering rework."
+    },
+    {
+      "decision": "Worker layout (M3): d3-force-3d entirely off the main thread, coordinates ping-ponged back through transferable double buffers",
+      "rationale": "It makes \"editing a note while the layout runs is not janky\" an architectural guarantee rather than something that happens to be fast enough.  All the main thread has left is one memcpy of about 38KB per frame."
+    }
+  ],
+  "architecture": {
+    "size": "31 TypeScript files, about 4,040 lines",
+    "composition_rule": "A strict dependency direction: the data / settings / theme / quality layers know nothing of three.js; the layout / render layers know nothing of Obsidian; GraphController is the single omniscient assembly point.",
+    "module_map": {
+      "data/": "GraphStore (the only reader of metadataCache), buildGraph (pure, unit-testable: dedup / degree / orphan filter / node cap), seed (a deterministic seed layout)",
+      "layout/": "the LayoutEngine interface + MainThreadForceLayout + WorkerForceLayout + forceWorker (the worker entry)",
+      "render/": "AggregateRenderer (the core), shaders (the glowing-orb GLSL), starfield (with the Twinkler), palette, presets (deep-space / daybreak tokens), stylePresets (galaxy / nebula / minimal / fireworks), colorThemes (6 palettes taken from brands)",
+      "interactions/": "CameraDirector (flight / cruise / orbit-on-arrival / pan)",
+      "overlay/": "ControlPanel (the collapsible-section panel), OverlayManager (DOM labels + cards), Slider (a Lightroom-style slider)",
+      "view/": "GalaxyView (the ItemView lifecycle), GraphController (the assembly point), SearchModal",
+      "quality/": "tiers (the high / low / mobile presets)",
+      "settings.ts": "GalaxySettings + persistence + a defensive merge against dirty data"
+    },
+    "key_interfaces": [
+      "LayoutEngine (init/step/isSettled/reheat/updateParams/dispose + ticks)",
+      "AggregateRenderer (setData/applyTokens/applyTier/setFocus/playReveal/dispose)"
+    ]
+  },
+  "milestone_timeline": [
+    {
+      "id": "M0",
+      "name": "A performance spike on real data",
+      "date": "2026-06-12",
+      "what": "A throwaway-quality spike: stock 3d-force-graph + the real vault's data + Stats + four benchmark scenarios (S1 orbit after settling / S2 cold-layout longtasks / S3 including unresolved / S4 the leak canary).",
+      "gate": "G0, with the 45/30 fps red/amber/green criteria fixed in advance.",
+      "outcome": "S1 came in at 16.2 fps —— red.  Per the plan: aggregate rendering moved from M3 up to M1 and started immediately.  This was not a crisis but a branch already in the plan.  Three hours reproduced the predecessors' wall.  It also measured the vault's real size: 3,225 nodes / 19.5k edges.",
+      "decision_philosophy": "Every milestone is gated on pass/fail numbers fixed beforehand, so a bad result is a branch that was already written down rather than an emergency."
+    },
+    {
+      "id": "M1",
+      "name": "The aggregate renderer",
+      "date": "2026-06-12",
+      "what": "Every node in one draw call and every link in one; the 3d-force-graph runtime dropped; the layout put on a budget (one tick per frame).",
+      "outcome": "16 → 60 fps (vsync-capped), 22,000 → 19 draw calls.  A 61-second freeze during cold layout became a 5-second galaxy-forming animation (the wait turned into an opening act).  Gate G1 was the morale demo.",
+      "war_story": "The S4 leak test's first reading of +181MB tripped the red light; two consecutive controlled runs proved it was GC lag rather than a real leak (the second run's starting heap was *lower* than the first's).  With the measurement corrected the verdict was −1.0MB.  The lesson went into the code: a real leak is a starting heap that keeps rising across runs; a single run's delta means nothing."
+    },
+    {
+      "id": "M1.5",
+      "name": "The control panel",
+      "date": "2026-06-12",
+      "feedback_trigger": "Two reactions from Rick after M1: the bloom is so bright the structure inside is lost; the controls are too thin, the physics parameters should be playable.",
+      "what": "Bloom (strength / spread / threshold) + physics (repulsion / link distance / link strength / centring, reheating live as you drag) + appearance sliders, every parameter persisted.",
+      "key_fix": "Raising the default bloom threshold from 0.1 to 0.18 is what solved \"the structure is lost\" —— only bright cores and bright stars cross the line and glow, so the web of links inside is no longer drowned."
+    },
+    {
+      "id": "M2",
+      "name": "Freedom of movement + the four-piece set + two visual directions",
+      "date": "2026-06-12",
+      "feedback_trigger": "Three from Rick: the sliders feel undesigned (they want the default centred and the limits visible); you can only drag around a single node, it should move forward/back and side to side like an FPS or Google Earth.",
+      "what": [
+        "Lightroom-style sliders: the default anchored at the track's geometric centre, a centre notch, the limit values at both ends, double-click to return to the default",
+        "3D freedom of movement: WASD/QE flight (speed adapting to distance, Shift to accelerate), right-drag / ⌘+left-drag to pan, F to fly to the selection, R for the overview, ESC to cancel",
+        "The four-piece set: importing the nine real colour groups from graph.json, fuzzy search + flight, DOM overlays (hub / hover labels + the selection card), focus mode (non-neighbours fade, the selected links highlight)",
+        "Two visual directions: A deep space (always dark) / B follows the theme (light = the \"daybreak drafting room\", an ink-on-paper scheme)",
+        "A warm-start coordinate cache + a 3.2s pull-out opening shot"
+      ]
+    },
+    {
+      "id": "M2.5",
+      "name": "A polishing round (6 pieces of feedback)",
+      "date": "2026-06-12",
+      "feedback_trigger": "Six from Rick: link opacity should reach 0, daybreak's links need another colour; some classic style presets, and could the galaxy be flat; orbit immediately on arriving at a node, sweeping the dense side first; make the cruise parameterised; simplify the panel's information architecture; a bug where the card is covered by text; ⌘/Ctrl pan does nothing on a Mac.",
+      "what": [
+        "Style presets: Galaxy (a flat disc, the new default) / Nebula / Minimal / Fireworks",
+        "The flat galaxy comes from flatten —— an extra centring force acting only on Y (natural attraction and repulsion cannot make a disc, so this extra force is necessary)",
+        "Orbit on arrival, sweeping first through the hemisphere holding the neighbours' centre of mass (4 of 5 links point south → sweep south first)",
+        "Panel v3: what is used often on top, the rest in collapsible sections, so the first screen is spare",
+        "The card's z-index fixed so it sits on top"
+      ],
+      "root_cause_find": "The root cause of \"⌘/Ctrl drag does nothing\" was not the trackpad —— macOS commandeers Ctrl+click as its own right-click emulation, so the event never reaches the plugin.  Pan now has three channels: ⌘ / Shift / right button."
+    },
+    {
+      "id": "M2.6",
+      "name": "Colour themes + details of the experience (6 pieces of feedback)",
+      "date": "2026-06-13",
+      "feedback_trigger": "Six from Rick: give me some actual colour settings (borrow boldly from brands) rather than only a shuffle; a recentre control; the distant stars should twinkle now and then; play a galaxy-unfolding animation when opening or recentring; a switch for showing orphan notes; size the nodes by how much a document holds.",
+      "what": [
+        "Six colour themes, chosen for how they read on black: Hubble Deep Field / TikTok Neon / Sunset Film / Cyber City / The Matrix / Aurora",
+        "A recentre button (clears the selection, returns to the overview, cruises on arrival — it answers \"which node am I even orbiting\")",
+        "Twinkling bright stars —— the taste is in the rules: only the brightest 3% are real stars that twinkle, at most one at a time, at Poisson-random intervals with a 1.6s sine envelope (the atmospheric scintillation of a real night sky, not Christmas lights), and a slider turns it off",
+        "The genesis animation: nodes bloom outward from the centre in waves by radius, reusing the warm-start coordinates so nothing has to be precomputed; it plays on open and there is a button for it",
+        "The orphan-node switch (with the edge index rebuilt)",
+        "Three node-size modes: link count / document size (cube-rooted to compress the long tail) / uniform"
+      ]
+    },
+    {
+      "id": "M3",
+      "name": "Performance hardening: the worker layout",
+      "date": "2026-06-13",
+      "what": "WorkerForceLayout —— d3-force-3d entirely off the main thread (an esbuild inline-worker plugin bundles the worker into IIFE text → a Blob URL); coordinates ping-pong back through transferable double buffers with no copy; it falls back to the main thread if creation fails.",
+      "outcome": "Cold layout's main-thread blocking went from 61s to 0ms (zero longtasks).  \"Editing a note while the layout runs is not janky\" is an architectural guarantee from here on.",
+      "war_story": "Testing on a real machine caught the camera flying inside a cluster and dropping to 8fps —— a screen full of huge glowing sprites blows out GPU fill rate.  Fixed by clamping the sprite size with uMaxPoint=110dp."
+    },
+    {
+      "id": "M4",
+      "name": "Three quality tiers for mobile",
+      "date": "2026-06-13",
+      "what": [
+        "Three presets: high (everything) / low (thinned) / mobile",
+        "The mobile tier: bloom off (the shader's hot core keeps about 80% of the look), a node cap of 1500 (the top N by degree, which measurement shows keeps 94% of the link quality), a link cap of 12k, the card becomes a bottom sheet, tap only and no hover, pixelRatio ≤ 1.5",
+        "The FPS watchdog: on auto, three consecutive samples under 30fps after settling drop one tier, one way only (it never climbs back within a session, which would oscillate)",
+        "Recovering from a lost WebGL context: a mask + a single rebuild of everything (an Electron GPU reset and iOS reclaiming memory both come through here)"
+      ],
+      "install": "The plugin was installed into a real iCloud vault and tested on an iPhone through the sync.",
+      "real_device_result": "Rick measured 61fps and 6 draw calls on his iPhone, with the 1500-node cap taking effect exactly as designed; smooth throughout."
+    },
+    {
+      "id": "M4.1",
+      "name": "The mobile card gets out of the way (found testing on an iPhone)",
+      "date": "2026-06-13",
+      "feedback_trigger": "Rick found on his iPhone that the selected node's bottom card overlaps the system's bottom bar.  He asked for it to adapt, so that \"hard-coding it upward doesn't leave a gap on builds with no bottom bar\".",
+      "research": "Reading the Obsidian app bundle's stylesheet confirmed it: the bottom bar's class is .mobile-navbar, no height variable is exposed officially, and on a tablet, with it hidden, or on some Android variants it may not exist at all.",
+      "solution": "Measure it at runtime: when the card appears, measure how many pixels the navbar and the canvas actually overlap, write that into a CSS variable, and take whichever is larger, it or safe-area-inset-bottom.  With no navbar the measurement is 0, so no gap appears by construction."
+    },
+    {
+      "id": "M5",
+      "name": "Getting ready to release",
+      "date": "2026-06-13~15",
+      "what": [
+        "The __GALAXY_DEV__ esbuild define as a gate: a store build strips every development-time benchmark command (measured at zero residue in prod) while a dev build keeps them",
+        "MIT LICENSE + an English README (the store's shopfront) + a Chinese README",
+        "A GitHub Actions release CI: pushing a tag runs lint + test + build automatically and attaches main.js / manifest.json / styles.css",
+        "The official review's self-check passes: no innerHTML, no network requests, no telemetry, no styles injected from JS, and a compliant plugin id (it does not contain \"obsidian\")"
+      ]
+    }
+  ],
+  "benchmark_evolution": {
+    "note": "Three generations compared on the same machine and the same library (Rick's Mac + the real vault, 3,225 nodes / 19,337 edges).",
+    "table": [
+      {
+        "scenario": "S1 fps orbiting after settling (with bloom)",
+        "M0_stock": "16.2",
+        "M1_aggregate": "60.0",
+        "M3_worker": "60.0 (p95 17.7ms)"
+      },
+      {
+        "scenario": "S2 main-thread blocking during cold layout",
+        "M0_stock": "61s saturated (60.7s blocked, longest single block 860ms)",
+        "M1_aggregate": "5.2s (longest 64ms)",
+        "M3_worker": "5.8s (zero blocks, 0ms)"
+      },
+      {
+        "scenario": "S3 fps including unresolved (9,437 nodes)",
+        "M0_stock": "13.8",
+        "M1_aggregate": "60.0",
+        "M3_worker": "60.0"
+      },
+      {
+        "scenario": "draw calls per frame",
+        "M0_stock": "about 22,000",
+        "M1_aggregate": "19",
+        "M3_worker": "19"
+      },
+      {
+        "scenario": "S4 heap delta over 10 open/close cycles",
+        "M0_stock": "+13.7MB",
+        "M1_aggregate": "-1.0MB",
+        "M3_worker": "-3.7MB"
+      },
+      {
+        "scenario": "bundle",
+        "M0_stock": "1.3MB",
+        "M1_aggregate": "606KB",
+        "M3_worker": "665KB"
+      }
+    ]
+  },
+  "technical_war_stories": [
+    {
+      "title": "GC lag mistaken for a memory leak",
+      "story": "The leak canary's first reading of +181MB tripped the red light.  Two consecutive controlled runs found the second run's starting heap *lower* than the first's —— the cause is that d3 rebuilds the octree every tick, producing a flood of short-lived garbage, and a major GC never runs during the busy loop.  With the measurement corrected (wait 20s of idle for GC afterwards) the verdict was −1MB.  The methodology that settled out of it: a real leak is a starting heap that keeps rising across runs; a single run's delta means nothing."
+    },
+    {
+      "title": "The hubs blow out white",
+      "story": "About 20,000 edges under additive blending pile up into a white mass at a dense hub's core.  Switching to NormalBlending at 0.16 opacity with a bloom threshold of 0.1 pushes the thin lines back behind the nodes."
+    },
+    {
+      "title": "Fill rate collapses flying through a cluster",
+      "story": "Testing on a real machine, the camera flew inside a cluster and dropped to 8fps —— the GPU's point-size ceiling lets nearby sprites cover the screen and blow out fill rate.  Fixed by clamping the point size in the shader with uMaxPoint=110dp."
+    },
+    {
+      "title": "macOS commandeers Ctrl+click",
+      "story": "Rick reported that \"Ctrl+drag to pan does nothing\".  It turned out not to be the trackpad —— macOS treats Ctrl+click as its own right-click emulation, so the event never reaches the plugin at all.  Pan now has three channels: ⌘ / Shift / right button."
+    },
+    {
+      "title": "Natural forces cannot make a galactic disc",
+      "story": "Rick wanted a flat galaxy.  Natural attraction and repulsion only ever form a sphere; only an extra centring force acting on Y alone (flatten) presses the sphere into a rotating disc —— and it became a continuously adjustable slider."
+    },
+    {
+      "title": "Adapting to the mobile bottom bar",
+      "story": "The card overlapped .mobile-navbar.  Since no official height variable exists and the bar does not exist in some configurations, the overlap is measured in pixels at runtime instead; with no bar it measures 0 and no gap appears."
+    },
+    {
+      "title": "Inlining a worker with esbuild",
+      "story": "The plugin has to bundle into a single main.js, but it needs a Web Worker.  An esbuild plugin does it: an import prefixed 'worker:' is bundled separately into IIFE text, and at runtime the worker starts from a Blob URL."
+    }
+  ],
+  "visual_design_system": {
+    "nasa_recipe_applied": "The background is #000003 (nearly black rather than pure black, which bloom's falloff needs); a starfield of THREE.Points at three size tiers (3 draw calls in all); a node is a custom glowing-orb shader (a white-hot core through smoothstep plus a soft edge); links are thin, low-saturation, NormalBlending at 0.16; the post chain is RenderPass → UnrealBloomPass → OutputPass; ACES tone mapping.  No fog, no vignette, no grain.",
+    "two_visual_directions": {
+      "deep_space": "Always dark and cinematic, ignoring the app's theme (the deliberate contrast a video player makes)",
+      "theme_adaptive": "Dark shares the deep-space scene; light is a purpose-built \"daybreak drafting room\" —— warm paper #F6F4EF, motes of dust in place of stars, bloom off (glow on a light ground reads as haze), ink-disc nodes with a dark rim, pencil-line links, NoToneMapping.  Not the dark scheme brightened, but a second design."
+    },
+    "style_presets": "Galaxy (a flat disc, the default) / Nebula (a natural sphere) / Minimal (no bloom, structure only) / Fireworks (bloom turned up to show off) —— each is a matched set of bloom, physics and appearance parameters.",
+    "color_themes": "Hubble Deep Field (astrophotography's false colour) / TikTok Neon / Sunset Film (an IG gradient) / Cyber City (2077) / The Matrix (pure greens) / Aurora (Spotify green + ice blue) —— chosen for how they read against black space.  A non-commercial project, so brand colours are borrowed boldly.",
+    "camera_choreography": "The opening pulls out from inside the graph over 3.2s with bloom easing from 1.8× down to the configured value; clicking a node eases into a flight (offset 15° in azimuth so it is never head-on, easeInOutCubic); the idle cruise runs a 90s elevation period against a 60s radius period, two incommensurable cycles → the path never repeats (it feels like a spacecraft, not a turntable).",
+    "taste_details": "Only the brightest 3% of stars twinkle, at most one at a time, at Poisson intervals —— deliberately the occasional scintillation of the atmosphere rather than fairy lights.  This is what \"taste is in the details\" means here."
+  },
+  "interaction_design": {
+    "3d_freedom": "An orbit base (left-drag to circle) + FPS flight (WASD/QE, speed adapting to the distance from the target, Shift to accelerate) + Google-Earth-style pan (right / ⌘ / Shift + left drag) + shortcuts: F flies to the selection, R returns to the overview, ESC cancels.  Keys act only while the canvas has focus, so Obsidian's global shortcuts are never stolen.",
+    "slider_design": "Lightroom-style: the default anchored at the track's geometric centre (each half mapped piecewise-linearly), a notch marking the default, the min and max values always visible at the ends, a fill bar showing the departure from the default, double-click to return to it.",
+    "selection_flow": "Click a node → the camera flies there → on arrival it orbits the node (sweeping the dense side of the neighbours first) → the card appears (title / a path colour dot / tags / in and out links / modified date / an async summary / open the note / focus) → focus mode fades the non-neighbours and highlights the selected links.",
+    "search": "Obsidian's own SuggestModal with fuzzy search; an empty query offers the top 20 hubs as a \"tour of the constellations\", and selecting one flies there."
+  },
+  "performance_engineering": {
+    "the_breakthrough": "Aggregate rendering —— the predecessors' roughly 22,000 per-object draw calls compressed to 19 (all nodes in 1×Points + all links in 1×LineSegments + the starfield in 3×Points).  One decision solved both the performance and the NASA look.",
+    "worker_layout": "d3-force-3d entirely off the main thread, ping-ponged through transferable double buffers with no copy, leaving the main thread a 38KB memcpy per frame; the worker batches ticks at ≤12ms per batch.",
+    "budget_paced_layout": "The layout runs exactly one tick per frame —— 300 ticks at 60fps is about 5 seconds to form, which turns \"frozen for 61 seconds\" into an opening animation.",
+    "mobile_caps": "A node cap of 1500 (the top N by degree, keeping 94% of the link quality) + a link cap of 12k (by the lower endpoint degree), with the index rebuilt, and unit tests over both.",
+    "leak_discipline": "onClose is a complete teardown contract (the WebGL context / worker.terminate / the events / forceContextLoss), and the leak canary runs at every milestone.",
+    "fill_rate_clamp": "uMaxPoint clamps the sprite size, fixing the fill-rate bottleneck when flying through a cluster."
+  },
+  "methodology_meta_story": {
+    "headline": "The project is itself a complete run of the \"an AI agent leads the engineering, a product manager iterates on the visuals\" model.",
+    "upfront_diligence": "Before a line of code: five parallel research tracks and three parallel design tracks from different angles (architecture / visual / risk), producing a gated implementation plan —— rather than working it out while writing.",
+    "benchmark_gated_milestones": "Every milestone has a decision gate whose pass/fail numbers were fixed beforehand (G0's 45/30 fps red/amber/green).  When G0 came out red, a three-hour spike triggered the pre-written \"pull aggregate rendering forward\" branch —— a bad result was a planned turn, not firefighting.",
+    "real_device_loop": "The AI drove a real Obsidian through computer use: opening the dev vault, running the benchmark commands, reading the result JSON, verifying with screenshots; Rick did the final acceptance on his own iPhone.",
+    "human_ai_division": "The decisions and the aesthetic rulings were Rick's (watch the running build, react, set direction); the technical research, the architectural judgement, the implementation and the testing were the AI's.  Rounds of \"the PM reacts to the artifact → the AI turns that into an implementation\" were the engine that moved the project (M1.5, M2, M2.5, M2.6 and M4.1 are all feedback-driven rounds).",
+    "documentation_discipline": "WORKLOG.md was kept throughout (a session-by-session record in inverted-pyramid form), alongside docs/design/ (the architecture, visual and risk design documents) and READMEs in English and Chinese; decisions and rejected alternatives both leave a trace."
+  },
+  "final_tech_stack": {
+    "runtime": "three.js 0.184 (WebGLRenderer) + d3-force-3d 3.0.6 (inside a Web Worker)",
+    "removed_from_runtime": "3d-force-graph (used to get started at M0, removed from the runtime entirely after M1; there is no import left in src)",
+    "labels": "DOM overlays (three-spritetext is kept only as a spare)",
+    "build": "esbuild 0.25 (a single 665KB main.js, with the inline-worker plugin and the __GALAXY_DEV__ define)",
+    "lang_test": "TypeScript 5.8 + vitest (8 unit tests over the pure buildGraph: dedup / degree / orphan filter / node cap / fileSize)",
+    "lint": "eslint + eslint-plugin-obsidianmd (the store's compliance rules, from the first commit)",
+    "distribution": "GitHub Actions tag → release → BRAT beta → the community store portal"
+  },
+  "quantitative_facts_for_writer": [
+    "4 days (2026-06-12 to 06-15), 14 commits",
+    "31 TypeScript files, about 4,040 lines of code",
+    "The real vault: 3,225 notes / about 19,500 live backlinks",
+    "Frame rate: 16.2 → 60 fps (vsync-capped)",
+    "Draw calls: about 22,000 → 19",
+    "Main-thread blocking during cold layout: 61 seconds → 0 milliseconds",
+    "Bundle: 1.3MB → 665KB",
+    "Mobile: a node cap of 1,500 (keeping 94% of the link quality), about 80% of the look retained with bloom off, 61fps measured on an iPhone",
+    "All four comparable plugins on the market are 10+ months unmaintained and all die of per-object rendering",
+    "6 colour themes, 4 style presets, 2 visual directions, 8 unit tests"
+  ],
+  "distinctive_angles_raw": [
+    "Where performance and beauty converge: the wall that killed the predecessors (per-object rendering) came down to a single decision — aggregate rendering — that is at once the performance fix and the source of the NASA glow.",
+    "Reverse-engineering what killed the competition: before touching the code, the shared cause of death across four predecessors was diagnosed (including the author's own words, 'I don't know how to fix'), and the architecture was designed as a defence against that wall.",
+    "A real teardown of NASA Eyes: not imitating the look but grepping its production bundle to confirm the three.js version and every ingredient of the effect.",
+    "The discipline of decision gates: G0 coming out red was a pre-written branch triggered by a three-hour spike, not a crisis —— risk moved up front and made a quantifiable go/no-go.",
+    "A sample of PM × AI collaboration: a product manager who writes no code drove, through rounds of visual feedback on the running artifact, an open-source plugin faster than every predecessor.",
+    "Results you can count: 16→60fps, 22k→19 draw calls, 61s→0ms blocked, all measured on the same machine and library, with three generations on the record.",
+    "Taste that lands in the details: the Poisson rhythm of the twinkling stars, the extra Y-axis force a flat galaxy needs, the ink-on-paper daybreak drafting room —— what \"looking good is productivity\" actually cashes out to."
+  ]
+}

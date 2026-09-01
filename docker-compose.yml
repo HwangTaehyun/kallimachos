@@ -1,0 +1,168 @@
+# kallimachos — the production composition.
+#
+# Attaching a domain
+#   nginx-proxy watches the VIRTUAL_HOST label and routes on its own.  Not having to touch
+#   an nginx config to add a service is the whole point of this combination.
+#   For TLS, bring acme-companion along with `--profile tls`.
+#
+# Where the data lives
+#   The knowledge DB (~/.kal) and the vault **live on the host and are mounted.**  They are
+#   not wrapped in volumes because both outlive the container and host applications such as
+#   Obsidian write the same files at the same time.  The container is a tool running on top.
+#
+# Development
+#   docker-compose.override.yml is layered on automatically and turns web into a vite dev server.
+#   To leave the override out in production:  docker compose -f docker-compose.yml up -d
+
+name: kallimachos
+
+x-common: &common
+  restart: unless-stopped
+  # A run log reaches tens of thousands of lines.  Docker's default is unlimited and eats the disk.
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  api:
+    <<: *common
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    # To write into the mounted ~/.kal it has to match the host uid.  It uses .env's UID/GID.
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      KAL_ADDR: ":8080"
+      KAL_SRC: /app/src
+      KAL_PYTHON: /opt/venv/bin/python
+      KAL_HOME: /data/kal
+      KAL_PATH: /data/kal/db
+      # Inside the container the vault is /vault.  Without this the pipeline looks for the
+      # host's absolute path, fails, and **treats every document as deleted** (measured).
+      KAL_VAULT: /vault
+      #  Read by the Host allowlist.  Without it the public name nginx forwards becomes a 403.
+      DOMAIN: "${DOMAIN:-}"
+      #  The host path of the mount's **source**.  Inside the container it is only visible as
+      #  /vault, so comparing against the `meta.vault_path` recorded in the DB (the path at
+      #  creation time) needs this.  Without it the screen cannot tell which vault built this DB.
+      KAL_VAULT_HOST: ${VAULT_DIR:?VAULT_DIR is not set —— set it with `just vault <path>`}
+      # The path inside the container is "/vault", so its basename is not the real vault name.
+      # This name goes into the galaxy view's obsidian://open?vault=... deep link.
+      KAL_VAULT_NAME: ${VAULT_NAME:?VAULT_NAME is not set —— `just vault <path>` sets it too}
+      KAL_ALIASES: /app/aliases.yml
+      KAL_HOMONYMS: /app/homonyms.yml
+      # Paths extraction must not send off the machine.  Colon-separated.
+      KAL_NO_LLM: "${KAL_NO_LLM:-}"
+      # Folders to leave out of indexing and transmission.  KAL_NO_LLM above is **per document**; this is **per folder**.
+      KAL_SKIP: "${KAL_SKIP:-}"
+      # The host's claude relay.  claude is not authenticated inside the container
+      # (on macOS the credentials are in the keychain), so LLM calls go to the host.
+      #   On the host:  just relay
+      # The relay **does not touch the DB** —— it takes a prompt and returns text, which
+      # keeps this container the single user of LanceDB (docs/STACK.md §6).
+      KAL_CLAUDE_RELAY: "${KAL_CLAUDE_RELAY:-}"
+      KAL_RELAY_TOKEN: "${KAL_RELAY_TOKEN:-}"
+      # ⚠ HOME has to be **writable**.  The image's /home/app is owned by uid 1000 but
+      #   the container runs as .env's UID (the host value) —— so /home/app could not
+      #   even be entered (drwx------ 1000).  Move it under the mounted data directory.
+      HOME: /data/kal/container-home
+    volumes:
+      - ${KAL_DIR:-~/.kal}:/data/kal
+      - ${VAULT_DIR:?VAULT_DIR is not set —— set it with `just vault <path>`}:/vault
+      # The claude CLI settings.  Read-only —— the container has no reason to edit host credentials.
+      #
+      # ⚠ **On macOS, mounting this does not bring the authentication with it.**  The
+      #   credentials are in the keychain.  So the LLM steps (extract, distill, cluster
+      #   labels) cannot run in the container.  The API checks **before** running and
+      #   blocks with a 412 (docs/STACK.md §6).  On a Linux host it is a file and works.
+      - ${CLAUDE_DIR:-~/.claude}:/data/kal/container-home/.claude:ro
+      # The alias files are edited by a person through the UI, so they have to be writable
+      - ./aliases.yml:/app/aliases.yml
+      - ./homonyms.yml:/app/homonyms.yml
+    expose: ["8080"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  web:
+    <<: *common
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # nginx-proxy routes on this value.  With no domain, attach directly through the ports below.
+      VIRTUAL_HOST: "${DOMAIN:-kallimachos.local}"
+      VIRTUAL_PORT: "80"
+      LETSENCRYPT_HOST: "${TLS_DOMAIN:-}"
+      LETSENCRYPT_EMAIL: "${TLS_EMAIL:-}"
+    ports:
+      # ⚠ Loopback, always.  There is no authentication (docs/STACK.md §7), so
+      #   opening 0.0.0.0 lets anyone on the same network run the pipeline,
+      #   edit the vault and wipe the DB.
+      # The default is 5173 —— .env.example, the override and the justfile all say that,
+      # and it is the address `just up` prints.  If only this said 8088, starting without
+      # a .env would not open on the address the user was given.
+      - "127.0.0.1:${WEB_PORT:-5173}:80"
+
+  # ── Domain routing ────────────────────────────────────────────────
+  # Not needed for a single service.  Turn it on to put several on one host, or for
+  # TLS:  docker compose --profile proxy up -d
+  proxy:
+    <<: *common
+    image: nginxproxy/nginx-proxy:1.7-alpine
+    profiles: ["proxy", "tls"]
+    ports:
+      # ⚠ The default is **loopback**.  The web behind this proxy has no authentication
+      #   (see the `web` ports block above) —— opening 0.0.0.0 lets anyone on the same
+      #   network run the pipeline, edit the vault and wipe the DB, and `VIRTUAL_HOST`
+      #   can be imitated with a Host header.  This used to be `"80:80"`, so this profile
+      #   walked straight around the loopback rule web was keeping.  docs/STACK.md §7 said
+      #   "compose binds to 127.0.0.1 only" —— false in the profile that same file offers.
+      #
+      #   To open it outwards, do it **deliberately**:  PROXY_BIND=0.0.0.0 docker compose …
+      #   And then authentication (forward-auth or similar) has to sit in front.
+      - "${PROXY_BIND:-127.0.0.1}:80:80"
+      - "${PROXY_BIND:-127.0.0.1}:443:443"
+    volumes:
+      # Needed to watch containers come up and go away.
+      # ⚠ `:ro` makes only the **socket file** read-only —— the Docker API calls
+      #   travelling over it are untouched.  This container effectively holds host
+      #   root.  To really reduce that, a socket-proxy has to sit in front.
+      #   (2026-08-25 deep review, security lens)
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - certs:/etc/nginx/certs
+      - vhost:/etc/nginx/vhost.d
+      - html:/usr/share/nginx/html
+      - ./ops/nginx/sse.conf:/etc/nginx/conf.d/sse.conf:ro
+
+  acme:
+    <<: *common
+    image: nginxproxy/acme-companion:2.6
+    profiles: ["tls"]
+    depends_on: [proxy]
+    environment:
+      DEFAULT_EMAIL: "${TLS_EMAIL:-}"
+      NGINX_PROXY_CONTAINER: kallimachos-proxy-1
+    volumes:
+      # ⚠ **The same exposure** as `proxy` —— `:ro` only makes the socket file
+      #   read-only; the Docker API calls travelling over it are untouched.  This
+      #   container effectively holds host root too.  Issuing a certificate means
+      #   watching containers, so it is needed, and it only comes up with `tls` on.
+      #   (2026-08-25 deep review —— written on the proxy side, left blank here)
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - certs:/etc/nginx/certs
+      - vhost:/etc/nginx/vhost.d
+      - html:/usr/share/nginx/html
+      - acme:/etc/acme.sh
+
+volumes:
+  certs:
+  vhost:
+  html:
+  acme:

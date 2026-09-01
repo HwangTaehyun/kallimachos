@@ -1,0 +1,10 @@
+{
+	"id": "kal-galaxy",
+	"name": "Kallimachos Galaxy",
+	"version": "0.6.1",
+	"minAppVersion": "1.8.7",
+	"description": "Cinematic 3D graph view of your vault — fly through your notes like NASA Eyes. Fork of Rick's Galaxy View, extended for Kallimachos (entity/relation graph from kal-graph.json).",
+	"author": "Taehyun Hwang (fork of Galaxy View by Rick)",
+	"isDesktopOnly": false,
+	"authorUrl": "https://github.com/HwangTaehyun/kallimachos"
+}

@@ -1,0 +1,12 @@
+{
+	// For the web build only.  It resolves `obsidian` to the browser shim.
+	// The plugin build (tsconfig.json) keeps using the real obsidian types — mixing the two would
+	// let the plugin side use an API the shim lacks and still pass.
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"baseUrl": ".",
+		"paths": { "obsidian": ["./src/web/obsidian.ts"] }
+	},
+	"include": ["src/web/**/*.ts", "src/**/*.ts"],
+	"exclude": ["src/main.ts", "src/view/GalaxyView.ts", "src/settings/SettingsTab.ts", "src/bench/**", "tests/**"]
+}

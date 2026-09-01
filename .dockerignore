@@ -1,0 +1,27 @@
+# ⚠ .dockerignore, like .gitignore, **does not support end-of-line comments.**
+#   `plugin/   # a note` becomes one whole pattern and matches nothing.
+#   Four lines below really were that shape, and until it was fixed every build sent
+#   plugin/ (263MB), web/ (89MB) and **viewer/ and bench/, which hold real names**
+#   into the build context.  A comment must have its own line.
+
+# A separate repository (galaxy-view) · 263MB
+plugin/
+# The web UI uses its own Dockerfile
+web/
+# Generated output.  Real personal names are in it in the clear
+viewer/
+# Real names in the query set's gold labels
+bench/
+.git/
+.omc/
+.claude/
+.env
+.env.local
+**/node_modules/
+**/__pycache__/
+# Created by `go build` on the host (9.5MB) —— it must not enter the build context.
+#  ⚠ This line used to be `api/api          # …` —— the very shape the header above warns
+#     about, in the file that documents the trap.  Measured 2026-09-01 with two real builds
+#     of the same context: with the trailing comment the binary arrives (`-rw-r--r-- 3000000
+#     api`); with the comment on its own line the directory is empty (`total 8`).
+api/api

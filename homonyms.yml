@@ -1,0 +1,45 @@
+# **Homonym splits** a person confirmed —— the opposite direction to `aliases.yml`.
+#
+#   aliases.yml    several names  →  one entity        (joins)
+#   homonyms.yml   one name       →  several entities  (splits)
+#
+# Why it is needed
+#   `vault` is at least three things in this vault —— the Obsidian note store, 1Password's
+#   card vault, and "the protected data directory".  The shared name fuses them into one
+#   node, and then a degree-76 node **mixes entirely unrelated neighbours.**
+#   Ask search about 1Password and Obsidian's neighbours come along.
+#
+#   The summarising LLM already notices —— measured, 17 entities' descriptions say
+#   "refers to two distinct systems" themselves.  But that judgement stays **in prose** and
+#   never reaches the graph structure.  This is where it does.
+#
+# Why not automatic
+#   The same reason as `aliases.yml`.  Judging "are these two the same" by string or embedding
+#   does not reach the required precision.  A machine proposes candidates
+#   (`python src/homonym_suggest.py`) and **a person confirms.**  A wrong split is as bad as a wrong join.
+#
+# Format
+#   the name to split:
+#     - name: the new name       ← this is the name that appears in the graph and in search
+#       when: [cue1, cue2]       ← this sense applies when a fragment's text or document path holds one
+#     - name: …
+#       when: [...]
+#   Leaving the last entry's `when` empty sends **everything else** there (the default).
+#   With no default, a fragment matching nothing stays under the original name.
+#
+# Cues are matched **case-insensitively as substrings** against the fragment description plus the source document path.
+# The first match in order wins —— put narrower cues first.
+#
+# After editing, the graph has to be rebuilt for it to take effect:
+#   python src/refresh_kg.py --force
+#
+# To find candidates:
+#   python src/homonym_suggest.py
+
+#  ⚠ Below this line is **data, not prose** —— the cues are matched against the fragment
+#     text of a Korean vault, so translating them would stop every rule from matching.
+vault:
+  - name: 1Password vault
+    when: ["1password", "카드", "멤버", "결제"]
+  - name: Obsidian vault
+    when: ["obsidian", "second brain", "wiki", "노트", "마크다운"]

@@ -1,0 +1,58 @@
+#  kallimachos —— **the source of truth** for dependencies.
+#
+#  It used to be a single `requirements.txt`, with the Dockerfile layering a two-step trick on
+#  top: "install the CPU build of torch first, then -r requirements.txt".
+#  With the trick living only in the Dockerfile, **the host venv never got its benefit**, and
+#  the two could end up on different torches.  uv can move that into a declaration (index, below).
+
+[project]
+name = "kal"
+version = "0.1.0"
+description = "A personal knowledge DB —— it turns notes into chunks, vectors and a knowledge graph, and serves them over MCP"
+requires-python = ">=3.13"
+dependencies = [
+    #  What the pipeline actually imports.  Versions are pinned to what has been verified
+    #  —— LanceDB's API moves (0.21 deprecated cleanup_old_versions, for one).
+    "lancedb==0.37.1",
+    "pyarrow==25.0.1",
+    "tantivy==0.26.0",
+    "sentence-transformers==5.7.0",
+    "torch==2.13.0",
+    "numpy==2.5.2",
+    "scipy==1.18.0",
+    "networkx==3.6.1",
+    "PyYAML==6.0.3",
+    #  The MCP server (src/kal_mcp.py).  2.0 changed FastMCP to MCPServer
+    "mcp==2.0.0",
+    #  The setup wizard (src/init_tui.py).  rich comes along with textual ——
+    #  it used to rely on torch dragging it in **undeclared**.
+    "textual>=8.2.8",
+]
+
+[dependency-groups]
+dev = [
+    "textual-dev>=1.7",     # `textual console` —— the only practical way to debug a TUI
+]
+
+# ── torch, in its CPU build ────────────────────────────────────────────────
+#
+#  The default PyPI linux wheel is `torch==2.13.0+cu130` and drags in the CUDA runtime.
+#  We run on CPU only (measured: `torch.cuda.is_available()` == False), and yet
+#  `site-packages/nvidia` (2.9GB) and `triton` (652MB) came along.  3.5GB of a 6.53GB image
+#  was code that would never run, and it piled up as dangling layers on every rebuild until
+#  the Docker VM disk (117GB) was 100% full —— LanceDB could not create its /tmp spill and died (2026-08-21).
+#
+#  On macOS the PyPI wheel is already CPU-only, so this index is used **on linux alone**.
+#  Without the marker there is no wheel to fetch on macOS and the lock fails.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true          # this index is used only for the packages named below
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[tool.uv]
+#  This is **a collection of scripts**, not a library.  It is not built —— without saying so,
+#  uv warns "skipping project.scripts" on every run.
+package = false

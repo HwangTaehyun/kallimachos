@@ -1,0 +1,19 @@
+{
+  "name": "kallimachos",
+  "owner": {
+    "name": "Taehyun Hwang",
+    "url": "https://github.com/HwangTaehyun"
+  },
+  "metadata": {
+    "description": "A personal knowledge DB (Kallimachos) —— the tools.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "kal",
+      "source": "./",
+      "description": "Search a personal knowledge DB — retrieval over MCP, with the source and the timeline attached.",
+      "category": "knowledge"
+    }
+  ]
+}

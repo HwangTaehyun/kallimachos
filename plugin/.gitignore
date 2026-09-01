@@ -1,0 +1,15 @@
+node_modules/
+# The dependencies live in `.node_modules/` with a `node_modules` symlink —— this repository sits
+# inside an Obsidian vault, and Obsidian excludes only folders starting with `.` from its note scan
+# (before that, 653 .md files inside the dependencies were picked up as notes).
+# `node_modules/` (with the slash) filters **neither a symlink nor a dot folder**, so both are stated.
+.node_modules/
+node_modules
+main.js
+dist/
+dev-vault/
+.DS_Store
+*.log
+
+# oh-my-claudecode session state — made by a tool, not source
+.omc/
