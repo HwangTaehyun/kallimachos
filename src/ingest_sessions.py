@@ -177,7 +177,35 @@ def mask(text):
     return text, n
 
 
-def blocks_of(msg):
+#  ⚠ **A subagent's report reaches the parent as a `tool_result`, and this used to drop it.**
+#     Claude Code writes a subagent's own transcript to
+#     `<project>/<parent-uuid>/subagents/agent-*.jsonl`, which the ingest glob (`*/*.jsonl`)
+#     never reaches —— and the report it hands back lives in the parent as the `tool_result` of
+#     the `Task`/`Agent` call, which this function did not look at.  So the work vanished twice.
+#
+#     It cannot simply keep every `tool_result`: measured on one 45MB session, of 712 results
+#     **Bash was 254k characters and Read 377k** —— exactly the "command output dumps" the
+#     distillation prompt forbids.  `Agent` was 20 results and 27k characters.
+#
+#     The pairing is what makes it separable: a `tool_use` block carries `id`, and its
+#     `tool_result` carries `tool_use_id`.  Measured: **100% of results pair**.  So the result of
+#     an agent call can be kept while a file dump is dropped, with no guessing.
+AGENT_TOOLS = ("Task", "Agent")
+
+
+def _result_text(block):
+    """The readable body of a `tool_result` block."""
+    c = block.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "\n".join(x.get("text", "") for x in c
+                         if isinstance(x, dict) and x.get("type") == "text")
+    return ""
+
+
+def blocks_of(msg, agent_ids=()):
+    """Readable blocks of one message.  `agent_ids` are the tool_use ids of subagent calls."""
     c = (msg or {}).get("content")
     if isinstance(c, str):
         yield c
@@ -189,6 +217,12 @@ def blocks_of(msg):
                 elif b.get("type") == "tool_use":
                     # A tool call keeps only its intent (the full input is noise)
                     yield f"[tool:{b.get('name','?')}]"
+                elif b.get("type") == "tool_result" and b.get("tool_use_id") in agent_ids:
+                    #  A subagent's report —— the only tool_result kept.  It is a written answer
+                    #  to a question the parent asked, not a dump of a file or a command.
+                    txt = _result_text(b).strip()
+                    if txt:
+                        yield "[subagent report]\n" + txt
 
 
 def is_noise(t):
@@ -207,6 +241,10 @@ def parse_session(path):
     parts, seen = [], set()
     n_msg = 0
     first_ts = last_ts = None
+    #  ⚠ Collected as the file is read, **in order**.  A `tool_use` for a subagent always precedes
+    #     its `tool_result`, so a single forward pass is enough —— by the time the result arrives,
+    #     its id is already known.  Anything else's result stays dropped.
+    agent_ids = set()
     for ln in open(path, encoding="utf-8", errors="ignore"):
         try:
             r = json.loads(ln)
@@ -214,11 +252,17 @@ def parse_session(path):
             continue
         if r.get("type") not in ("user", "assistant"):
             continue
+        _c = (r.get("message") or {}).get("content")
+        if isinstance(_c, list):
+            for _b in _c:
+                if (isinstance(_b, dict) and _b.get("type") == "tool_use"
+                        and _b.get("name") in AGENT_TOOLS and _b.get("id")):
+                    agent_ids.add(_b["id"])
         ts = r.get("timestamp")
         if ts:
             first_ts = first_ts or ts
             last_ts = ts
-        for t in blocks_of(r.get("message")):
+        for t in blocks_of(r.get("message"), agent_ids):
             if is_noise(t):
                 continue
             h = hashlib.md5(t[:400].encode()).hexdigest()
@@ -291,6 +335,36 @@ def _selftest():
     assert not is_pipeline_call(
         f"**Me**: 필터를 어떻게 걸지\n\n**Claude**: `{_PM}` 를 프롬프트 앞에 붙입니다"), \
         "a conversation discussing the marker was dropped —— it must be at the START"
+
+    #  ── a subagent's report survives; a file dump does not ───────────────────────────────
+    #  Claude Code writes a subagent's transcript to a `subagents/` folder the ingest glob never
+    #  reaches, and hands the report back to the parent as the `tool_result` of the Task/Agent
+    #  call —— which `blocks_of` used to drop with every other tool result.  The work vanished twice.
+    #  Keeping *all* results is not the fix: measured on one 45MB session, Bash results were
+    #  254k characters and Read 377k, exactly the dumps the distillation prompt forbids.
+    _msg = {"content": [
+        {"type": "tool_use", "id": "toolu_agent", "name": "Task", "input": {}},
+        {"type": "tool_use", "id": "toolu_bash",  "name": "Bash", "input": {}},
+    ]}
+    _res = {"content": [
+        {"type": "tool_result", "tool_use_id": "toolu_agent", "content": "조사 결과 보고서"},
+        {"type": "tool_result", "tool_use_id": "toolu_bash",  "content": "total 48\ndrwxr-xr-x …"},
+    ]}
+    _ids = {b["id"] for b in _msg["content"] if b.get("name") in AGENT_TOOLS}
+    assert _ids == {"toolu_agent"}, "the Task/Agent call was not recognised"
+    _out = "\n".join(blocks_of(_res, _ids))
+    assert "조사 결과 보고서" in _out, "the subagent report was dropped"
+    assert "drwxr-xr-x" not in _out, "a command dump leaked in with the report"
+    #  and with no agent ids at all, nothing tool_result-shaped survives
+    assert "조사 결과 보고서" not in "\n".join(blocks_of(_res, set())), \
+        "a tool_result was kept without being paired to an agent call"
+    #  the list-of-blocks content shape must work too —— that is what the API actually sends
+    _res2 = {"content": [{"type": "tool_result", "tool_use_id": "toolu_agent",
+                          "content": [{"type": "text", "text": "블록 형태 보고서"}]}]}
+    assert "블록 형태 보고서" in "\n".join(blocks_of(_res2, _ids)), \
+        "a report delivered as a list of text blocks was dropped"
+    print("  ✅ subagent report kept, command dumps still dropped (paired by tool_use_id)")
+
 
     print("  ✅ pipeline self-calls filtered —— marker · historical openings · a conversation "
           "quoting one survives")
