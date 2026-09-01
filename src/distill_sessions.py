@@ -63,11 +63,24 @@ OUT = os.environ.get("KAL_DISTILLED", os.path.join(KAL_HOME, "distilled"))      
 # 6 rows (2026-08-19).  Change the output path and the by-products have to follow it.
 REVIEW = os.path.join(OUT, "_distill_review.tsv")
 DONE = os.path.join(OUT, ".done")   # completion markers, for resuming
-MODEL = "haiku"
+#  ⚠ **haiku could not do this job, and the evidence is in the corpus.**  Measured 2026-09-02:
+#     96% of sessions (561 of 586) fit in a **single** window, so the model saw a claim and its
+#     later retraction in one call —— and still emitted the retracted claim as a document.  One
+#     session in this project alone carried five statements that were made confidently and then
+#     overturned in the same conversation.  Telling a superseded claim from a standing one is a
+#     reading-comprehension task over a long transcript, which is exactly where a small model
+#     fails quietly: it produces a well-formed document that is wrong.
+#
+#     The windowing problem is real but small (4%).  The model was the main cause.
+MODEL = os.environ.get("KAL_DISTILL_MODEL", "opus")
 WINDOW = 55_000            # the most characters put into one call
 MAX_PARTS = 8              # even a long session splits into at most 8 — beyond that, head and tail first
 SPLIT = "---8<---"         # the separator the LLM uses when splitting topics
-DOC_TYPES = ("plan", "analysis", "design", "discussion", "decision", "retro", "investigation")
+#  `correction` is new (2026-09-02).  A conversation that reached a wrong conclusion and then
+#  overturned it produces knowledge the vault had **no type for** —— so it was either dropped
+#  or, worse, filed as a "decision" in its pre-correction form.
+DOC_TYPES = ("plan", "analysis", "design", "discussion", "decision", "retro",
+             "investigation", "correction")
 
 # Projects to exclude (a substring match on session_project).  Removed from the corpus at the user's request.
 # The original transcripts are untouched in ~/.kal/sessions/session_docs.json, so undoing a
@@ -82,44 +95,112 @@ EXCLUDE_PROJECTS = ("quad",)
 #
 #     Already-distilled sessions carry a `.done` marker and are not re-run, so nothing existing
 #     is rewritten by this.
-PROMPT = """You distil Claude Code conversation logs into raw/conversations/ documents for a
-personal wiki.  The rules below are the wiki's ingest protocol; breaking them means the document is rejected.
+#  ⚠ **The rule this prompt was missing.**  It used to say only "keep conclusions and decisions",
+#     which does not tell the model that a claim overturned later in the same conversation is not
+#     a conclusion.  A conversation is a **thinking process**: wrong intermediate states belong in
+#     it, and they are normal.  A document must carry the state the conversation *ended at*.
+#
+#     Measured on the corpus this replaces: statements made confidently and then overturned in the
+#     same session were shipped as standing documents, indistinguishable from correct ones.  Once
+#     indexed, a wrong sentence and a right one carry the same weight, and the reader cannot tell.
+#
+#     The second half matters as much: **a correction is knowledge, not noise.**  "X was believed,
+#     then Y overturned it, and here is why" is often the most valuable thing in a session ——
+#     it stops the same mistake being made again.  It gets its own doc_type.
+PROMPT = """You distil a Claude Code conversation into documents for a personal wiki.
 
-Forbidden
-- Do not carry over speech transcripts such as "Me:" / "Claude:".
-- Do not carry over tool-call logs, command output dumps, or progress narration.
-- Do not mix different topics into one document.
+A conversation is a thinking process.  It contains claims that were later corrected, paths that
+were abandoned, and guesses that were checked and found wrong.  **That is normal and expected.**
+Your job is to emit only what the conversation **arrived at**, plus the corrections themselves.
 
-Required
-- Keep conclusions and decisions only.  Include process only as far as the conclusion needs it.
-- State the rationale for each decision — in the form "chose A over B.  Reason: …".
-- One top-level summary paragraph at the very top (3–5 sentences).  Reading only that should say what was decided.
-- Keep concrete numbers, paths and commands.  That is where this document's value is.
+## The one rule that matters
+
+**Later beats earlier.**  If something is asserted and then contradicted, retracted, or
+superseded anywhere later in the conversation, the later state is the truth.  Never emit the
+earlier state as though it still stands.
+
+Read the whole conversation before writing anything.  A claim near the top may be overturned near
+the bottom; a document written from the top alone is confidently wrong.
+
+## What to emit
+
+Emit a document only for a thread that **closed** —— it reached a conclusion, a decision, or a
+verified fact, and nothing later in the conversation undoes it.
+
+Signals that a thread closed:
+- the user confirmed it ("맞아", "좋아", "됐다", "확인했어", "works", "that's right", "ship it")
+- a check was run and passed, and the conversation moved on
+- a decision was made and then acted on
+
+Signals that a thread did **not** close —— emit nothing for these:
+- it was still being debugged when the conversation ended
+- the user pushed back and the answer never settled
+- it was a plan that was never executed or confirmed
+- an error was reported and no fix was verified
+
+**When a claim was corrected, emit the correction as its own document** with
+`doc_type: correction`.  It must say three things:
+1. what was believed, stated plainly
+2. what overturned it —— the measurement, the file, the error, the user's objection
+3. why the first belief was reasonable, and what makes the second one better evidence
+
+A correction document is often the single most valuable thing in a session: it stops the same
+mistake being repeated.  Do not soften it into "we explored options".
+
+## Forbidden
+
+- Speech transcripts ("Me:" / "Claude:")
+- Tool-call logs, command output dumps, progress narration
+- Mixing unrelated topics into one document
+- Emitting a superseded claim as though it stands
+- Inventing confidence the conversation did not have.  If it ended uncertain, emit nothing.
+
+## Required
+
+- Rationale for each decision, as "chose A over B.  Reason: …"
+- One summary paragraph at the very top (3–5 sentences).  Reading only that must say what was
+  concluded —— and, for a correction, what was wrong.
+- Concrete numbers, paths and commands.  That is where the value is.
 - Write in the language of the conversation.
 
-Output format — exactly this format, nothing else:
+Output format —— exactly this, nothing else:
 
 <<<DOC>>>
-title: <a specific title.  Do not include a date or session ID>
-doc_type: <one of plan|analysis|design|discussion|decision|retro|investigation>
-why_captured: <one sentence on why a future me would look this up again>
-tags: <3–6 comma-separated lowercase kebab-case tags>
+title: <specific.  No date, no session ID>
+doc_type: <plan|analysis|design|discussion|decision|retro|investigation|correction>
+why_captured: <one sentence: why a future me would look this up again>
+tags: <3-6 comma-separated lowercase kebab-case tags>
 ---
-<body markdown.  Use ## sections.  400–1500 words.>
+<body markdown.  ## sections.  400-1500 words.>
 <<<END>>>
 
-If the conversation covered several topics, repeat the block above once per topic (at most 3).
-If there is no content, or only small talk, output exactly the single word SKIP.
+Repeat the block once per closed thread, at most 3.
+If nothing closed —— only small talk, or everything is still open —— output exactly: SKIP
 
 --- conversation log begins ---
 {body}
 --- conversation log ends ---"""
 
-MERGE = """Below are documents distilled separately from pieces of one long Claude Code conversation.
-They are the same conversation, so merge them into one, remove duplication and put them in time order.
-If the topics are plainly different, split by topic, but into at most 3.
 
-The output format is the same <<<DOC>>> … <<<END>>> blocks as the input.  Nothing else.
+#  ⚠ The merge used to say "put them in time order", which is precisely the wrong instruction:
+#     it preserves both a claim and its retraction as neighbours, in order, as if both stood.
+#     Ordering is not reconciling.  Only 4% of sessions are windowed, but for those the merge is
+#     the **only** place where a claim in window 1 can meet its correction in window 5 —— the
+#     windows are distilled by independent calls that never see each other's input.
+MERGE = """Below are documents distilled separately from consecutive pieces of ONE conversation.
+They are in order: the first came from the earliest part, the last from the latest.
+
+Because they were written independently, an earlier piece may assert something that a later piece
+corrects.  **Later beats earlier.**
+
+Reconcile them, do not merely order them:
+- If a later document contradicts, retracts or supersedes an earlier one, **delete the earlier
+  version** and keep one document stating the final position.  Where the change is instructive,
+  make it `doc_type: correction` and say what was believed, what overturned it, and why.
+- If they simply cover different things, keep them separate.
+- Remove duplication.
+
+Output the same <<<DOC>>> … <<<END>>> blocks, at most 3.  Nothing else.
 
 {body}"""
 
@@ -380,6 +461,33 @@ def _selftest():
     #  and a run that was bad early but recovered must be allowed to finish
     assert not should_abort(["fail"] * 100 + ["ok"] * 60), \
         "a run that recovered was stopped on its history"
+
+    #  ── the prompt contract ──────────────────────────────────────────────────────────────
+    #  These are not style preferences.  Each line pins a rule whose absence produced a measured
+    #  defect: documents that shipped a claim the same conversation had already overturned.
+    #  A prompt is code with no type checker, so the contract is asserted here instead.
+    for _need, _why in (
+        ("Later beats earlier", "the supersession rule —— the whole point of the rewrite"),
+        ("Read the whole conversation before writing", "a top-down read ships the pre-correction claim"),
+        ("closed", "a document may only come from a thread that resolved"),
+        ("doc_type: correction", "a correction must be emittable as its own document"),
+        ("what overturned it", "a correction must name its evidence, not just say 'we revised'"),
+        ("If it ended uncertain, emit nothing", "the guard against inventing confidence"),
+        ("SKIP", "there has to be a way to emit nothing"),
+    ):
+        assert _need in PROMPT, f"PROMPT lost: {_need!r} —— {_why}"
+    #  the merge must reconcile, not order.  "time order" was the original instruction and it is
+    #  exactly wrong: it keeps a claim and its retraction as neighbours, both apparently standing.
+    assert "Later beats earlier" in MERGE, "MERGE lost the supersession rule"
+    assert "delete the earlier" in MERGE, "MERGE no longer removes the superseded version"
+    assert "time order" not in MERGE, \
+        "MERGE went back to ordering —— ordering is not reconciling"
+    #  `correction` must be an offered type, or the model cannot use it even when told to
+    assert "correction" in DOC_TYPES, "correction is not in the accepted doc_type vocabulary"
+    assert all(f"|{d}|" in PROMPT or f"<{d}|" in PROMPT or f"|{d}>" in PROMPT
+               for d in ("plan", "correction")), \
+        "the prompt's doc_type list drifted from DOC_TYPES"
+    print("  ✅ prompt contract —— supersession · closed threads only · correction is a document")
 
     print("  ✅ early abort —— a trailing window, so a deteriorating run is caught while a\n          recovered one finishes")
     print("  ✅ distill_sessions —— slug collisions · a partial window failure is not finalised")
