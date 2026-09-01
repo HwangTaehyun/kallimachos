@@ -466,6 +466,30 @@ openwiki-index wiki=openwiki_dir:
     @echo "  indexing {{wiki}} → ~/.kal/db"
     @KAL_VAULT="{{wiki}}" {{py}} {{src}}/schema_v3.py
 
+#  ⚠ Switching the vault is **not** what `openwiki-index` does —— that override lives for one
+#     command.  Until this runs, the MCP server, the container and the web UI all still read the
+#     Obsidian vault while the DB holds the bundle, and the mismatch shows up as "search finds
+#     things the screen cannot open".  Reversible: `just vault "{{vault_dir}}"`.
+# Point the CLI · MCP · container at the bundle, so every surface reads what was indexed
+openwiki-adopt wiki=openwiki_dir:
+    @{{py}} {{src}}/set_vault.py "{{wiki}}"
+    @echo "  ↩ to go back:  just vault {{vault_dir}}"
+
+# Is the bundle behind its sources?  Counts only —— it runs nothing and changes nothing
+openwiki-status wiki=openwiki_dir vault=vault_dir:
+    @echo "  sources"
+    @printf "    claude sessions   %6s\n" "$(ls ~/.claude/projects/*/*.jsonl 2>/dev/null | wc -l | tr -d ' ')"
+    @printf "    codex rollouts    %6s\n" "$(find ~/.codex/sessions -name 'rollout-*.jsonl' 2>/dev/null | wc -l | tr -d ' ')"
+    @printf "    distilled         %6s\n" "$(ls ~/.kal/distilled/*.md 2>/dev/null | wc -l | tr -d ' ')"
+    @printf "    obsidian vault    %6s\n" "$(find '{{vault}}' -name '*.md' -not -path '*/.git/*' 2>/dev/null | wc -l | tr -d ' ')"
+    @echo "  bundle"
+    @printf "    pages             %6s\n" "$(find '{{wiki}}/personal' -name '*.md' -not -name index.md 2>/dev/null | wc -l | tr -d ' ')"
+    @printf "    manifest          %6s\n" "$({{py}} -c "import json;print(len(json.load(open('{{wiki}}/.page-manifest.json'))['pages']))" 2>/dev/null || echo '-')"
+    @printf "    uncommitted       %6s\n" "$(git -C '{{wiki}}' status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    @echo "  knowledge DB"
+    @{{py}} -c "import lancedb,os,collections;d=lancedb.connect(os.path.expanduser('~/.kal/db')).open_table('documents').search().limit(999999).to_list();c=collections.Counter(r['origin'] for r in d);print('    documents %6d   %s' % (len(d), dict(c)))" 2>/dev/null || echo "    (no db)"
+    @printf "    indexed vault     %s\n" "$({{py}} -c "import json,os;print(json.load(open(os.path.expanduser('~/.kal/config.json')))['vault'])" 2>/dev/null)"
+
 # What would be converted and indexed, without doing any of it
 openwiki-plan wiki=openwiki_dir vault=vault_dir:
     @{{py}} {{src}}/openwiki_emit.py --wiki "{{wiki}}" --dry-run

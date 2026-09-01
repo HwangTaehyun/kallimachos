@@ -89,7 +89,11 @@ SKIP_ANY = ("/.git/", "/.claude/", "/.obsidian/", "/node_modules/",
             # plans/*.md they are sent silently.  (adversarial review 2026-08-18, security lens)
             "/.omc/", "/.ouroboros/")
 
-SKIP_ROOT = ("kg",)          # export_graph --obsidian output.  Indexing it feeds KG→note→KG back
+#  ⚠ `references/` holds **vendored third-party documents** —— an openwiki bundle keeps the
+#     upstream OKF specification there so its citations verify locally (1,006 lines, Apache-2.0).
+#     Indexing it puts Google's spec vocabulary into a *personal* knowledge graph and pays LLM
+#     calls to do it.  Caught mid-run 2026-09-02: "sending to the LLM: … references 2".
+SKIP_ROOT = ("kg", "references")   # kg: export_graph --obsidian output, and indexing it feeds KG→note→KG back
 
 #  The user can exclude more folders.  Colon-separated, relative to the vault.
 #     KAL_SKIP="imported/slack-dm:private"
@@ -1455,6 +1459,9 @@ def _selftest():
         "the kg export escapes the guard once it is nested one level down"
     assert not is_skipped(os.path.join(_v, "personal", "kgx", "x.md")), \
         "a directory merely starting with kg was skipped"
+    #  the vendored upstream spec is not personal knowledge, and extracting it costs LLM calls
+    assert is_skipped(os.path.join(_v, "references", "okf-SPEC-v0.2.md")), \
+        "a vendored third-party specification is being indexed and extracted"
     assert not is_skipped(os.path.join(_v, "personal", "sessions", "claude", "x.md"))
     #  a generated index is navigation, and it outranked real documents when indexed
     assert is_skipped(os.path.join(_v, "personal", "sessions", "claude", "index.md")), \

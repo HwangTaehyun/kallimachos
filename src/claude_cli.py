@@ -118,11 +118,31 @@ def _run_relay(model, prompt, timeout, tools):
         return ""      # callers already treat an empty string as the retry signal
 
 
+#  ⚠ **Every call this pipeline makes is logged by Claude Code as a session**, in
+#     ~/.claude/projects/, indistinguishable from something a person typed —— same `userType`,
+#     same `isSidechain`, same shape.  Measured 2026-09-02: of 3,501 Claude sessions on this
+#     machine, ~2,000 were this pipeline talking to itself, and **153 of the 298 session
+#     documents already in the openwiki bundle had been distilled out of those calls.**  The
+#     knowledge base was over half full of summaries of our own prompts.
+#
+#     So every prompt carries a marker, and `ingest_sessions` drops any session containing it.
+#     An HTML comment is inert to the model and survives the log verbatim.  It is deliberately
+#     ugly and specific: a string this exact will not occur in someone's writing by accident.
+#
+#     ⚠ Do not "tidy" this away.  Removing it silently refills the corpus, and the only symptom
+#        is a knowledge base that slowly fills with documents about prompts.
+PIPELINE_MARK = "<!-- kal-pipeline-call: this prompt was sent by kal, not typed by a person -->"
+
+
 def run(model, prompt, timeout=180, tools=False):
     """The prompt goes **always through stdin**.  Returns stdout as a string (empty on failure).
 
     With KAL_CLAUDE_RELAY set it goes to the host relay; without it, the child is launched here.
+
+    The prompt is prefixed with `PIPELINE_MARK` so the session Claude Code writes for this call
+    can be told apart from a person's conversation.  See the note above the constant.
     """
+    prompt = PIPELINE_MARK + "\n" + prompt
     if RELAY:
         return _run_relay(model, prompt, timeout, tools)
     return _run_local(model, prompt, timeout, tools)

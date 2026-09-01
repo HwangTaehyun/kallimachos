@@ -73,6 +73,57 @@ SECRETS = [
         r"(?=[A-Za-z0-9_\-/+=]{16,})(?=[^\s\"']*(?-i:[A-Z0-9]))[A-Za-z0-9_\-/+=]{16,}")),
 ]
 
+#  ⚠ **This pipeline's own LLM calls are logged as sessions.**  Claude Code records every call
+#     made through `claude_cli.run()` in ~/.claude/projects/, with the same `userType`,
+#     `isSidechain` and file shape as a conversation a person had —— there is no structural way
+#     to tell them apart.  Measured 2026-09-02 on this machine:
+#
+#         3,501 Claude sessions on disk
+#         ~2,000 of them this pipeline talking to itself
+#         **153 of the 298 session documents already in the openwiki bundle** had been distilled
+#         out of those calls —— the knowledge base was over half full of summaries of our own
+#         prompts, which nobody noticed because the distiller paraphrases rather than quotes.
+#
+#     Two layers, because neither alone is enough:
+#
+#       ① `PIPELINE_MARK` —— `claude_cli.run()` prefixes it to every prompt from now on.  This is
+#          the load-bearing one: exact, structural, and it covers prompts that do not exist yet.
+#       ② The openings below —— for sessions **already on disk**, written before ① existed.  This
+#          list can only ever be complete for the past; a new tool calling Claude Code from
+#          outside this repository would need its own entry, which is precisely why ① is the
+#          layer that matters going forward.  `Condense the tool payload` is one such outsider.
+#
+#     A retired prompt keeps its entry.  Removing one silently readmits every historical session
+#     that used it.
+try:
+    from claude_cli import PIPELINE_MARK
+except Exception:                              # a caller that imports only the masking helpers
+    PIPELINE_MARK = "<!-- kal-pipeline-call:"
+MACHINE_OPENINGS = (
+    "You extract a knowledge graph from text",          # lr_extract
+    "You are a knowledge-graph curator",                # lr_extract, entity profiles
+    "You distil Claude Code conversation logs",         # distill_sessions (English, from 2026-09-01)
+    "당신은 Claude Code 대화 로그를",                      # distill_sessions (Korean, retired 2026-09-01)
+    "Below are documents distilled separately",         # distill_sessions MERGE
+    "아래는 하나의 긴 Claude Code 대화를 조각내어",           # distill_sessions MERGE (Korean, retired)
+    "Condense the tool payload below",                  # not this repository —— another local tool
+)
+
+
+def is_pipeline_call(text):
+    """Was this session **produced by a program**, not typed by a person?
+
+    Checked against the head of the text only: a genuine conversation may quote one of these
+    strings while discussing the pipeline (this very repository does it constantly), and such a
+    quote appears in the middle of a discussion, never as the opening prompt.
+    """
+    head = text[:1200]
+    if PIPELINE_MARK in head:
+        return True
+    body = head.split("**Me**:", 1)[-1].lstrip() if "**Me**:" in head else head.lstrip()
+    return any(body.startswith(s) for s in MACHINE_OPENINGS)
+
+
 # ── Noise — a block starting with these patterns is dropped whole ──
 NOISE_PREFIX = (
     "<system-reminder>", "<command-name>", "<local-command-",
@@ -213,6 +264,27 @@ def _selftest():
              "came up too, and https://hooks.slack.com was mentioned.  No talk of tokens.")
     assert not find_leaks(plain), f"ordinary prose is read as a secret: {list(find_leaks(plain))}"
 
+    #  ── this pipeline's own calls never become documents ─────────────────────────────────
+    #  Measured 2026-09-02: 153 of the 298 session documents in the bundle had been distilled
+    #  out of our own prompts.  Nobody noticed because the distiller paraphrases, so the prompt
+    #  text does not survive into the document —— only its subject matter does.
+    from claude_cli import PIPELINE_MARK as _PM
+    assert is_pipeline_call(f"**Me**: {_PM}\nanything at all"), "the marker is not honoured"
+    assert is_pipeline_call("**Me**: You extract a knowledge graph from text. Output ONE JSON"), \
+        "a historical machine prompt was let through"
+    assert is_pipeline_call("**Me**: 당신은 Claude Code 대화 로그를 개인 위키로 정제한다"), \
+        "the retired Korean prompt was let through —— its entry must stay"
+    #  ⚠ and the other direction: a real conversation **about** the pipeline must survive.
+    #     This repository discusses its own prompts constantly; matching anywhere in the text
+    #     instead of at the opening would delete exactly the sessions worth keeping.
+    assert not is_pipeline_call(
+        "**Me**: 오늘 왜 느려?\n\n**Claude**: lr_extract 의 "
+        "'You extract a knowledge graph from text' 프롬프트가 매 청크마다 나갑니다"), \
+        "a genuine conversation quoting a machine prompt was dropped"
+    assert not is_pipeline_call("**Me**: 세션 로그를 어떻게 옮기지"), "a plain question was dropped"
+
+    print("  ✅ pipeline self-calls filtered —— marker · historical openings · a conversation "
+          "quoting one survives")
     print(f"  ✅ ingest_sessions self-check —— {len(SYNTH)} synthetic kinds detected, masked, re-verified · 0 false positives")
 
 
@@ -229,7 +301,7 @@ if __name__ == "__main__":
     if a.limit:
         files = files[:a.limit]
 
-    kept, dropped, total_masked = [], 0, collections.Counter()
+    kept, dropped, machine, total_masked = [], 0, 0, collections.Counter()
     raw_chars = out_chars = 0
     for f in files:
         proj = os.path.basename(os.path.dirname(f))
@@ -238,6 +310,9 @@ if __name__ == "__main__":
         if not d:
             dropped += 1
             continue
+        if is_pipeline_call(d["text"]):
+            machine += 1
+            continue                           # our own LLM call, not a conversation
         raw_chars += len(d["text"])
         text, nm = mask(d["text"])
         total_masked += nm
@@ -269,7 +344,8 @@ if __name__ == "__main__":
 
     json.dump(kept, open(f"{OUT}/session_docs.json", "w"), ensure_ascii=False)
     os.chmod(f"{OUT}/session_docs.json", 0o600)     # even in a 700 directory the file was created 644
-    print(f"{len(files)} session(s) → {len(kept)} kept · {dropped} dropped")
+    print(f"{len(files)} session(s) → {len(kept)} kept · {dropped} dropped · "
+          f"{machine} were this pipeline's own LLM calls")
     print(f"body {raw_chars/1e6:.1f}M chars → {out_chars/1e6:.1f}M after removing noise and duplicates "
           f"({out_chars/max(1,raw_chars)*100:.0f}%)")
     print(f"\nsecrets masked, {sum(total_masked.values())}:")
