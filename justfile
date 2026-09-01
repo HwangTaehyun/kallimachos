@@ -318,12 +318,14 @@ selftest-py:
     @{{py}} {{src}}/kal_migrate.py --selftest
     @{{py}} {{src}}/sync_v3.py --selftest
     @{{py}} {{src}}/ingest_sessions.py --selftest
+    @{{py}} {{src}}/ingest_codex_sessions.py --selftest
     @{{py}} {{src}}/remask_docs.py --selftest
     @{{py}} {{src}}/export_graph.py --selftest
     @{{py}} {{src}}/export_webgl.py --selftest
     @{{py}} {{src}}/promote_distilled.py --selftest
     @{{py}} {{src}}/distill_sessions.py --selftest
     @{{py}} {{src}}/okf_convert.py --selftest
+    @{{py}} {{src}}/openwiki_emit.py --selftest
     @{{py}} {{src}}/fm_migrate.py --selftest
     @{{py}} {{src}}/okf_sample.py --selftest
     @{{py}} {{src}}/okf_compare.py --selftest

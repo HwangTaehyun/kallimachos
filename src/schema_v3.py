@@ -473,14 +473,41 @@ def doc_meta(raw):
     fm = m.group(1)
     no_llm = bool(re.search(r"^no_llm:\s*true\s*$", fm, re.M | re.I))
 
-    def pick(key):
-        v = re.search(r"^%s:\s*(\S+)" % key, fm, re.M)
-        if not v:
-            return ""
-        d = v.group(1).strip("\"'")[:10]
+    def _iso(v):
+        d = (v or "").strip().strip("\"'")[:10]
         return d if re.fullmatch(r"\d{4}-\d{2}-\d{2}", d) else ""
 
+    def pick(key):
+        v = re.search(r"^%s:\s*(\S+)" % key, fm, re.M)
+        return _iso(v.group(1)) if v else ""
+
+    #  ⚠ **OKF keeps the date nested, and this function only ever looked at flat keys.**
+    #     An openwiki bundle writes `generated: { by: …, at: "2026-06-18T00:00:00Z" }` (or the
+    #     block form), never `generated_at:`.  Measured 2026-09-02: every page of the bundle came
+    #     back `("", "none", …)` —— which does not error, it just removes the whole corpus from
+    #     the time axis, so `kal_timeline`, `as_of` and `since/until` return nothing and look
+    #     like an empty history rather than a broken reader.
+    #
+    #     Anchored on the `generated:` key so it cannot pick up the `at:` of a `verified` entry
+    #     or the `last_modified:` of a source —— those are different assertions with different
+    #     meanings, and silently substituting one for another is the same class of bug again.
+    def okf_generated_at():
+        m2 = re.search(r"^generated:[ \t]*\{[^}\n]*?\bat:\s*([^,}\s]+)", fm, re.M)
+        if m2:
+            return _iso(m2.group(1))
+        m2 = re.search(r"^generated:[ \t]*\r?\n((?:[ \t]+\S.*\r?\n?)+)", fm, re.M)
+        if m2:
+            inner = re.search(r"^[ \t]+at:\s*(\S+)", m2.group(1), re.M)
+            if inner:
+                return _iso(inner.group(1))
+        return ""
+
     upd = pick("updated")
+    #  Tried before the flat keys: a document carrying both is an openwiki page, and its
+    #  `generated.at` is the authoritative one —— the flat key would be a leftover.
+    okf_at = okf_generated_at()
+    if okf_at:
+        return okf_at, "generated.at", no_llm, upd
     for k in DATE_KEYS:
         d = pick(k)
         if d:
@@ -1321,6 +1348,27 @@ def _selftest():
         globals()["VAULT"] = _keep_vault
         _self_copies.cache_clear()
         _sh.rmtree(_vault, ignore_errors=True)
+
+    #  ── OKF keeps its date nested; this reader only ever saw flat keys ──────────────────
+    #  Measured 2026-09-02: every page of the openwiki bundle returned ("", "none"), which does
+    #  not error —— it removes the corpus from the time axis, so kal_timeline / as_of /
+    #  since-until answer "nothing happened" instead of "I could not read the dates".
+    _flow  = '---\ngenerated: { by: "process:x", at: "2026-01-02T00:00:00Z" }\n---\nb\n'
+    _block = '---\ngenerated:\n  by: "process:x"\n  at: "2026-03-04T00:00:00Z"\n---\nb\n'
+    assert doc_meta(_flow)[:2]  == ("2026-01-02", "generated.at"), doc_meta(_flow)
+    assert doc_meta(_block)[:2] == ("2026-03-04", "generated.at"), doc_meta(_block)
+    #  and it must not mistake a *different* assertion for the generation time.  `verified[].at`
+    #  is when a human confirmed it and `sources[].last_modified` is about the source —— taking
+    #  either would place the document on the time axis at a date nothing happened.
+    _other = ('---\nverified:\n  - by: "human:t"\n    at: "2099-12-31T00:00:00Z"\n'
+              'sources:\n  - resource: /x\n    last_modified: "1999-01-01"\n---\nb\n')
+    assert doc_meta(_other)[:2] == ("", "none"), \
+        "a verified/source date was taken for the generation time: %r" % (doc_meta(_other),)
+    #  the flat vault keys keep working, and no_llm still reads through all of it
+    _flat = '---\nno_llm: true\ncaptured: 2026-04-25\n---\nb\n'
+    assert doc_meta(_flat)[:3] == ("2026-04-25", "captured", True), doc_meta(_flat)
+    print("  ✅ doc_meta —— OKF generated.at (flow · block) · not a verified/source date · "
+          "flat keys · no_llm")
 
     print(f"  ✅ schema_v3 self-check —— transmission gate · vector reuse · model guard · "
           f"type vocabulary agrees in 3 places ({len(canon)} kinds)")
