@@ -118,10 +118,14 @@ def is_pipeline_call(text):
     quote appears in the middle of a discussion, never as the opening prompt.
     """
     head = text[:1200]
-    if PIPELINE_MARK in head:
-        return True
     body = head.split("**Me**:", 1)[-1].lstrip() if "**Me**:" in head else head.lstrip()
-    return any(body.startswith(s) for s in MACHINE_OPENINGS)
+    #  ⚠ **The marker is required at the START of the first prompt, not anywhere in it.**
+    #     `PIPELINE_MARK in head` was the first version, and it deletes a conversation that merely
+    #     *mentions* the marker —— which is what a session about this filter looks like.  Measured
+    #     2026-09-02: the log of the session that added the marker contains the string six times,
+    #     because writing the code means writing the string.  Over-blocking here is worse than
+    #     under-blocking: it silently destroys exactly the conversations that explain the system.
+    return body.startswith(PIPELINE_MARK) or any(body.startswith(s) for s in MACHINE_OPENINGS)
 
 
 # ── Noise — a block starting with these patterns is dropped whole ──
@@ -282,6 +286,11 @@ def _selftest():
         "'You extract a knowledge graph from text' 프롬프트가 매 청크마다 나갑니다"), \
         "a genuine conversation quoting a machine prompt was dropped"
     assert not is_pipeline_call("**Me**: 세션 로그를 어떻게 옮기지"), "a plain question was dropped"
+    #  ⚠ and a conversation *about the marker* must survive.  The session that introduced it
+    #     necessarily contains the string —— writing the code means writing it.
+    assert not is_pipeline_call(
+        f"**Me**: 필터를 어떻게 걸지\n\n**Claude**: `{_PM}` 를 프롬프트 앞에 붙입니다"), \
+        "a conversation discussing the marker was dropped —— it must be at the START"
 
     print("  ✅ pipeline self-calls filtered —— marker · historical openings · a conversation "
           "quoting one survives")
