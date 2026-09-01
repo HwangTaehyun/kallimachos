@@ -193,7 +193,44 @@ def convert_links(body, idx, unresolved):
     return WIKILINK.sub(sub, body)
 
 
-def to_okf(fm, body, rel_path, idx, unresolved):
+#  The producer keys this converter may emit beyond OKF v0.2.
+#
+#  ⚠ Two different contracts live here.  The **vault experiment** (`--out ~/.kal/exp/okf-vault`)
+#     keeps `origin` and `distilled_from` because they were already in that output.  The
+#     **openwiki bundle** publishes exactly three, which is what its SPEC.md declares, so
+#     `openwiki_emit.py` passes the strict tuple.  Neither is more correct in the abstract —— what
+#     matters is that a bundle claiming "OKF plus three keys" does not quietly carry five.
+#     `origin: claude-session` is fully derivable from `sources[].resource`'s scheme, and
+#     `distilled_from` is already withheld from LLMs by `kal_mcp.DENY_FM`.
+EXT_ALL = ("doc_type", "origin", "why_captured", "distilled_from")
+EXT_OPENWIKI = ("doc_type", "why_captured")     # + `no_llm`, which is emitted at the head
+
+
+def actor(by):
+    """A `generated.by` / `verified[].by` value in OKF's actor convention (§7).
+
+    > `<producer>/<version>` for agents and tools … `human:<id>` for a person …
+    > `process:<id>` for an automated process.
+    > Consumers that classify trust (§5.3) **key off the `human:` prefix**.
+    > —— references/okf-SPEC-v0.2.md §7
+
+    ⚠ This used to emit the bare script name (`distill_sessions.py`).  That is not any of the
+       three shapes, so a consumer grading trust could not classify it —— and the one thing the
+       spec makes mandatory is that human-authored content carry `human:`.  Emitting an
+       unclassifiable actor for machine output is the safer direction of the two, but it is
+       still wrong, and a bundle that says it targets 0.2 should not need excusing.
+    """
+    s = (by or "").split("(")[0].strip()
+    if not s:
+        return "process:unknown"
+    if s.startswith(("human:", "process:")) or "/" in s:
+        return s
+    #  A .py file is a process this repository runs; anything else is left alone but prefixed,
+    #  because an unprefixed value classifies as nothing at all.
+    return "process:" + (s[:-3] if s.endswith(".py") else s)
+
+
+def to_okf(fm, body, rel_path, idx, unresolved, extensions=EXT_ALL):
     """One document as OKF frontmatter plus a converted body."""
     out = []
     # ── Required ──
@@ -221,11 +258,17 @@ def to_okf(fm, body, rel_path, idx, unresolved):
     srcs = []
     if fm.get("session_id"):
         sid = fm["session_id"]
+        #  ⚠ The scheme used to be the literal `claude-session://`.  Once Codex sessions entered
+        #     the same corpus (2026-09-02) that made every Codex document claim a Claude origin ——
+        #     wrong provenance, and silently so, because the string is well-formed either way.
+        #     `session_agent` is written by `distill_sessions.write()`; a document from before it
+        #     existed has no such field and is Claude's, which is what the default says.
+        agent = (fm.get("session_agent") or "claude").strip().lower()
         srcs.append({
             "id": "session-" + sid[:8],
             # An external URL works, and so does a bundle-relative path.  Session logs live outside the bundle, so a scheme is used.
-            "resource": "claude-session://%s" % sid,
-            "title": fm.get("session_project") or "Claude Code session",
+            "resource": "%s-session://%s" % (agent, sid),
+            "title": fm.get("session_project") or ("%s session" % agent),
             "author": "process:distill_sessions",
             "last_modified": fm.get("captured") or "",
         })
@@ -258,7 +301,7 @@ def to_okf(fm, body, rel_path, idx, unresolved):
     at = fm.get("generated_at") or fm.get("captured") or fm.get("created")
     if by or at:
         out.append("generated:")
-        out.append("  by: %s" % yaml_str((by or "unknown").split("(")[0].strip()))
+        out.append("  by: %s" % yaml_str(actor(by)))
         if at:
             out.append("  at: %s" % yaml_str("%sT00:00:00Z" % at))
     # verified is **not written.**  This vault holds no human review record, and writing one
@@ -266,6 +309,17 @@ def to_okf(fm, body, rel_path, idx, unresolved):
 
     # ── lifecycle (§5.4) ──
     st = STATUS_MAP.get((fm.get("maturity") or "").strip().lower())
+    #  ⚠ **Omitting `status` does not mean "unknown".**  The spec is explicit:
+    #     "Absent `status` ⇒ `stable`." (references/okf-SPEC-v0.2.md:422, pinned in the openwiki
+    #     repository).  So a machine-distilled document that nobody has reviewed, emitted without
+    #     the field, was publishing itself as **stable** —— the strongest lifecycle claim OKF has,
+    #     asserted about a page whose own frontmatter says "LLM, needs review afterwards".
+    #     A document is called draft when it was generated and carries no human review; a
+    #     hand-written note with no maturity keeps saying nothing, and takes the spec's default.
+    if not st:
+        machine = bool(fm.get("generated_by") or fm.get("distilled_by"))
+        if machine and not fm.get("verified"):
+            st = "draft"
     if st:
         out.append("status: %s" % st)
 
@@ -277,7 +331,7 @@ def to_okf(fm, body, rel_path, idx, unresolved):
     #   converted output, a user's "do not send this note" is ignored.  Worse, it does not show
     #   in the 'N excluded from transmission' log either, so the failure is silent.
     #   (deep review 2026-08-19, security lens)
-    for k in ("doc_type", "origin", "why_captured", "distilled_from"):
+    for k in extensions:
         if fm.get(k):
             # no_llm must be emitted **without quotes**.  lr_extract.NO_LLM_MARK matches
             # `^no_llm:\s*true\s*$`, so `no_llm: "true"` does not.
@@ -469,7 +523,61 @@ def selftest():
     # Deterministic: two runs must be identical
     assert to_okf(*parse_fm('---\ntitle: "A: B"\ntags: [x, y]\nmaturity: seedling\n---\n## Overview\n\nIt starts. Second.\n'),
                   "wiki/a.md", idx, set()) == okf
-    print("  ✅ okf_convert self-check — 4 link forms · frontmatter round trip · determinism")
+    #  ── the session scheme follows the agent ────────────────────────────────────────────
+    #  A hardcoded `claude-session://` made every Codex document claim a Claude origin, and did
+    #  it with a well-formed string, so nothing downstream could notice.
+    _base = {"type": "conversation", "title": "T", "session_id": "abc-123",
+             "distilled_by": "distill_sessions.py (LLM, needs review afterwards)",
+             "captured": "2026-09-02"}
+    for _agent, _want in (("codex", "codex-session://abc-123"),
+                          ("claude", "claude-session://abc-123"),
+                          (None, "claude-session://abc-123")):     # absent ⇒ Claude, the older corpus
+        _fm = dict(_base) | ({"session_agent": _agent} if _agent else {})
+        _o = to_okf(_fm, "Body.", "x.md", {}, set())
+        assert _want in _o, f"session_agent={_agent!r} produced the wrong scheme:\n{_o}"
+
+    #  ── status is stated, because omitting it asserts `stable` ───────────────────────────
+    #  references/okf-SPEC-v0.2.md:422 —— "Absent `status` ⇒ `stable`."  A machine-distilled,
+    #  unreviewed page must not publish itself under OKF's strongest lifecycle claim.
+    assert _re.search(r"^status: draft$", to_okf(dict(_base), "Body.", "x.md", {}, set()), _re.M), \
+        "a generated, unverified document did not declare itself draft"
+    #  A hand-written note with neither maturity nor a generator says nothing and takes the default.
+    assert not _re.search(r"^status:", to_okf({"type": "note", "title": "T"}, "Body.", "x.md", {}, set()), _re.M), \
+        "status was invented for a document that carries no evidence of its lifecycle"
+    #  A human review outranks the machine default.
+    assert not _re.search(r"^status: draft$",
+                          to_okf(dict(_base) | {"verified": "human:taehyun"}, "B.", "x.md", {}, set()), _re.M), \
+        "a reviewed document was still called draft"
+
+    #  ── the openwiki bundle carries exactly three extension keys ─────────────────────────
+    #  Its SPEC.md says "OKF v0.2 plus three".  Emitting five would make that document false.
+    _rich = dict(_base) | {"doc_type": "analysis", "why_captured": "why", "origin": "claude-session",
+                           "distilled_from": "2 messages, 9,786 chars", "no_llm": "true"}
+    _strict = to_okf(_rich, "Body.", "x.md", {}, set(), extensions=EXT_OPENWIKI)
+    for _k in ("no_llm", "doc_type", "why_captured"):
+        assert _re.search(rf"^{_k}:", _strict, _re.M), f"{_k} is missing from the openwiki output"
+    for _k in ("origin", "distilled_from"):
+        assert not _re.search(rf"^{_k}:", _strict, _re.M), \
+            f"{_k} leaked into the openwiki output —— its SPEC.md declares three extensions"
+    #  and the vault experiment keeps all four, unchanged
+    _rich_all = to_okf(_rich, "Body.", "x.md", {}, set())
+    assert _re.search(r"^origin:", _rich_all, _re.M), "the vault output lost a key it used to have"
+
+    #  ── generated.by follows OKF's actor convention (§7) ─────────────────────────────────
+    #  A bare script name is none of the three shapes, so a trust-grading consumer cannot
+    #  classify it; and `human:` is the one prefix the spec makes mandatory.
+    assert actor("distill_sessions.py (LLM, needs review afterwards)") == "process:distill_sessions"
+    assert actor("human:taehyun") == "human:taehyun", "a human actor must survive untouched"
+    assert actor("openwiki/0.3.3") == "openwiki/0.3.3", "a <producer>/<version> actor must survive"
+    assert actor("") == "process:unknown"
+    assert _re.search(r'^  by: "process:distill_sessions"$',
+                      to_okf(dict(_base), "B.", "x.md", {}, set()), _re.M), \
+        "generated.by did not reach the output in actor form"
+
+    print("  ✅ okf_convert self-check — 4 link forms · frontmatter round trip · determinism\n"
+          "     · session scheme follows the agent · status is stated, never left to default\n"
+          "     · openwiki output carries exactly three extensions, the vault output keeps four\n"
+          "     · generated.by is an OKF actor (§7)")
 
 
 if __name__ == "__main__":

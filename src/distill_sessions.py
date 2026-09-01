@@ -49,7 +49,13 @@ from claude_cli import run as claude_run  # noqa: E402
 
 # Where ~/.kal lives.  Mounted at /data/kal inside the container (see docker-compose).
 KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
-SESS = os.path.join(KAL_HOME, "sessions/session_docs.json")
+#  Two corpora, one pipeline.  Claude and Codex sessions distil identically —— what differs is
+#  only the URI scheme their provenance gets in the openwiki bundle (claude-session:// vs
+#  codex-session://), which `openwiki_emit.py` derives from the `agent` field carried through here.
+#  A missing file is not an error: a machine may have only one of the two agents installed.
+CORPORA = [("claude", os.path.join(KAL_HOME, "sessions/session_docs.json")),
+           ("codex",  os.path.join(KAL_HOME, "sessions/codex_session_docs.json"))]
+SESS = CORPORA[0][1]        # kept for the self-check and for anything still naming it
 OUT = os.environ.get("KAL_DISTILLED", os.path.join(KAL_HOME, "distilled"))          # built outside the vault first
 # ⚠ REVIEW and DONE **must follow OUT.**  They used to be hardcoded to KAL_HOME, so an attempt
 # to test safely with `KAL_DISTILLED=/tmp/probe` still wrote the review list and the completion
@@ -262,6 +268,11 @@ def write(rec, docs, seen):
             f"tags: [{', '.join(d['tags'])}]",
             f"session_id: {rec['session_id']}",
             f"session_project: {rec['project']}",
+            #  Not an openwiki extension —— this is the *intermediate* format under
+            #  ~/.kal/distilled/.  openwiki_emit turns it into sources[].resource
+            #  (`claude-session://` / `codex-session://`), so the published bundle
+            #  keeps to OKF v0.2 plus exactly three extension keys.
+            f"session_agent: {rec.get('agent', 'claude')}",
             f"distilled_from: {rec['n_msg']} messages, {len(rec['text']):,} chars",
             "distilled_by: distill_sessions.py (LLM, needs review afterwards)",
             # Provenance of the generation —— OKF §5.1 provenance in a flat form.
@@ -327,7 +338,21 @@ def _main_distill():
     os.makedirs(OUT, exist_ok=True)
     os.makedirs(DONE, exist_ok=True)
     os.chmod(OUT, 0o700)
-    recs = json.load(open(SESS))
+    recs = []
+    for _agent, _path in CORPORA:
+        if not os.path.exists(_path):
+            continue
+        _rows = json.load(open(_path))
+        for _r in _rows:
+            #  ⚠ Set only when absent.  `ingest_codex_sessions` already writes it; the Claude
+            #     corpus predates the field, so it is filled in here rather than by rewriting
+            #     a 12 MB file that a running pipeline may be reading.
+            _r.setdefault("agent", _agent)
+        recs += _rows
+        print(f"  {_agent}: {len(_rows)} session(s) from {os.path.basename(_path)}")
+    if not recs:
+        print(f"❌ no session corpus found — run ingest_sessions.py / ingest_codex_sessions.py first")
+        raise SystemExit(1)
     if EXCLUDE_PROJECTS:
         n0 = len(recs)
         recs = [r for r in recs
@@ -340,7 +365,20 @@ def _main_distill():
     # means starting over after an interruption is not affordable.
     if not a.restart:
         n0 = len(recs)
-        recs = [r for r in recs if not os.path.exists(os.path.join(DONE, r["session_id"]))]
+        #  ⚠ The marker is namespaced by agent.  A Claude id and a Codex id are both UUIDs from
+        #     different generators; nothing guarantees they never collide, and a collision would
+        #     silently skip a session that had never been distilled.
+        def _done(r):
+            #  ⚠ The bare id is the **pre-2026-09-02 name**, written before the corpus grew a
+            #     second agent.  Every marker of that shape is Claude's by construction, and
+            #     464 of them existed when the scheme changed —— not honouring them would have
+            #     re-distilled the whole Claude corpus, 464 LLM calls, for nothing.
+            #     Drop this arm once no ~/.kal/distilled/.done holds an unprefixed name.
+            a = r.get("agent", "claude")
+            if os.path.exists(os.path.join(DONE, f"{a}-{r['session_id']}")):
+                return True
+            return a == "claude" and os.path.exists(os.path.join(DONE, r["session_id"]))
+        recs = [r for r in recs if not _done(r)]
         if n0 != len(recs):
             print(f"resuming — skipped {n0 - len(recs)} completed")
     if not recs:
@@ -371,7 +409,7 @@ def _main_distill():
             else:
                 failed += 1
             if status != "fail":             # a failure leaves no marker → the next run picks it up again
-                open(os.path.join(DONE, r["session_id"]), "w").close()
+                open(os.path.join(DONE, f"{r.get('agent','claude')}-{r['session_id']}"), "w").close()
             if done % 20 == 0 or done == len(recs):
                 el = time.time() - t0
                 print(f"  {done}/{len(recs)}  {len(rows)} document(s) · {empty} small-talk skip(s) · "
