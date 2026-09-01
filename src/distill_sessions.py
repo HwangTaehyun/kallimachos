@@ -353,6 +353,21 @@ ABORT_WINDOW = 60            # how many recent sessions the verdict looks at
 ABORT_RATE = 0.60
 
 
+def tally(status, aborted, failed, cancelled):
+    """One result → the updated (failed, cancelled) pair.
+
+    ⚠ **A cancelled call is not a failed one.**  After the guard fires, every future already
+       submitted still comes back through `as_completed`, instantly, as an exception.  Counting
+       those as failures made a run that deliberately stopped at 76 of 481 report **436
+       failures** —— about 360 of which were never attempted.  That number reads as "the model is
+       broken" rather than "we stopped on purpose", and it is the difference between retrying and
+       giving up.  Pulled out of the loop so it can be asserted; inlined it could not be.
+    """
+    if status != "fail":
+        return failed, cancelled
+    return (failed, cancelled + 1) if aborted else (failed + 1, cancelled)
+
+
 def should_abort(recent):
     """Is this run failing *now*?  `recent` is the outcome of the last calls, newest last.
 
@@ -487,6 +502,20 @@ def _selftest():
     assert all(f"|{d}|" in PROMPT or f"<{d}|" in PROMPT or f"|{d}>" in PROMPT
                for d in ("plan", "correction")), \
         "the prompt's doc_type list drifted from DOC_TYPES"
+    #  ── a cancelled call is not a failed one ─────────────────────────────────────────────
+    assert tally("fail", False, 0, 0) == (1, 0), "a real failure was not counted"
+    assert tally("fail", True, 5, 0) == (5, 1), "a cancelled future was counted as a failure"
+    assert tally("ok", True, 5, 2) == (5, 2), "a success moved a counter"
+    assert tally("skip", False, 0, 0) == (0, 0), "a small-talk skip was counted as a failure"
+    #  the real shape: 76 attempted (46 failing) then 360 cancelled
+    _f = _c = 0
+    for _i in range(76):
+        _f, _c = tally("fail" if _i >= 30 else "ok", False, _f, _c)
+    for _ in range(360):
+        _f, _c = tally("fail", True, _f, _c)
+    assert (_f, _c) == (46, 360), f"the split is wrong: {(_f, _c)}"
+    print("  ✅ cancelled futures are not reported as failures")
+
     print("  ✅ prompt contract —— supersession · closed threads only · correction is a document")
 
     print("  ✅ early abort —— a trailing window, so a deteriorating run is caught while a\n          recovered one finishes")
@@ -560,7 +589,7 @@ def _main_distill():
     # Register the slugs a previous run created — so resuming does not overwrite the same names
     seen = {os.path.basename(f)[:-3]: 1
             for f in __import__("glob").glob(os.path.join(OUT, "*.md"))}
-    rows, done, empty, failed, aborted, recent = [], 0, 0, 0, False, []
+    rows, done, empty, failed, aborted, recent, cancelled = [], 0, 0, 0, False, [], 0
     with cf.ThreadPoolExecutor(a.workers) as ex:
         futs = {ex.submit(distill, r): r for r in recs}
         for f in cf.as_completed(futs):
@@ -574,11 +603,15 @@ def _main_distill():
                 rows += write(r, docs, seen)
             elif status == "skip":
                 empty += 1
-            else:
-                failed += 1
             if status != "fail":             # a failure leaves no marker → the next run picks it up again
                 open(os.path.join(DONE, f"{r.get('agent','claude')}-{r['session_id']}"), "w").close()
             recent.append(status)
+            #  ⚠ After the abort, `as_completed` still yields every future that was already
+            #     submitted.  They come back instantly as exceptions (cancelled), and counting
+            #     those as failures makes the summary lie: a run that stopped at 76 of 481
+            #     reported **436 failures**, of which ~360 were never attempted.  A number that
+            #     large reads as "the model is broken" rather than "we stopped early on purpose".
+            failed, cancelled = tally(status, aborted, failed, cancelled)
             if should_abort(recent) and not aborted:
                 aborted = True
                 w = recent[-ABORT_WINDOW:]
@@ -592,7 +625,9 @@ def _main_distill():
             if done % 20 == 0 or done == len(recs):
                 el = time.time() - t0
                 print(f"  {done}/{len(recs)}  {len(rows)} document(s) · {empty} small-talk skip(s) · "
-                      f"{failed} failure(s)  {el/60:.1f} min "
+                      f"{failed} failure(s)"
+                      + (f" · {cancelled} cancelled" if cancelled else "")
+                      + f"  {el/60:.1f} min "
                       f"({el/done*(len(recs)-done)/60:.0f} min left)", flush=True)
 
     # The review list is built from **the real files on disk**.  Built from the in-memory rows,
