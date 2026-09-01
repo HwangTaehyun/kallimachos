@@ -277,6 +277,11 @@ verify:
 
 # Every self-check attached to the code
 #  The whole set, docker included.  Used locally.
+#  Where the openwiki bundle and the Obsidian vault live.  Override on the command line:
+#     just openwiki ~/other-bundle ~/other-vault
+openwiki_dir := env_var_or_default("OPENWIKI_DIR", home_dir() / "github/HwangTaehyun/openwiki")
+vault_dir    := env_var_or_default("VAULT_DIR", home_dir() / "github/HwangTaehyun/super-brain")
+
 selftest: mcp-test selftest-py
 
 #  ⚠ The list lives **here and nowhere else**.  CI calls this —— 9 of them were once copied by
@@ -326,6 +331,19 @@ selftest-py:
     @{{py}} {{src}}/distill_sessions.py --selftest
     @{{py}} {{src}}/okf_convert.py --selftest
     @{{py}} {{src}}/openwiki_emit.py --selftest
+    #  ⚠ The OKF version string is frozen at 0.2 while its content moved (2026-08-21
+    #     tightened every timestamp rule).  A consumer pinning the version cannot see
+    #     that, so the **sha256 is the only live signal**.  Upstream also relocated to its
+    #     own repository and declared the old path a frozen snapshot —— which is the worst
+    #     case for a watcher, because the abandoned path reports "unchanged" forever.
+    #     Offline is not a failure: this warns, it does not block.
+    @H=$(curl -sfL --max-time 20 https://raw.githubusercontent.com/GoogleCloudPlatform/open-knowledge-format/main/SPEC.md | shasum -a 256 | cut -d" " -f1); \
+     P=$(shasum -a 256 ~/github/HwangTaehyun/openwiki/references/okf-SPEC-v0.2.md 2>/dev/null | cut -d" " -f1); \
+     if [ -z "$H" ]; then echo "  ⓘ OKF drift check skipped (offline)"; \
+     elif [ -z "$P" ]; then echo "  ⓘ OKF drift check skipped (no pinned copy)"; \
+     elif [ "$H" = "$P" ]; then echo "  ✅ pinned OKF spec matches upstream ($(echo $H | cut -c1-12)…)"; \
+     else echo "  ⚠ OKF spec MOVED upstream —— pinned $(echo $P | cut -c1-12)… vs live $(echo $H | cut -c1-12)…"; \
+          echo "     re-pin: curl -sL https://raw.githubusercontent.com/GoogleCloudPlatform/open-knowledge-format/main/SPEC.md -o ~/github/HwangTaehyun/openwiki/references/okf-SPEC-v0.2.md"; fi
     @{{py}} {{src}}/fm_migrate.py --selftest
     @{{py}} {{src}}/okf_sample.py --selftest
     @{{py}} {{src}}/okf_compare.py --selftest
@@ -400,6 +418,62 @@ extract *args:
 # Rebuild the knowledge DB (the whole index)
 index *args:
     @{{py}} {{src}}/schema_v3.py {{args}}
+
+#  ── openwiki ──────────────────────────────────────────────────────────────────────────────
+#
+#  One bundle, two kinds of input, one knowledge DB:
+#
+#      ~/.claude/projects/  ─┐
+#      ~/.codex/sessions/   ─┼─ ingest ─ distil ─┐
+#                            │                    ├─ openwiki_emit ─→ openwiki/personal/
+#      an Obsidian vault    ─┴────────────────────┘                          │
+#                                                                       index ▼
+#                                                                    ~/.kal/db
+#
+#  `openwiki` does the whole chain.  Each half is also runnable on its own, because the two
+#  halves fail for completely different reasons: the session half needs an LLM (and on macOS,
+#  the host relay), while the vault half is pure conversion and never calls one.
+
+# Everything → the openwiki bundle → the knowledge DB.  VAULT is the Obsidian vault to migrate.
+openwiki wiki=openwiki_dir vault=vault_dir:
+    @just openwiki-sessions "{{wiki}}"
+    @just openwiki-vault "{{wiki}}" "{{vault}}"
+    @just openwiki-index "{{wiki}}"
+
+# Agent session logs → the bundle.  Skips what is already distilled, so a re-run is cheap.
+openwiki-sessions wiki=openwiki_dir:
+    @{{py}} {{src}}/ingest_sessions.py
+    @{{py}} {{src}}/ingest_codex_sessions.py
+    @{{py}} {{src}}/distill_sessions.py
+    @{{py}} {{src}}/openwiki_emit.py --wiki "{{wiki}}"
+
+#  ⚠ `--exclude /conversations/sessions/` is load-bearing.  The vault holds a copy of the
+#     distilled session documents, and without this they arrive a second time under
+#     personal/raw/ —— the same documents, a second set of doc_ids, both indexed.
+# An Obsidian vault → the bundle.  No LLM is called; this is pure conversion.
+openwiki-vault wiki=openwiki_dir vault=vault_dir:
+    @{{py}} {{src}}/openwiki_emit.py --wiki "{{wiki}}" --from "{{vault}}/wiki"      --into personal/wiki      --force
+    @{{py}} {{src}}/openwiki_emit.py --wiki "{{wiki}}" --from "{{vault}}/kg"        --into personal/kg        --force
+    @{{py}} {{src}}/openwiki_emit.py --wiki "{{wiki}}" --from "{{vault}}/raw"       --into personal/raw       --exclude /conversations/sessions/ --force
+    @if [ -d "{{vault}}/Clippings" ]; then {{py}} {{src}}/openwiki_emit.py --wiki "{{wiki}}" --from "{{vault}}/Clippings" --into personal/clippings --force; fi
+
+#  ⚠ This points KAL_VAULT at the bundle for one command instead of changing the saved setting.
+#     `just vault` writes both ~/.kal/config.json and .env, and switching those would leave the
+#     CLI and the container indexing the bundle while everything else still says super-brain.
+#     The bundle already contains the vault's documents, so nothing is lost by reading it here.
+# Index the bundle into the knowledge DB.  The kg export is skipped (KG→note→KG feedback).
+openwiki-index wiki=openwiki_dir:
+    @echo "  indexing {{wiki}} → ~/.kal/db"
+    @KAL_VAULT="{{wiki}}" {{py}} {{src}}/schema_v3.py
+
+# What would be converted and indexed, without doing any of it
+openwiki-plan wiki=openwiki_dir vault=vault_dir:
+    @{{py}} {{src}}/openwiki_emit.py --wiki "{{wiki}}" --dry-run
+    @KAL_VAULT="{{wiki}}" {{py}} -c "import sys;sys.path.insert(0,'{{src}}');\
+     import schema_v3 as S,glob,os,collections;\
+     W=os.path.expanduser('{{wiki}}');c=collections.Counter();\
+     [c.update([S.classify_origin(os.path.relpath(f,W),open(f,encoding='utf-8',errors='replace').read())]) if not S.is_skipped(os.path.abspath(f)) else c.update(['skipped']) for f in glob.glob(W+'/**/*.md',recursive=True)];\
+     print('  index plan:', dict(c))"
 
 # Homonym candidates —— a person confirms them into homonyms.yml
 homonyms *args:

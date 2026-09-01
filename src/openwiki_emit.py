@@ -29,38 +29,96 @@ import os, re, sys, json, glob, shutil, hashlib, argparse, subprocess, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from okf_convert import parse_fm, to_okf, build_link_index, EXT_OPENWIKI   # noqa: E402
+from ingest_sessions import find_leaks                                     # noqa: E402
 
 KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
 WIKI = os.environ.get("OPENWIKI_DIR", os.path.expanduser("~/github/HwangTaehyun/openwiki"))
 DISTILLED = os.path.join(KAL_HOME, "distilled")
 
-#  A page this tool wrote carries a session URI in its sources.  That is **derived from real
-#  provenance** rather than a marker planted for the purpose —— a marker can be copied onto a
-#  hand-written page by accident, and then deleting "our own" files takes it too.
-OWNED = re.compile(r"^\s*resource:\s*\"?(?:claude|codex)-session://", re.M)
-#  For a migration run there is no session URI, so the tool stamps the *directory* instead:
-#  everything under the target subdirectory is ours because we created that subdirectory.
 MANIFEST = ".page-manifest.json"
 SHRINK_RATIO = 0.8
 
-
-def git_ok(root):
-    return subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"],
-                          capture_output=True).returncode == 0
+#  A page this tool wrote carries a session URI in `sources[]`.  That is derived from real
+#  provenance rather than a marker planted for the purpose.
+#
+#  ⚠ **It is matched inside the parsed frontmatter, never as a substring of the file.**  The
+#     first version ran this regex over the first 4000 bytes with `re.M`, so a page that merely
+#     *documented* the format —— a line like ``resource: "claude-session://<id>"`` inside a code
+#     fence —— was classified as ours and deleted.  `SPEC.md` and `INSTRUCTIONS.md` are exactly
+#     such pages, and one `--into` at the bundle root would have taken them.  That is the same
+#     201-files-to-3 failure this module's docstring claims to have learned from, reintroduced
+#     one layer up.  (deep review 2026-09-02, security lens —— reproduced, not inferred)
+#  ⚠ The scheme is the whole guard.  Relaxing this to `^\s*resource:` —— which a mutation test
+#     showed leaves every self-check green —— classifies **any** OKF page as ours, and `resource`
+#     is a recommended OKF field, so that is every third-party page in a touched directory.
+#     The 201-files-to-3 class, one more layer up.  A self-check now drops a foreign OKF page
+#     into the destination and asserts it survives.
+#  ⚠ The `-` prefix matters.  `sources:` entries are equally valid as
+#     `  - resource: …` (the item starting on the same line) or as
+#     `  - id: …` / `    resource: …`.  This tool emits the second, so a regex
+#     anchored on `^\s*resource:` matched our own pages and would have missed any
+#     bundle written the other way —— a self-check written for this guard caught it
+#     before it mattered (2026-09-02).
+OWNED_LINE = re.compile(r"^[ \t]*(?:-[ \t]+)?resource:[ \t]*\"?(?:claude|codex)-session://", re.M)
 
 
 def owned(d):
-    """Pages under `d` that carry session provenance —— the ones this tool may replace."""
+    """Pages under `d` whose **frontmatter** carries session provenance —— the ones we may replace.
+
+    ⚠ `os.walk`, not `glob(recursive=True)`.  glob follows directory symlinks, so a link inside
+       the bundle pointing at the vault made this function reach through it and `os.remove` the
+       real note —— while `foreign()` (which already used os.walk) could not see it, so the
+       "leaving N file(s) this tool did not write" reassurance stayed silent about the deletion.
+       The two must walk the same tree or the count is a lie.
+    """
     out = []
-    for f in glob.glob(os.path.join(d, "**", "*.md"), recursive=True):
-        if os.path.basename(f) == "index.md":
-            continue
-        try:
-            if OWNED.search(open(f, encoding="utf-8", errors="ignore").read(4000)):
+    for root, _dirs, files in os.walk(d):
+        for name in files:
+            if name == "index.md" or not name.endswith(".md"):
+                continue
+            f = os.path.join(root, name)
+            #  ⚠ There used to be a `parse_fm` branch above this one, walking `fm["sources"]` as
+            #     a list.  It was **dead** —— `parse_fm` in this codebase flattens nested YAML and
+            #     returns `''` for `sources:`, so `isinstance(..., list)` was always False and
+            #     every real page was in fact classified down here.  A mutation that emptied the
+            #     loop left all self-checks green, which is the definition of a branch no test can
+            #     distinguish.  (deep review 2026-09-02, guard-testability lens)
+            blk = _fm_block(f)
+            if blk and OWNED_LINE.search(blk):
                 out.append(f)
-        except OSError:
-            pass
     return out
+
+
+def _fm_block(path):
+    """The raw frontmatter block of a file, or ''.  Body text is never searched for ownership."""
+    try:
+        raw = open(path, encoding="utf-8", errors="ignore").read(8000)
+    except OSError:
+        return ""
+    m = re.match(r"\A\ufeff?\s*---[ \t]*\r?\n(.*?)\r?\n(?:---|\.\.\.)[ \t]*\r?\n", raw, re.S)
+    return m.group(1) if m else ""
+
+
+def has_no_llm(path):
+    """Does this published page carry the transmission block?  Frontmatter only."""
+    return bool(re.search(r"^no_llm:\s*true\s*$", _fm_block(path), re.M | re.I))
+
+
+def git_ok(root):
+    """Is `root` somewhere `git revert` can actually undo a deletion?
+
+    ⚠ Being *inside* a repository is not enough.  A bundle listed in `.gitignore` passes
+       `rev-parse` and is still untracked, so `git status` stays clean while pages are removed and
+       nothing can be restored —— the one guarantee this module's docstring rests on.  Reproduced
+       2026-09-02: `git init repo`, `.gitignore` = `bundle/`, `--wiki repo/bundle` wrote four
+       pages and `git status` showed only the .gitignore.
+    """
+    if subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"],
+                      capture_output=True).returncode != 0:
+        return False
+    #  `check-ignore` exits 0 when the path IS ignored —— which is the case we must refuse.
+    return subprocess.run(["git", "-C", root, "check-ignore", "-q", "."],
+                          capture_output=True).returncode != 0
 
 
 def foreign(d):
@@ -111,7 +169,9 @@ def render_index(rel_dir, entries, root=False):
 
 def convert_one(src, rel_out, idx, unresolved):
     """One source file → (okf text, title, description).  Returns None when it has no frontmatter."""
-    fm, body = parse_fm(open(src, encoding="utf-8").read())
+    #  `errors="replace"` —— one latin-1 byte anywhere used to abort the whole run with a
+    #  bare UnicodeDecodeError naming no file.  `owned()` already had this discipline.
+    fm, body = parse_fm(open(src, encoding="utf-8", errors="replace").read())
     if not fm:
         return None
     text = to_okf(fm, body, rel_out, idx, unresolved, extensions=EXT_OPENWIKI)
@@ -128,6 +188,10 @@ def main():
     ap.add_argument("--into", default=None,
                     help="destination inside the bundle.  Default: personal/sessions/<agent>/ "
                          "chosen per document from its session_agent")
+    ap.add_argument("--exclude", action="append", default=[],
+                    help="skip source paths containing this fragment (repeatable).  Needed to "
+                         "keep an already-migrated subtree — raw/conversations/sessions — out of "
+                         "a run over its parent.")
     ap.add_argument("--force", action="store_true", help="proceed past the shrink guard")
     ap.add_argument("--dry-run", action="store_true", help="report, write nothing")
     ap.add_argument("--selftest", action="store_true")
@@ -135,6 +199,25 @@ def main():
     if a.selftest:
         return _selftest()
 
+    #  ⚠ **`--into` used to be joined straight onto the bundle root.**  An absolute value
+    #     discarded the root entirely and `../` walked out of it, so writes —— and then the
+    #     `os.remove` loop —— landed outside the directory `git_ok()` had just validated.  The
+    #     module's whole safety story is "git revert is the only way back", and it was void
+    #     exactly where the files went.  An absolute value also hung forever in the index walk
+    #     (`os.path.dirname("/") == "/"`), *after* the deletions.
+    #     (deep review 2026-09-02, security + completeness lenses —— both reproduced)
+    if a.into:
+        #  ⚠ An explicit `os.path.isabs` check used to sit here.  A mutation test showed it was
+        #     **completely redundant** with the containment check below —— `os.path.join` lets an
+        #     absolute value replace the root, and `commonpath` then rejects it anyway, so
+        #     removing the isabs arm left every self-check green.  Same shape as the duplicated
+        #     `role: developer` guard removed in ingest_codex_sessions on the same day: a branch
+        #     no test can distinguish is a branch that rots unnoticed.
+        probe = os.path.realpath(os.path.join(a.wiki, a.into))
+        root = os.path.realpath(a.wiki)
+        if os.path.commonpath([probe, root]) != root:
+            print(f"❌ --into escapes the bundle: {a.into} → {probe}")
+            return 1
     if not os.path.isdir(a.src):
         print(f"❌ no such source folder: {a.src}")
         return 1
@@ -144,7 +227,21 @@ def main():
               f"     git -C {a.wiki} init && git -C {a.wiki} add -A && git -C {a.wiki} commit -m init")
         return 1
 
-    files = sorted(glob.glob(os.path.join(a.src, "*.md")))
+    #  ⚠ Not recursive before.  Measured on the real vault: `wiki/` migrated **3 of 79** and
+    #     `raw/` migrated **0 of 297** (every file nested), printing a cheerful "✅ 1 page(s)".
+    #     A migration that silently moves 4% is worse than one that fails.
+    files = sorted(glob.glob(os.path.join(a.src, "**", "*.md"), recursive=True))
+    #  ⚠ A source `index.md` must not become a page.  OKF §8 forbids frontmatter in an index, and
+    #     this tool generates its own for every directory —— copying the vault's in would both
+    #     violate the spec and be overwritten moments later by the generated one.
+    n_ix = sum(1 for f in files if os.path.basename(f) == "index.md")
+    files = [f for f in files if os.path.basename(f) != "index.md"]
+    if a.exclude:
+        before = len(files)
+        files = [f for f in files if not any(x in f for x in a.exclude)]
+        print(f"  ⓘ excluded {before - len(files)} file(s) matching {a.exclude}")
+    if n_ix:
+        print(f"  ⓘ skipped {n_ix} source index.md —— this tool generates its own (§8)")
     if not files:
         print(f"❌ no .md under {a.src}")
         return 1
@@ -156,12 +253,20 @@ def main():
     #  ── plan first, write later.  Nothing is removed before the whole run is known good ──
     plan, skipped = [], 0
     for f in files:
-        fm, _ = parse_fm(open(f, encoding="utf-8").read())
+        try:
+            fm, _ = parse_fm(open(f, encoding="utf-8", errors="replace").read())
+        except OSError as e:
+            print(f"  ⚠ unreadable, skipped: {f} ({e})")
+            skipped += 1
+            continue
         if not fm:
             skipped += 1
             continue
         sub = a.into or os.path.join("personal", "sessions", agent_of(fm))
-        rel = os.path.join(sub, os.path.basename(f))
+        #  Keep the source's own subdirectories, so a nested vault tree does not collapse into
+        #  one flat folder where two `index.md`-adjacent names collide.
+        inner = os.path.relpath(os.path.dirname(f), a.src)
+        rel = os.path.join(sub, "" if inner == "." else inner, os.path.basename(f))
         got = convert_one(f, rel, idx, unresolved)
         if not got:
             skipped += 1
@@ -188,20 +293,62 @@ def main():
             print(f"      {rel}")
         return 0
 
+    #  ⚠ **The transmission block has to survive a re-emit.**  A published page that a person
+    #     marked `no_llm: true` by hand is `owned()`, so it was deleted and rewritten from
+    #     ~/.kal/distilled —— which never carries the key, because `distill_sessions.write()`
+    #     does not emit it.  The user's "do not send this document to an LLM" therefore lasted
+    #     exactly one run, and nothing said so.  (deep review 2026-09-02, security lens)
+    for rel, text, title, desc in list(plan):
+        dst = os.path.join(a.wiki, rel)
+        if os.path.exists(dst) and has_no_llm(dst) and not re.search(r"^no_llm:", text, re.M):
+            i = plan.index((rel, text, title, desc))
+            #  Second line, straight after `type:` —— the position `to_okf` puts it in.
+            lines = text.split("\n")
+            at = 2 if len(lines) > 2 and lines[1].startswith("type:") else 1
+            lines.insert(at, "no_llm: true")
+            plan[i] = (rel, "\n".join(lines), title, desc)
+            print(f"  ⓘ carried `no_llm: true` forward from the published {rel}")
+
+    #  ⚠ **The one write that leaves ~/.kal (0700) for a shareable git repository.**  Both
+    #     ingesters verify before writing; this boundary did not, so anything `SECRETS` fails to
+    #     match rode ingest → distill → bundle uncontested.  Names and counts only, never values.
+    leak = find_leaks("".join(txt for _rel, txt, *_ in plan))
+    if leak:
+        print(f"\n❌ masking verification failed — {sum(leak.values())} secret(s) in the pages "
+              f"about to be published: {leak}")
+        print("   Nothing is written and it stops here.  Strengthen SECRETS in ingest_sessions.py,")
+        print("   re-run the ingest and distil, then try again.")
+        return 1
+
     #  ── write ──
     for d in touched_dirs:
         os.makedirs(d, exist_ok=True)
-        for old in owned(d):
-            os.remove(old)
+        for stale in owned(d):
+            os.remove(stale)
     for rel, text, _t, _d in plan:
         dst = os.path.join(a.wiki, rel)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         open(dst, "w", encoding="utf-8").write(text)
 
-    #  ── indexes, one per directory that holds pages, plus the roots above them ──
+    #  ── indexes and manifest ──
+    #  ⚠ **Built from the whole bundle, not from this run's `plan`.**  They used to be rebuilt
+    #     from `plan` alone, so a second run with a different `--into` dropped the first run's
+    #     pages from `.page-manifest.json` and from the root index —— the 299 session pages stayed
+    #     on disk but became unreachable from the root, which is the exact property the comment
+    #     below claims to enforce.  Reproduced: manifest went 2 pages → 1.
+    #     (deep review 2026-09-02, completeness lens)
     by_dir = {}
-    for rel, _text, title, desc in plan:
-        by_dir.setdefault(os.path.dirname(rel), []).append((title, rel, desc))
+    for f in sorted(glob.glob(os.path.join(a.wiki, "**", "*.md"), recursive=True)):
+        rel = os.path.relpath(f, a.wiki)
+        if os.path.basename(rel) == "index.md" or rel.split(os.sep)[0] == "references":
+            continue
+        if os.sep not in rel:                       # SPEC.md / INSTRUCTIONS.md at the root
+            continue
+        fmx, _b = parse_fm(open(f, encoding="utf-8", errors="replace").read())
+        d = re.search(r'^description:\s*(.+)$', open(f, encoding="utf-8", errors="replace").read(), re.M)
+        by_dir.setdefault(os.path.dirname(rel), []).append(
+            ((fmx.get("title") or slug_of(rel)), rel,
+             (d.group(1).strip().strip('"') if d else "")))
     for d, entries in sorted(by_dir.items()):
         open(os.path.join(a.wiki, d, "index.md"), "w", encoding="utf-8").write(render_index(d, entries))
     #  a parent index listing its children, so no directory is unreachable from the root
@@ -229,8 +376,10 @@ def main():
            "generated_at": datetime.datetime.now(datetime.timezone.utc)
                            .replace(microsecond=0).isoformat().replace("+00:00", "Z"),
            "pages": sorted(({"path": "/" + rel.replace(os.sep, "/"), "title": title,
-                             "sha256": hashlib.sha256(text.encode()).hexdigest()}
-                            for rel, text, title, _d in plan), key=lambda x: x["path"])}
+                             "sha256": hashlib.sha256(
+                                 open(os.path.join(a.wiki, rel), "rb").read()).hexdigest()}
+                            for entries in by_dir.values() for title, rel, _d in entries),
+                           key=lambda x: x["path"])}
     open(os.path.join(a.wiki, MANIFEST), "w", encoding="utf-8").write(
         json.dumps(man, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
@@ -326,6 +475,122 @@ def _selftest():
             assert "* [" in body or "(비어 있음)" in body, f"{ix} lists nothing"
         assert os.path.exists(os.path.join(wiki, "index.md")), "the bundle root has no index"
         ok.append("indexes carry no frontmatter, and the root declares okf_version (§8·§12)")
+
+        #  ⑥ Ownership is decided in the frontmatter, never in the body.  A page that merely
+        #     *documents* the format used to be deleted —— SPEC.md and INSTRUCTIONS.md are
+        #     exactly such pages.  (reproduced by the security lens, 2026-09-02)
+        doc = os.path.join(cl, "HOWTO.md")
+        open(doc, "w").write(
+            '---\ntitle: "How the format works"\ntype: note\n---\n'
+            'Each emitted page carries `resource: "claude-session://<id>"` in its sources.\n')
+        assert doc not in owned(cl), "a page documenting the format was classified as ours"
+        #  ⚠ And a **third-party OKF page** —— one with a perfectly ordinary `resource:` and no
+        #     session scheme —— is not ours either.  `resource` is a recommended OKF field, so
+        #     relaxing the scheme requirement would classify every OKF page in the directory as
+        #     ours and delete it.  A mutation to `^\s*resource:` used to leave every check green.
+        foreign_okf = os.path.join(cl, "someone-elses-okf-page.md")
+        open(foreign_okf, "w").write(
+            '---\ntype: "Concept"\ntitle: "Theirs"\nresource: "/personal/whatever.md"\n'
+            'sources:\n  - id: s1\n    resource: "https://example.org/"\n---\nBody.\n')
+        assert foreign_okf not in owned(cl), "a third-party OKF page was classified as ours"
+        sys.argv = ["x", "--wiki", wiki, "--from", src, "--force"]
+        assert main() == 0
+        assert os.path.exists(doc), "a page that only documents the format was deleted"
+        assert os.path.exists(foreign_okf), "a third-party OKF page was deleted"
+        ok.append("ownership needs the session scheme —— a doc page and a foreign OKF page survive")
+
+        #  ⑫ Inside a repository is not the same as recoverable.  A bundle in .gitignore passes
+        #     `rev-parse` and stays untracked, so `git revert` restores nothing.
+        ign = os.path.join(d, "repo")
+        subprocess.run(["git", "init", "-q", ign], check=True)
+        os.makedirs(os.path.join(ign, "bundle"))
+        open(os.path.join(ign, ".gitignore"), "w").write("bundle/\n")
+        sys.argv = ["x", "--wiki", os.path.join(ign, "bundle"), "--from", src, "--force"]
+        assert main() == 1, "a gitignored bundle was accepted —— git revert could not undo it"
+        ok.append("a bundle inside .gitignore is refused, not just one outside a repository")
+
+        #  ⑦ `--into` may not leave the bundle.  The git check validated the root; writes and
+        #     deletions used to land wherever `--into` pointed, absolute or `../`.
+        outside = os.path.join(d, "PRECIOUS")
+        os.makedirs(outside, exist_ok=True)
+        open(os.path.join(outside, "keep.md"), "w").write("do not touch\n")
+        for bad in (os.path.join(d, "PRECIOUS"), "../PRECIOUS", "../../etc"):
+            sys.argv = ["x", "--wiki", wiki, "--from", src, "--into", bad, "--force"]
+            assert main() == 1, f"--into {bad} was accepted"
+        assert open(os.path.join(outside, "keep.md")).read() == "do not touch\n"
+        ok.append("--into cannot escape the bundle (absolute or ../)")
+
+        #  ⑧ A nested source tree migrates whole.  Non-recursive globbing moved 3 of 79 real
+        #     vault files and printed a success line.
+        nest = os.path.join(d, "nested")
+        os.makedirs(os.path.join(nest, "a", "b"))
+        for q, name in ((nest, "top.md"), (os.path.join(nest, "a"), "mid.md"),
+                        (os.path.join(nest, "a", "b"), "deep.md")):
+            open(os.path.join(q, name), "w").write(
+                f'---\ntitle: "{name[:-3]}"\ntype: note\n---\n본문\n')
+        sys.argv = ["x", "--wiki", wiki, "--from", nest, "--into", "personal/notes", "--force"]
+        assert main() == 0
+        got = glob.glob(os.path.join(wiki, "personal/notes", "**", "*.md"), recursive=True)
+        got = [g for g in got if os.path.basename(g) != "index.md"]
+        assert len(got) == 3, f"a nested tree migrated {len(got)} of 3"
+        ok.append("a nested source tree migrates whole, keeping its subdirectories")
+
+        #  ⑬ A source index.md never becomes a page (§8 forbids its frontmatter), and --exclude
+        #     keeps an already-migrated subtree out of a run over its parent.
+        open(os.path.join(nest, "index.md"), "w").write(
+            '---\ntitle: "theirs"\ntype: index\n---\nlisting\n')
+        os.makedirs(os.path.join(nest, "skipme"), exist_ok=True)
+        open(os.path.join(nest, "skipme", "no.md"), "w").write(
+            '---\ntitle: "no"\ntype: note\n---\n본문\n')
+        sys.argv = ["x", "--wiki", wiki, "--from", nest, "--into", "personal/notes",
+                    "--exclude", "/skipme/", "--force"]
+        assert main() == 0
+        assert not os.path.exists(os.path.join(wiki, "personal/notes/skipme/no.md")), \
+            "--exclude did not keep the subtree out"
+        ix = open(os.path.join(wiki, "personal/notes/index.md")).read()
+        assert not ix.startswith("---"), "a source index.md overwrote the generated one"
+        assert "theirs" not in ix, "the source index's own title leaked into the bundle"
+        ok.append("a source index.md is not copied (§8) and --exclude keeps a subtree out")
+
+        #  ⑨ The manifest and the root index cover the WHOLE bundle, not just this run.  A second
+        #     run with a different --into used to drop the first run's pages from both.
+        man = json.load(open(os.path.join(wiki, MANIFEST)))
+        paths = {q["path"] for q in man["pages"]}
+        assert any(q.startswith("/personal/notes/") for q in paths), "the notes run is missing"
+        assert any(q.startswith("/personal/sessions/") for q in paths), \
+            "the earlier sessions run was dropped from the manifest by a later --into run"
+        #  The root lists `personal`; `personal/index.md` lists both directories under it.
+        root_ix = open(os.path.join(wiki, "index.md")).read()
+        assert "personal" in root_ix, "the root index does not reach personal/"
+        mid_ix = open(os.path.join(wiki, "personal", "index.md")).read()
+        assert "sessions" in mid_ix and "notes" in mid_ix, \
+            "personal/index.md lost a directory a previous run created:\n" + mid_ix
+        ok.append("manifest and root index span the whole bundle across runs")
+
+        #  ⑩ A published page hand-marked `no_llm: true` keeps it through a re-emit.  It used to
+        #     be deleted and rewritten from a source that never carries the key —— the user's
+        #     "do not send this" survived exactly one run.
+        page = [f for f in glob.glob(os.path.join(cx, "*.md"))
+                if os.path.basename(f) != "index.md"][0]
+        body = open(page).read()
+        open(page, "w").write(body.replace("\ntype:", "\nno_llm: true\ntype:", 1))
+        assert has_no_llm(page)
+        sys.argv = ["x", "--wiki", wiki, "--from", src, "--force"]
+        assert main() == 0
+        assert has_no_llm(page), "the no_llm gate was silently dropped by a re-emit"
+        assert re.search(r"^no_llm: true$", open(page).read(), re.M), "no_llm was quoted or moved"
+        ok.append("a hand-set no_llm: true survives a re-emit")
+
+        #  ⑪ Nothing is published without the leak check —— this is the one write that leaves
+        #     ~/.kal (0700) for a git repository.
+        bad = os.path.join(src, "leak.md")
+        open(bad, "w").write('---\ntitle: "L"\ntype: note\n---\nkey sk-ant-api03-'
+                             + "A" * 30 + "\n")
+        sys.argv = ["x", "--wiki", wiki, "--from", src, "--force"]
+        assert main() == 1, "a page carrying a secret was published"
+        assert not os.path.exists(os.path.join(cl, "leak.md")), "it wrote before checking"
+        os.remove(bad)
+        ok.append("a secret in a page stops the publication before anything is written")
 
     for line in ok:
         print(f"  ✅ {line}")

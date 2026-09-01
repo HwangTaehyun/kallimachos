@@ -236,10 +236,20 @@ def to_okf(fm, body, rel_path, idx, unresolved, extensions=EXT_ALL):
     # ── Required ──
     raw_type = (fm.get("type") or "").strip().lower()
     out.append("type: %s" % yaml_str(TYPE_MAP.get(raw_type, raw_type.title() or "Document")))
-    # no_llm goes at **the head of the frontmatter**.  The consumer, lr_extract.py:152, scans
-    # only `t[:1200]`, so putting it last pushes it out of the window the moment the
-    # frontmatter grows and the gate is **silently** breached (a converted max of 1,067 characters — 133 to spare).
-    # No quotes either —— NO_LLM_MARK matches `^no_llm:\s*true\s*$`.
+    #  no_llm goes near the head of the frontmatter, and it is emitted **unquoted**.
+    #
+    #  ⚠ This comment used to cite `lr_extract.py:152`'s `NO_LLM_MARK` and a 1,200-character
+    #     scan window.  Both were wrong, and the review that found it is the reason this note
+    #     exists (2026-09-02, fact-checker + consistency lenses):
+    #       · `lr_extract.py:152` is `MODEL = "haiku"`.  `NO_LLM_MARK` sits at :297 and is
+    #         **never called** —— lr_extract gates at :351 on `doc_meta(t)[2]`, and its own
+    #         comment at :345 says "the judgement happens in doc_meta and nowhere else".
+    #       · `schema_v3.doc_meta` matches `no_llm` against the **whole** frontmatter block with
+    #         no character limit.  Measured: a 4,500-character frontmatter with `no_llm` last
+    #         still reads True.  The `raw[:1200]` window is real but belongs to **`doc_type`**
+    #         (schema_v3.py:563) —— which this converter emits *last*.
+    #     So head placement is defence in depth, not the load-bearing rule it claimed to be.
+    #     What *is* load-bearing is the absence of quotes: `no_llm: "true"` fails the regex.
     if fm.get("no_llm"):
         out.append("no_llm: %s" % str(fm["no_llm"]).strip().strip('"\''))
     # ── Recommended ──
@@ -248,8 +258,17 @@ def to_okf(fm, body, rel_path, idx, unresolved, extensions=EXT_ALL):
     desc = first_sentence(body)
     if desc:
         out.append("description: %s" % yaml_str(desc))
-    # resource: the original this concept points at.  A bundle-relative path is allowed too (§6.2).
-    out.append("resource: %s" % yaml_str("/" + rel_path))
+    #  ⚠ `resource` used to be `"/" + rel_path` —— the page pointing at **itself**.  §4.1:
+    #     "`resource`: A URI that uniquely identifies the underlying asset the concept describes.
+    #     **Absent for concepts that describe abstract ideas.**"  A distilled session document
+    #     describes a conversation, and the conversation is already named in `sources[]`; the
+    #     page's own path is not an asset it describes.  A self-reference is not merely useless,
+    #     it tells a consumer the asset *is* the page, which defeats §5.1's provenance chain.
+    #     Emitted only when the source document actually names an external asset.
+    #     (deep review 2026-09-02, domain lens)
+    ext_res = (fm.get("resource") or fm.get("source") or "").strip().strip("\"'")
+    if ext_res:
+        out.append("resource: %s" % yaml_str(ext_res))
     tags = fm.get("tags")
     if isinstance(tags, list) and tags:
         out.append("tags: [%s]" % ", ".join(yaml_str(t) for t in tags))
@@ -269,8 +288,17 @@ def to_okf(fm, body, rel_path, idx, unresolved, extensions=EXT_ALL):
             # An external URL works, and so does a bundle-relative path.  Session logs live outside the bundle, so a scheme is used.
             "resource": "%s-session://%s" % (agent, sid),
             "title": fm.get("session_project") or ("%s session" % agent),
-            "author": "process:distill_sessions",
-            "last_modified": fm.get("captured") or "",
+            #  ⚠ `author` used to say `process:distill_sessions`.  OKF §5.1: "`author`: Who or
+            #     what produced **the source**."  The source is the session —— produced by a person
+            #     and an assistant —— while distill_sessions produced the *page*, which is already
+            #     recorded in `generated.by`.  Writing the same value in both collapsed the
+            #     distinction §5.1 exists to preserve ("judge a concept by judging its sources")
+            #     and laundered the human origin out of the record.  Omitted rather than guessed.
+            #  ⚠ `last_modified` is dropped for the same reason it was wrong: it was a copy of
+            #     `captured`, which §5.1 says is "distinct from generated.at", and it was emitted
+            #     date-only against §5's "explicit UTC offset" rule.  A session file's real mtime
+            #     is available but is the mtime of a *log*, not of the source conversation.
+            "last_modified": "",
         })
     # The vault's sources take the form `sN:slug` —— an id prefix `fm_migrate.py` added.
     # Nested YAML would be split on commas and broken by parse_fm, so the id rides as a prefix
@@ -326,17 +354,25 @@ def to_okf(fm, body, rel_path, idx, unresolved, extensions=EXT_ALL):
     # Our vocabulary with no OKF counterpart but too useful to drop —— unknown keys are allowed (§11)
     #
     # ⚠ `no_llm` **must** be in here.  The frontmatter is rewritten as an allowlist, so a key
-    #   missing from the list disappears silently.  lr_extract.py:152's NO_LLM_MARK is **the
-    #   only gate blocking per-document LLM transmission**, and with no matching string in the
-    #   converted output, a user's "do not send this note" is ignored.  Worse, it does not show
-    #   in the 'N excluded from transmission' log either, so the failure is silent.
-    #   (deep review 2026-08-19, security lens)
+    #   missing from the list disappears silently.  The gate is `schema_v3.doc_meta`, read by
+    #   `lr_extract.py:351` —— **the only per-document block on LLM transmission** —— and with no
+    #   matching string in the converted output a user's "do not send this note" is ignored,
+    #   without even appearing in the 'N excluded from transmission' log.
+    #   ⚠ `no_llm` is **not** in `extensions`; it is emitted separately above, unquoted.  Adding
+    #      it to the list would route it through `yaml_str` and quote it, which breaks the gate.
+    #   (deep review 2026-08-19 security lens; the consumer corrected 2026-09-02)
+    #  ⚠ `doc_type` is emitted **unquoted**, like `no_llm`.  The indexer reads it with
+    #     `re.search(r"^doc_type:\s*(\S+)", raw[:1200])` (schema_v3.py) and `(\S+)` swallows the
+    #     quotes, so `doc_type: "analysis"` indexes as the six-character string `"analysis"`
+    #     —— quotes included —— into a BITMAP column.  Every filter on it then matches zero rows,
+    #     with no error anywhere.  The vault's own writer (distill_sessions) has always emitted it
+    #     bare; quoting it here was a regression this converter introduced.
+    #     (deep review 2026-09-02, completeness lens —— measured 299/301 pages affected)
+    BARE = ("doc_type",)
     for k in extensions:
         if fm.get(k):
-            # no_llm must be emitted **without quotes**.  lr_extract.NO_LLM_MARK matches
-            # `^no_llm:\s*true\s*$`, so `no_llm: "true"` does not.
-            # A self-check pins it, so code meant to keep the gate alive cannot fail to.
-            out.append("%s: %s" % (k, yaml_str(fm[k])))
+            v = str(fm[k]).strip().strip("\"'")
+            out.append("%s: %s" % (k, v if k in BARE and v and " " not in v else yaml_str(fm[k])))
 
     return "---\n%s\n---\n%s" % ("\n".join(out), convert_links(body, idx, unresolved))
 
@@ -501,7 +537,9 @@ def selftest():
     # Coupled to the consumer.  If lr_extract changes its scan window or regex, this breaks here.
     try:
         import lr_extract as _lx
-        assert _lx.NO_LLM_MARK.search("no_llm: true\n"), "the consumer's regex changed"
+        #  The **live** consumer, not the vestigial NO_LLM_MARK constant.
+        from schema_v3 import doc_meta as _dm
+        assert _dm('---\nno_llm: true\n---\nb\n')[2], "the live gate no longer reads no_llm"
     except ImportError:
         pass
 
@@ -519,7 +557,7 @@ def selftest():
     assert _hit, "no_llm was pushed outside the 1200-character scan window by a long frontmatter"
 
     assert _re.search(r"^no_llm:\s*true\s*$", okf2, _re.M | _re.I), \
-        "must be in the form lr_extract.NO_LLM_MARK matches: " + okf2
+        "must be in the form schema_v3.doc_meta matches: " + okf2
     # Deterministic: two runs must be identical
     assert to_okf(*parse_fm('---\ntitle: "A: B"\ntags: [x, y]\nmaturity: seedling\n---\n## Overview\n\nIt starts. Second.\n'),
                   "wiki/a.md", idx, set()) == okf
@@ -574,10 +612,37 @@ def selftest():
                       to_okf(dict(_base), "B.", "x.md", {}, set()), _re.M), \
         "generated.by did not reach the output in actor form"
 
+    #  ── doc_type is emitted bare, because the indexer's `(\S+)` swallows quotes ───────────
+    #  `doc_type: "analysis"` indexed as the six-char string `"analysis"` into a BITMAP column,
+    #  so every filter on it matched zero rows with no error.  Measured on 299/301 pages.
+    _dt = to_okf(dict(_base) | {"doc_type": "analysis"}, "B.", "x.md", {}, set(),
+                 extensions=EXT_OPENWIKI)
+    assert _re.search(r"^doc_type: analysis$", _dt, _re.M), \
+        "doc_type must be unquoted —— schema_v3 reads it with (\\S+) and would keep the quotes:\n" + _dt
+    #  the indexer's own regex, run here so the two cannot drift apart
+    assert _re.search(r"^doc_type:\s*(\S+)", _dt, _re.M).group(1) == "analysis", \
+        "the indexer's regex does not recover a bare value"
+    #  a value with a space still has to be quoted, or the YAML is wrong
+    assert '"two words"' in to_okf(dict(_base) | {"doc_type": "two words"}, "B.", "x.md", {},
+                                   set(), extensions=EXT_OPENWIKI)
+
+    #  ── sources[].author is about the SOURCE, not about us (§5.1) ─────────────────────────
+    assert not _re.search(r"^\s+author:", to_okf(dict(_base), "B.", "x.md", {}, set()), _re.M), \
+        "sources[].author attributes the session to our own distiller (§5.1)"
+    #  ── resource must not point at the page itself (§4.1) ─────────────────────────────────
+    _self = to_okf(dict(_base), "B.", "personal/sessions/codex/x.md", {}, set())
+    assert not _re.search(r"^resource: .*personal/sessions", _self, _re.M), \
+        "resource points at the page itself; §4.1 wants the asset the concept describes"
+    #  …but a document that names a real external asset keeps it
+    assert 'resource: "https://ai-2027.com/"' in to_okf(
+        dict(_base) | {"source": "https://ai-2027.com/"}, "B.", "x.md", {}, set()), \
+        "an external source URL was dropped instead of becoming `resource`"
+
     print("  ✅ okf_convert self-check — 4 link forms · frontmatter round trip · determinism\n"
           "     · session scheme follows the agent · status is stated, never left to default\n"
           "     · openwiki output carries exactly three extensions, the vault output keeps four\n"
-          "     · generated.by is an OKF actor (§7)")
+          "     · generated.by is an OKF actor (§7)\n"
+          "     · doc_type bare (the indexer's own regex) · no sources[].author · no self-resource")
 
 
 if __name__ == "__main__":

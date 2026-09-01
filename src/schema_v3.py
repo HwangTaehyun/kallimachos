@@ -161,8 +161,23 @@ def is_skipped(path):
     if rel.startswith(".."):
         return False                      # outside the vault was never in scope
     parts = rel.split(os.sep)
+    #  ⚠ A generated `index.md` is navigation, not knowledge —— it is a list of links to the
+    #     documents beside it, so indexing it puts a page whose entire body is other pages' titles
+    #     into the same ranking as those pages.  Measured 2026-09-02: searching the bundle for
+    #     "지식 그래프" returned `personal/sessions/claude/index.md` **first**, ahead of the three
+    #     documents actually about it.  OKF §8 makes these files a required navigational surface,
+    #     which is exactly why they must not compete as content.
+    if parts[-1] == "index.md":
+        return True
     top = parts[0]
     if top in SKIP_ROOT:
+        return True
+    #  ⚠ `SKIP_ROOT` only looks at the first segment.  The 699-page kg export was migrated to
+    #     `personal/kg/` on 2026-09-02, which moved it out from under that check while leaving
+    #     the reason for the check —— indexing a KG export feeds KG→note→KG back —— completely
+    #     intact.  A guard whose reach depends on a directory name being at depth 1 reopens the
+    #     moment someone nests it.  Matched at any depth.
+    if any(seg in SKIP_ROOT for seg in parts[:-1]):
         return True
     if top in _self_copies():             # this project itself, placed inside the vault
         return True
@@ -178,6 +193,15 @@ def is_skipped(path):
 SKIP = SKIP_ANY + tuple(f"/{x}/" for x in SKIP_ROOT)
 
 SESSION_DIR = "raw/conversations/sessions/"   # distill_sessions.py output → origin='session'
+#  The openwiki bundle records the same provenance as a URI in `sources[]` instead of a path.
+#  Matching it means the classification follows the document, not the directory it happens to sit in.
+#  ⚠ The `-` prefix matters.  `sources:` entries are equally valid as
+#     `  - resource: …` (the item starting on the same line) or as
+#     `  - id: …` / `    resource: …`.  This tool emits the second, so a regex
+#     anchored on `^\s*resource:` matched our own pages and would have missed any
+#     bundle written the other way —— a self-check written for this guard caught it
+#     before it mattered (2026-09-02).
+SESSION_URI = re.compile(r"^[ \t]*(?:-[ \t]+)?resource:[ \t]*\"?(?:claude|codex)-session://", re.M)
 
 # ④ The types declared in the prompt.  Anything else the LLM invents folds in here.
 #    **Must match `lr_extract.ENTITY_TYPES`** —— a type missing here becomes "other".
@@ -457,6 +481,24 @@ def clean(t):
 DATE_KEYS = ("generated_at", "captured", "created", "updated")
 
 
+def classify_origin(rel, raw):
+    """`session` or `vault`.
+
+    ⚠ **Provenance, not path.**  This was `rel.startswith(SESSION_DIR)`, which only recognises the
+       vault's own `raw/conversations/sessions/`.  An openwiki bundle keeps the same documents at
+       `personal/sessions/{claude,codex}/`, so all 299 classified as `vault` and
+       `kal_search(origin="session")` —— whose docstring says "distilled from a conversation" ——
+       returned nothing.  Measured 2026-09-02 with KAL_VAULT on the bundle: 306 documents,
+       origin=session for 0.
+
+       Pulled out of the indexing loop so a mutation can be caught: inlined, removing the
+       provenance arm left every self-check green.
+    """
+    if rel.startswith(SESSION_DIR):
+        return "session"                       # the vault layout, kept for anything predating the bundle
+    return "session" if SESSION_URI.search(raw[:2000]) else "vault"
+
+
 def doc_meta(raw):
     """(doc_date, date_src, no_llm, doc_updated).  Reads the frontmatter only.
 
@@ -559,7 +601,16 @@ def scan_vault():
         # brain-ingest documents from distill_sessions.py live in raw/conversations/sessions/.
         # They are ordinary vault files, but their provenance differs, so origin separates them
         # (a curated note = written by the user; session = distilled by an LLM from a conversation).
-        origin = "session" if rel.startswith(SESSION_DIR) else "vault"
+        #  ⚠ **Provenance, not path.**  This used to be `rel.startswith(SESSION_DIR)`, which only
+        #     recognises the vault's own `raw/conversations/sessions/`.  An openwiki bundle keeps
+        #     the same documents at `personal/sessions/{claude,codex}/`, so all 299 of them
+        #     classified as `vault` and `kal_search(origin="session")` —— whose docstring says
+        #     "distilled from a conversation" —— returned nothing.  Measured 2026-09-02 with
+        #     KAL_VAULT pointed at the bundle: 306 documents, origin=session for 0 of them.
+        #     A session URI in `sources[]` is what actually makes a document a session record, and
+        #     it survives any directory layout.  The path test stays as the fallback for a vault
+        #     that predates the bundle.
+        origin = classify_origin(rel, raw)
         m = re.search(r"^doc_type:\s*(\S+)", raw[:1200], re.M)
         ddate, dsrc, no_llm, dupd = doc_meta(raw)
         out[did] = {"doc_id": did, "path": rel, "abs_path": f,
@@ -1364,9 +1415,63 @@ def _selftest():
               'sources:\n  - resource: /x\n    last_modified: "1999-01-01"\n---\nb\n')
     assert doc_meta(_other)[:2] == ("", "none"), \
         "a verified/source date was taken for the generation time: %r" % (doc_meta(_other),)
-    #  the flat vault keys keep working, and no_llm still reads through all of it
-    _flat = '---\nno_llm: true\ncaptured: 2026-04-25\n---\nb\n'
-    assert doc_meta(_flat)[:3] == ("2026-04-25", "captured", True), doc_meta(_flat)
+    #  the flat vault keys keep working, and no_llm still reads through all of it.
+    #  ⚠ The **whole 4-tuple**, not a slice.  Every assertion here used to slice `[:2]`/`[:3]`,
+    #     which left `doc_updated` unguarded —— `upd = ""` survived as a mutation, and that field
+    #     is what `effective_date` uses to stop a document being backdated.
+    _flat = '---\nno_llm: true\ncaptured: 2026-04-25\nupdated: 2026-06-01\n---\nb\n'
+    assert doc_meta(_flat) == ("2026-04-25", "captured", True, "2026-06-01"), doc_meta(_flat)
+
+    #  ⚠ Order matters and was untested.  A page carrying **both** an OKF `generated.at` and a
+    #     flat `captured:` must take the OKF one —— the flat key is a leftover from the vault
+    #     original.  Measured on a real page, the two differ by eight months, so reading the wrong
+    #     one silently moves the document that far on the time axis.
+    _both = ('---\ngenerated: { by: "process:x", at: "2026-08-30T00:00:00Z" }\n'
+             'captured: 2026-01-01\n---\nb\n')
+    assert doc_meta(_both)[:2] == ("2026-08-30", "generated.at"), \
+        "a flat leftover key outranked the OKF provenance: %r" % (doc_meta(_both),)
+
+    #  ⚠ A malformed value must be refused, not passed through.  `_iso`'s `re.fullmatch` is the
+    #     only thing stopping `captured: not-a-date` from becoming a document's date.
+    assert doc_meta('---\ncaptured: not-a-date\n---\nb\n')[:2] == ("", "none")
+    assert doc_meta('---\ngenerated:\n  at: "not-a-date"\n---\nb\n')[:2] == ("", "none")
+    #  ── origin follows provenance, not the directory ─────────────────────────────────────
+    #  An openwiki bundle keeps session records at `personal/sessions/…`, not the vault's
+    #  `raw/conversations/sessions/`.  Keyed on the path, all 299 classified as `vault` and
+    #  `kal_search(origin="session")` returned nothing (measured 2026-09-02).
+    assert SESSION_URI.search('sources:\n  - resource: "codex-session://abc"\n'), \
+        "a codex session URI is not recognised as session provenance"
+    assert SESSION_URI.search('  - resource: claude-session://abc\n'), "unquoted form missed"
+    assert not SESSION_URI.search('  - resource: "https://example.org/"\n'), \
+        "an ordinary source URL was taken for session provenance"
+
+    #  ── the kg export stays out of the index at ANY depth ─────────────────────────────────
+    #  `SKIP_ROOT` used to look only at the first path segment.  Migrating the 699-page export to
+    #  `personal/kg/` moved it out from under the guard while leaving the KG→note→KG feedback it
+    #  exists to prevent exactly as real.
+    _v = os.path.abspath(VAULT)
+    assert is_skipped(os.path.join(_v, "kg", "x.md")), "the kg export is being indexed"
+    assert is_skipped(os.path.join(_v, "personal", "kg", "x.md")), \
+        "the kg export escapes the guard once it is nested one level down"
+    assert not is_skipped(os.path.join(_v, "personal", "kgx", "x.md")), \
+        "a directory merely starting with kg was skipped"
+    assert not is_skipped(os.path.join(_v, "personal", "sessions", "claude", "x.md"))
+    #  a generated index is navigation, and it outranked real documents when indexed
+    assert is_skipped(os.path.join(_v, "personal", "sessions", "claude", "index.md")), \
+        "a generated index.md is being indexed and competes with the documents it lists"
+    assert not is_skipped(os.path.join(_v, "personal", "x", "index-of-things.md")), \
+        "a real document whose name merely starts with index was skipped"
+
+    #  the classification itself, so removing the provenance arm cannot pass unnoticed
+    _sess = 'sources:\n  - id: "s1"\n    resource: "codex-session://abc"\n'
+    assert classify_origin("personal/sessions/codex/x.md", "---\n" + _sess + "---\nb") == "session"
+    assert classify_origin("raw/conversations/sessions/x.md", "---\ntitle: t\n---\nb") == "session"
+    assert classify_origin("personal/wiki/concepts/x.md", "---\ntitle: t\n---\nb") == "vault"
+    #  a session URI far down a long body must not reclassify an ordinary note
+    assert classify_origin("personal/wiki/x.md", "---\ntitle: t\n---\n" + "x" * 3000
+                           + "\nresource: claude-session://z\n") == "vault"
+
+    print("  ✅ origin from session provenance · kg export skipped at any depth")
     print("  ✅ doc_meta —— OKF generated.at (flow · block) · not a verified/source date · "
           "flat keys · no_llm")
 
