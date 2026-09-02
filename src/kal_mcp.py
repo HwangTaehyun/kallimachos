@@ -39,7 +39,7 @@ from mcp.server.mcpserver import MCPServer
 
 import kal_search as K
 from entity_resolve import merge_key
-from schema_v3 import FM_KEEP as _FM_KEEP, llm_gate, REDACTED
+from schema_v3 import FM_KEEP as _FM_KEEP, llm_gate, REDACTED, NO_LLM_RE
 
 VAULT = vault_path.vault()
 
@@ -353,7 +353,7 @@ def refs_of(doc_ids):
             unresolved = True
             continue
         # The source note itself may be excluded from transmission.  A back door in the gate.
-        if re.search(r"^no_llm:\s*true\s*$", t[:1500], re.M | re.I):
+        if NO_LLM_RE.search(t[:1500]):
             continue
         ttl = re.search(r'^title:\s*"?([^"\n]+)', t, re.M)
         url = _URL_RE.search(t)
@@ -788,7 +788,7 @@ def kal_doc(doc_id: int, max_chars: int = 4000) -> dict:
                 keep.append(ln)
         t = "---\n" + "\n".join(keep) + "\n---\n" + t[m.end():]
         # The index may be stale.  The source's no_llm mark is checked again **at read time**.
-        if re.search(r"^no_llm:\s*true\s*$", m.group(1), re.M | re.I):
+        if NO_LLM_RE.search(m.group(1)):
             return {"error": "blocked", "doc_id": doc_id,
                     "hint": "this document carries the no_llm (excluded from transmission) mark."}
     return {**d, "content": t[:max_chars],

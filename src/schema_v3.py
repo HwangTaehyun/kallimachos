@@ -503,6 +503,19 @@ def classify_origin(rel, raw):
     return "session" if SESSION_URI.search(raw[:2000]) else "vault"
 
 
+#  **The transmission gate, in one place.**  This exact regex was copied into six modules
+#  (kal_mcp ×2, lr_extract, okf_convert, openwiki_emit and here).  Six copies of a privacy rule
+#  drift, and the drift is silent by construction —— a document the user meant to keep local is
+#  simply sent.  This repository has already paid for a list kept in two places.
+#
+#  ⚠ **A trailing comment used to open the gate.**  `no_llm: true # private` is valid YAML and
+#     the obvious thing to write, and `\s*$` refused it —— the document was indexed with
+#     no_llm=False and went to the LLM with nothing said.  `yes`/`on` are YAML 1.1 true and are
+#     accepted for the same reason: the failure mode is silent, so being strict is not safe.
+#     (codex review 2026-09-02, blocker #8 —— reproduced)
+NO_LLM_RE = re.compile(r"^no_llm:[ \t]*(?:true|yes|on)[ \t]*(?:#.*)?$", re.M | re.I)
+
+
 def doc_meta(raw):
     """(doc_date, date_src, no_llm, doc_updated).  Reads the frontmatter only.
 
@@ -517,7 +530,7 @@ def doc_meta(raw):
     if not m:
         return "", "none", False, ""
     fm = m.group(1)
-    no_llm = bool(re.search(r"^no_llm:\s*true\s*$", fm, re.M | re.I))
+    no_llm = bool(NO_LLM_RE.search(fm))
 
     def _iso(v):
         d = (v or "").strip().strip("\"'")[:10]
@@ -1425,6 +1438,16 @@ def _selftest():
     #     is what `effective_date` uses to stop a document being backdated.
     _flat = '---\nno_llm: true\ncaptured: 2026-04-25\nupdated: 2026-06-01\n---\nb\n'
     assert doc_meta(_flat) == ("2026-04-25", "captured", True, "2026-06-01"), doc_meta(_flat)
+
+    #  The gate must not depend on **how** a person writes a true value.  `no_llm: true # private`
+    #  is valid YAML and the obvious thing to type, and it used to leave the gate open with nothing
+    #  said —— the document went to the LLM.  Both directions are checked: a false value with a
+    #  comment must stay open, or the guard would block everything and be removed.
+    #  (codex review 2026-09-02, blocker #8)
+    for _y in ("true", "true # private", "true   # 사적", "yes", "on", "TRUE"):
+        assert doc_meta(f'---\ntitle: "a"\nno_llm: {_y}\n---\nx\n')[2], f"no_llm: {_y} left the gate open"
+    for _n in ("false", "false # x", "maybe", "true-ish", '"true"'):
+        assert not doc_meta(f'---\ntitle: "a"\nno_llm: {_n}\n---\nx\n')[2], f"no_llm: {_n} closed the gate"
 
     #  ⚠ Order matters and was untested.  A page carrying **both** an OKF `generated.at` and a
     #     flat `captured:` must take the OKF one —— the flat key is a leftover from the vault

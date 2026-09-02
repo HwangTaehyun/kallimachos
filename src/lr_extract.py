@@ -294,7 +294,7 @@ except Exception:
 NO_LLM = tuple(x.strip().strip("/") for x in _NO_LLM_RAW.split(":") if x.strip())
 
 # To turn it off for one document, put `no_llm: true` in its frontmatter.
-NO_LLM_MARK = re.compile(r"^no_llm:\s*true\s*$", re.M | re.I)
+from schema_v3 import NO_LLM_RE as NO_LLM_MARK   # one place —— see schema_v3
 
 
 def blocked_path(rel):

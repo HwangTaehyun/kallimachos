@@ -29,6 +29,7 @@ import os, re, sys, json, glob, shutil, hashlib, argparse, subprocess, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from okf_convert import parse_fm, to_okf, build_link_index, EXT_OPENWIKI   # noqa: E402
+from schema_v3 import NO_LLM_RE   # the transmission gate lives in one place
 from ingest_sessions import find_leaks                                     # noqa: E402
 
 KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
@@ -62,6 +63,36 @@ SHRINK_RATIO = 0.8
 OWNED_LINE = re.compile(r"^[ \t]*(?:-[ \t]+)?resource:[ \t]*\"?(?:claude|codex)-session://", re.M)
 
 
+def _fm_scalar_free(fm):
+    """The frontmatter with **block-scalar bodies removed** —— what ownership may be judged on.
+
+    ⚠ `OWNED_LINE` is a regex over text, not a YAML parser, and it allows leading whitespace
+       because `sources:` entries are indented.  So this hand-written page was classified as
+       ours and **deleted**:
+
+           description: |
+             resource: claude-session://example
+
+       The provenance line has to be a mapping entry, not the *content* of one.  Dropping the
+       body of every `|`/`>` scalar is the smallest thing that separates them, and it keeps this
+       a text pass —— pulling a YAML parser in here would change what "frontmatter" means for
+       every other caller.  (codex review 2026-09-02, blocker #6 —— reproduced)
+    """
+    if not fm:
+        return fm
+    out, skip_to = [], None
+    for ln in fm.split("\n"):
+        indent = len(ln) - len(ln.lstrip(" \t"))
+        if skip_to is not None:
+            if ln.strip() and indent > skip_to:
+                continue                      # inside the scalar's body
+            skip_to = None
+        out.append(ln)
+        if re.match(r"^[ \t]*[^\s:#][^:]*:[ \t]*[|>][-+0-9]*[ \t]*$", ln):
+            skip_to = indent
+    return "\n".join(out)
+
+
 def owned(d):
     """Pages under `d` whose **frontmatter** carries session provenance —— the ones we may replace.
 
@@ -72,18 +103,27 @@ def owned(d):
        The two must walk the same tree or the count is a lie.
     """
     out = []
-    for root, _dirs, files in os.walk(d):
+    #  ⚠ **This directory only —— it must not recurse.**  The caller passes each directory a planned
+    #     page lands in (`touched_dirs`), and every nested directory this run writes to is in that
+    #     set on its own.  Recursing therefore adds nothing this run produced and sweeps in whole
+    #     subtrees it did not.  Reproduced 2026-09-02: one root-level vault page lands at
+    #     `personal/foo.md`, so `personal/` becomes a touched directory, and the recursive walk
+    #     found all 982 pages under `personal/sessions/**` —— `just openwiki` would have erased
+    #     path A while processing path B.  (codex review, blocker #1)
+    for root, _dirs, files in ([(d, [], os.listdir(d))] if os.path.isdir(d) else []):
         for name in files:
             if name == "index.md" or not name.endswith(".md"):
                 continue
             f = os.path.join(root, name)
+            if not os.path.isfile(f):
+                continue
             #  ⚠ There used to be a `parse_fm` branch above this one, walking `fm["sources"]` as
             #     a list.  It was **dead** —— `parse_fm` in this codebase flattens nested YAML and
             #     returns `''` for `sources:`, so `isinstance(..., list)` was always False and
             #     every real page was in fact classified down here.  A mutation that emptied the
             #     loop left all self-checks green, which is the definition of a branch no test can
             #     distinguish.  (deep review 2026-09-02, guard-testability lens)
-            blk = _fm_block(f)
+            blk = _fm_scalar_free(_fm_block(f))
             if blk and OWNED_LINE.search(blk):
                 out.append(f)
     return out
@@ -101,7 +141,7 @@ def _fm_block(path):
 
 def has_no_llm(path):
     """Does this published page carry the transmission block?  Frontmatter only."""
-    return bool(re.search(r"^no_llm:\s*true\s*$", _fm_block(path), re.M | re.I))
+    return bool(NO_LLM_RE.search(_fm_block(path)))
 
 
 def git_ok(root):
@@ -125,7 +165,8 @@ def foreign(d):
     """Everything else under `d` —— never touched.  Counted so a run can say what it left alone."""
     own = set(owned(d))
     out = []
-    for root, _dirs, files in os.walk(d):
+    #  Same scope as `owned` above —— the two must walk the same tree or the count is a lie.
+    for root, _dirs, files in ([(d, [], os.listdir(d))] if os.path.isdir(d) else []):
         for f in files:
             p = os.path.join(root, f)
             if p not in own and os.path.basename(p) not in (MANIFEST, "index.md"):
@@ -133,8 +174,17 @@ def foreign(d):
     return out
 
 
+#  ⚠ **This value becomes a path component.**  `--into` is containment-checked, but the default
+#     destination is built from the document's own `session_agent`, which is not —— so
+#     `session_agent: ../../../../tmp/PRECIOUS` wrote and deleted outside the git-validated
+#     bundle.  Whitelisting the characters is what makes that check unnecessary rather than
+#     duplicated.  (codex review 2026-09-02, blocker #2 —— reproduced)
+AGENT_OK = re.compile(r"[^a-z0-9_-]")
+
+
 def agent_of(fm):
-    return (fm.get("session_agent") or "claude").strip().lower()
+    a = AGENT_OK.sub("", (fm.get("session_agent") or "claude").strip().lower())
+    return a or "claude"
 
 
 def slug_of(path):
@@ -542,6 +592,46 @@ def _selftest():
         after = len(glob.glob(os.path.join(wiki, "**", "*.md"), recursive=True))
         assert before == after, f"a refused self-migration still wrote ({before} → {after})"
         ok.append("--from cannot be inside the bundle (the adopt → re-run self-migration)")
+
+        #  ⑦c **A run must not delete pages in a *sub*directory it did not write to.**  Reproduced
+        #      2026-09-02 (codex review, blocker #1): one root-level vault page lands at
+        #      `personal/foo.md`, making `personal/` a touched directory, and the recursive sweep
+        #      then removed every session page under `personal/sessions/**` —— `just openwiki`
+        #      erasing path A while processing path B.  This is the promote_distilled 201→3 shape.
+        deep = os.path.join(wiki, "personal", "sessions", "claude")
+        os.makedirs(deep, exist_ok=True)
+        keep = os.path.join(deep, "keep-me.md")
+        open(keep, "w").write('---\ntitle: "s"\ntype: note\nsources:\n'
+                              '  - resource: "claude-session://abc"\n---\n본문\n')
+        rootsrc = os.path.join(d, "rootsrc")
+        os.makedirs(rootsrc, exist_ok=True)
+        open(os.path.join(rootsrc, "foo.md"), "w").write('---\ntitle: "v"\ntype: note\n---\n본문\n')
+        sys.argv = ["x", "--wiki", wiki, "--from", rootsrc, "--into", "personal", "--force"]
+        assert main() == 0
+        assert os.path.exists(keep), \
+            "a run into personal/ deleted a session page under personal/sessions/"
+        ok.append("a run deletes only in the directories it writes to, never in their subtrees")
+
+        #  ⑦d A hand-written page whose **block scalar** happens to contain a provenance line is
+        #      not ours.  Reproduced 2026-09-02 (codex review, blocker #6): `description: |` with
+        #      `resource: claude-session://…` beneath it was classified as owned and deleted.
+        hand = os.path.join(wiki, "personal", "handwritten.md")
+        open(hand, "w").write('---\ntitle: "mine"\ntype: note\ndescription: |\n'
+                              '  resource: claude-session://example\n---\n본문\n')
+        assert hand not in owned(os.path.dirname(hand)), "a block scalar made a page look owned"
+        real = os.path.join(wiki, "personal", "sessions", "claude", "real.md")
+        os.makedirs(os.path.dirname(real), exist_ok=True)
+        open(real, "w").write('---\ntitle: "s"\ntype: note\nsources:\n'
+                              '  - resource: "claude-session://abc"\n---\n본문\n')
+        assert real in owned(os.path.dirname(real)), "a genuine session page stopped being owned"
+        ok.append("ownership reads mapping entries, not block-scalar contents (both directions)")
+
+        #  ⑦e `session_agent` becomes a path component and is **not** covered by the `--into`
+        #      containment check.  Reproduced: it normalised to /tmp/PRECIOUS/x.md.
+        assert agent_of({"session_agent": "../../../../tmp/PRECIOUS"}) == "tmpprecious"
+        assert agent_of({"session_agent": "codex"}) == "codex"
+        assert agent_of({"session_agent": "  /  "}) == "claude", "an empty agent must fall back"
+        ok.append("session_agent cannot become a path —— it is whitelisted, not escaped")
 
         #  ⑧ A nested source tree migrates whole.  Non-recursive globbing moved 3 of 79 real
         #     vault files and printed a success line.
