@@ -169,6 +169,22 @@ def foreign(d):
     return sorted(out)
 
 
+def is_openwiki_bundle(root):
+    """Is this an openwiki bundle rather than an Obsidian vault?
+
+    Two markers, both written by `openwiki_emit.py` and by nothing else: the generated manifest,
+    and the root index carrying `okf_version` —— OKF §12 allows that key **only** there, so finding
+    it is unambiguous.  Either alone is enough: a bundle mid-build may have written one not the other.
+    """
+    if os.path.exists(os.path.join(root, ".page-manifest.json")):
+        return True
+    try:
+        return "okf_version" in open(os.path.join(root, "index.md"),
+                                     encoding="utf-8", errors="replace").read(2000)
+    except OSError:
+        return False
+
+
 def vault_is_git(v):
     """Is undoing possible.  `git revert` is this script's only recovery mechanism."""
     r = subprocess.run(["git", "-C", v, "rev-parse", "--git-dir"],
@@ -289,7 +305,22 @@ def _selftest():
         _g.update(_keep)
         _sys.argv = _argv
 
-    print("  ✅ promote_distilled —— shrink guard · wiring · commit scope (other people's staged changes untouched)")
+    #  ⚠ An **openwiki bundle** must be refused, and a plain vault must not be.  A guard that
+    #     refused both would be removed the first time it fired on a real vault.
+    import tempfile as _tf
+    _b = _tf.mkdtemp(); open(os.path.join(_b, ".page-manifest.json"), "w").write("{}")
+    assert is_openwiki_bundle(_b), "a manifest did not identify a bundle"
+    _b2 = _tf.mkdtemp(); open(os.path.join(_b2, "index.md"), "w").write('okf_version: "0.2"\n')
+    assert is_openwiki_bundle(_b2), "a root index with okf_version did not identify a bundle"
+    _v = _tf.mkdtemp(); os.makedirs(os.path.join(_v, "wiki"), exist_ok=True)
+    open(os.path.join(_v, "index.md"), "w").write("# my vault\n")
+    assert not is_openwiki_bundle(_v), "a plain Obsidian vault was called a bundle"
+    assert not is_openwiki_bundle(_tf.mkdtemp()), "an empty folder was called a bundle"
+    import shutil as _sh
+    for _d in (_b, _b2, _v):
+        _sh.rmtree(_d, ignore_errors=True)
+    print("  ✅ promote_distilled —— shrink guard · wiring · commit scope (other people's staged changes untouched)"
+          " · refuses an openwiki bundle, accepts a vault")
 
 
 def _main_promote():
@@ -315,6 +346,20 @@ def _main_promote():
         print(f"no distilled documents: {SRC}")
         print("  If distillation has not been run yet:  just run distill")
         return
+    #  ⚠ **The vault may now be an openwiki bundle, and this step must not touch one.**
+    #     `just openwiki-adopt` points the vault setting at the bundle so every surface reads
+    #     what was indexed —— and from that moment the web UI's "Promote to vault" button (this
+    #     script, step 2 in src/status.py) writes 1,017 documents in the **old brain-ingest
+    #     format** into `<bundle>/raw/conversations/sessions/`: outside `personal/`, never
+    #     converted to OKF, and then indexed as duplicates of the pages already there.
+    #     Reproduced 2026-09-02 by clicking through the running UI —— one click, no confirmation.
+    #     The bundle path is `openwiki_emit.py`; this script is the older one it replaced.
+    if is_openwiki_bundle(VAULT):
+        raise SystemExit(
+            f"  ❌ the vault is an openwiki bundle: {VAULT}\n"
+            f"     This step writes the older brain-ingest layout, which the bundle does not use.\n"
+            f"     Use the bundle path instead:  just openwiki-sessions\n"
+            f"     (to promote into an Obsidian vault again:  just vault <that vault>)")
     metas = [fm(f) for f in files]
     today = datetime.date.today().isoformat()
     sess = {m.get("session_id") for m in metas}
