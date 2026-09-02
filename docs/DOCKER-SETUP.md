@@ -124,6 +124,68 @@ docker inspect $(docker compose ps -q api) --format '{{range .Mounts}}{{.Source}
 
 ---
 
+## 5b. What actually builds the knowledge DB
+
+**Indexing calls no LLM.** That is the whole answer to "what do I need to set" — the DB is built
+from Markdown by `schema_v3.py`, and every value it needs is already in `.env`:
+
+| Value | What it is inside the container | Why the build stops without it |
+|---|---|---|
+| `VAULT_DIR` | mounted at `/vault`, passed as `KAL_VAULT` | with no vault the indexer finds nothing and reports **every** document deleted |
+| `KAL_DIR` | mounted at `/data/kal`, passed as `KAL_HOME` / `KAL_PATH` | LanceDB has nowhere to live |
+| `UID` / `GID` | the container's user | it can read the mount but not **write** the DB into it |
+| `VAULT_NAME` | `KAL_VAULT_NAME` | compose refuses to start without it (`${VAULT_NAME:?…}`) |
+
+That is enough for **Rebuild knowledge DB** and **Incremental sync** in the UI, and for
+`just openwiki-index` on the host. Nothing else is required.
+
+### The steps that do need more
+
+Four of the seven pipeline steps call `claude -p`, and the API blocks them with a **412 before
+they start** rather than letting them fail chunk by chunk for half an hour:
+
+| Step | LLM | Writes the DB | Runs in the container? |
+|---|:--:|:--:|---|
+| Distill sessions | ✅ | | needs the relay |
+| Extract knowledge graph | ✅ | | needs the relay |
+| Export graph | ✅ | | needs the relay |
+| Fill OKF metadata (`openwiki-enrich`) | ✅ | | needs the relay |
+| **Rebuild knowledge DB** | | ✅ | **yes, on its own** |
+| **Incremental sync** | | ✅ | **yes, on its own** |
+| Verify docs | | | yes |
+
+To make the LLM steps work from the container, add the two relay values — and start the relay on
+the **host**, because that is where the credentials are:
+
+```bash
+just relay                       # on the host.  It prints both values
+# .env
+KAL_CLAUDE_RELAY=http://host.docker.internal:8791
+KAL_RELAY_TOKEN=<what it printed>
+```
+
+> ⚠ On macOS, mounting `~/.claude` read-only brings the settings but **not the login** — the
+> credentials are in the keychain. On a Linux host they are a file and the mount is enough.
+
+> ⚠ Running a step on the **host** while `KAL_CLAUDE_RELAY` is set in the environment sends its
+> calls to a relay meant for the container. `KAL_CLAUDE_RELAY` belongs in `.env` for compose;
+> leave it unset in a host shell.
+
+### Two paths, and what each needs
+
+```
+   A  agent sessions   →  distil (LLM · relay)   →  bundle
+   B  any Markdown     →  convert (no LLM)       →  bundle
+                          fill metadata (LLM)    →  bundle      openwiki-enrich
+                                                       │
+                                bundle  →  index (no LLM)  →  knowledge DB
+                                              │
+                                      extract (LLM · relay)  →  entities + relations
+```
+
+Only the boxes marked LLM need the relay. **Path B end to end — convert, index, search — runs with
+nothing but the four values in the table above.**
+
 ## 6. Keeping notes off the machine
 
 Two different gates, both read from `.env`:
@@ -149,6 +211,7 @@ Two different gates, both read from `.env`:
 | every document shows as **deleted** | `KAL_VAULT` not reaching the process | it is set in compose; a script bypassing it is the bug ([§4](#4-paths-are-different-inside)) |
 | search finds documents the screen cannot open | the mount is older than `VAULT_DIR` | `docker compose up -d` ([§5](#5-changing-the-vault--the-step-people-miss)) |
 | LLM steps return **412** | no relay, or the wrong token | `just relay` on the host, copy both values into `.env` |
+| indexing works but extraction does not | that is by design —— indexing needs no LLM, extraction does | see [§5b](#5b-what-actually-builds-the-knowledge-db) |
 | `api` never becomes healthy | the health check is `GET /api/health` | `just logs api` — it is usually a mount permission |
 | the page loads but the API 403s behind a domain | `DOMAIN` is not in the Host allowlist | set `DOMAIN` in `.env`, `docker compose up -d` |
 | a `~` in `.env` | the shell does not expand it there | write the path absolute |

@@ -211,12 +211,18 @@ Two sources, one destination. Kallimachos gathers both into an **openwiki bundle
 ```
 
 ```bash
-just openwiki-sessions                    # session logs → distilled documents → the bundle
+just openwiki-sessions                    # session logs → distilled documents → the bundle   (LLM)
 just openwiki-vault <bundle> <vault>      # any Markdown tree → the bundle.  No LLM, seconds
-just openwiki-index                       # the bundle → the knowledge DB
-just openwiki-kg                          # its documents → entities and relations
+just openwiki-enrich <bundle>             # fill the OKF metadata conversion could not invent  (LLM)
+just openwiki-index                       # the bundle → the knowledge DB.  No LLM
+just openwiki-kg                          # its documents → entities and relations             (LLM)
 just openwiki-adopt                       # point the CLI · MCP · container at the bundle
 ```
+
+**Building the knowledge DB calls no LLM.** Verified by running the indexer with `claude` absent
+from `PATH` and the relay unset — it completes. Only distillation, metadata filling and graph
+extraction need a model, which is why they are separate commands ([`docs/DOCKER-SETUP.md`](docs/DOCKER-SETUP.md) §5b
+lists exactly which settings each needs).
 
 The vault half calls no LLM and takes seconds; the session half needs one and takes hours. They are
 separate commands because they fail for entirely different reasons —— a rate limit should not stop a
@@ -224,7 +230,13 @@ conversion that never needed the network.
 
 Distillation keeps what a conversation **arrived at**, not what was said along the way: a thread
 becomes a document only once it closed, and a claim that was overturned becomes a `correction`
-document explaining what replaced it and why. On the reference corpus that is 42% of the output.
+document explaining what replaced it and why. On the reference corpus that is 42% of the output —
+431 documents of a shape the older window-splitting prompt produced **none** of.
+
+Conversion never invents metadata, so a migrated vault page keeps only the keys its author wrote
+(measured: 17% had `doc_type`, against 100% of the distilled ones). `openwiki-enrich` fills the
+rest with an LLM and stamps `filled_by:` on the page, so what a model proposed stays visible and
+correctable.
 
 Full walkthrough, with the measured costs and the traps: [`docs/OPENWIKI-PIPELINE.md`](docs/OPENWIKI-PIPELINE.md).
 
