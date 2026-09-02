@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"mime"
 	"net"
@@ -468,6 +469,41 @@ func logging(h http.Handler) http.Handler {
 // this change keeps working until its next export.
 //
 // It is about 6MB, so resending it every time is wasteful.  ServeContent handles
+// countMarkdown counts .md files under root, stopping at `limit`.  Dot-directories are skipped,
+// the way every other walk in this project does.
+//
+// It answers one question —— **is there anything here to index** —— and it answers it in Go rather
+// than by asking Python, because the caller is about to authorise a destructive write and a
+// subprocess that itself resolves the vault differently is not evidence about this path.
+func countMarkdown(root string, limit int) (int, error) {
+	if root == "" {
+		return 0, nil
+	}
+	n := 0
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // an unreadable subtree is not a reason to call the whole vault empty
+		}
+		if d.IsDir() {
+			if name := d.Name(); name != "." && strings.HasPrefix(name, ".") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".md") {
+			n++
+			if n >= limit {
+				return fs.SkipAll
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return n, err
+	}
+	return n, nil
+}
+
 // If-Modified-Since and a second visit ends in a 304 —— re-run the export and the changed mtime fetches it afresh.
 func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
 	p := filepath.Join(s.home, "graph_export", "kal-graph.json")
@@ -742,6 +778,21 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 		if holder := s.lockHolder(); holder != "" {
 			fail(w, 409, "something else is writing the DB — "+holder+
 				"  (if it is running on the host, press again once it finishes)")
+			return
+		}
+		//  ⚠ **A step that writes the DB must not run with no notes to read.**  `up-viewer` mounts
+		//     no vault, and an empty `KAL_VAULT` then falls through to ~/.kal/config.json —— which
+		//     holds a **host** path that does not exist inside the container.  The walk finds
+		//     nothing, and "Rebuild knowledge DB" overwrites every table with empty rowsets while
+		//     "Incremental sync" classifies all 1,115 documents as deleted.  One click, no
+		//     confirmation, and the DB the container exists to serve is gone.
+		//     The status screen already says the vault yielded nothing; that warning did not gate
+		//     this handler.  (codex review 2026-09-03, blocker #2 —— configuration reproduced)
+		if n, err := countMarkdown(s.vault, 1); err != nil || n == 0 {
+			fail(w, 412, "there are no notes to read at "+s.vault+
+				" — this step rebuilds the knowledge DB from them, so running it now would empty it."+
+				"  This container was started without a vault (see just up-viewer);"+
+				" run the pipeline on the host instead.")
 			return
 		}
 	}

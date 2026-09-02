@@ -123,3 +123,96 @@ func TestGraphPrefersHomeOverVault(t *testing.T) {
 		t.Fatalf("serving needed the vault after all: %d %q", code, body)
 	}
 }
+
+// A step that writes the DB must not run when there are no notes to read.
+//
+//	`up-viewer` mounts no vault, and an empty KAL_VAULT falls through to ~/.kal/config.json —— a
+//	**host** path that does not exist inside the container.  "Rebuild knowledge DB" would then
+//	overwrite every table with empty rowsets and "Incremental sync" would call all 1,115 indexed
+//	documents deleted.  One click, no confirmation.
+//
+//	Both directions: a vault with notes must still be allowed, or the guard would block the
+//	normal case and be removed the first time someone hit it.
+func TestCountMarkdownGatesDestructiveRuns(t *testing.T) {
+	empty := t.TempDir()
+	if n, err := countMarkdown(empty, 1); err != nil || n != 0 {
+		t.Fatalf("an empty folder counted %d (err %v)", n, err)
+	}
+	if n, _ := countMarkdown("", 1); n != 0 {
+		t.Fatalf("an empty path counted %d", n)
+	}
+	if n, _ := countMarkdown(filepath.Join(empty, "nope"), 1); n != 0 {
+		t.Fatalf("a missing folder counted %d", n)
+	}
+
+	//  Dot-directories are not notes —— .obsidian holds plugin data, and counting it would let a
+	//  vault that has lost every note still look populated.
+	hidden := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(hidden, ".obsidian"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hidden, ".obsidian", "x.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := countMarkdown(hidden, 1); n != 0 {
+		t.Fatalf("a note inside a dot-directory counted %d", n)
+	}
+
+	//  The other direction —— a real vault, including one where the notes are nested.
+	full := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(full, "a", "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(full, "a", "b", "deep.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := countMarkdown(full, 1); err != nil || n != 1 {
+		t.Fatalf("a nested note counted %d (err %v)", n, err)
+	}
+}
+
+// The **handler** must refuse a DB-writing step when the vault has no notes.
+//
+//	A first version of this check only exercised `countMarkdown()`.  Removing the guard from
+//	`startRun` left it green —— the same "green with the production call site deleted" shape this
+//	repository keeps paying for.  This one posts to the handler.
+func TestStartRunRefusesDestructiveWithNoNotes(t *testing.T) {
+	post := func(s *Server, step string) (int, string) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/api/runs",
+			strings.NewReader(`{"step":"`+step+`"}`))
+		r.Header.Set("Content-Type", "application/json")
+		s.startRun(w, r)
+		return w.Code, w.Body.String()
+	}
+	mk := func(vault string) *Server {
+		return &Server{
+			home:  t.TempDir(),
+			vault: vault,
+			steps: map[string]Step{
+				"index":  {ID: "index", WritesDB: true},
+				"verify": {ID: "verify"},
+			},
+			subs: map[string]map[chan string]struct{}{},
+		}
+	}
+
+	//  ① no notes → 412, and the message has to say what would happen
+	code, body := post(mk(t.TempDir()), "index")
+	if code != 412 {
+		t.Fatalf("a DB-writing step with an empty vault returned %d, want 412 (body %q)", code, body)
+	}
+	if !strings.Contains(body, "empty it") {
+		t.Errorf("the refusal does not say the DB would be emptied: %q", body)
+	}
+
+	//  ② a vault with a note → the guard does not fire.  Without this the guard could block
+	//     everything and nobody would notice until it was removed.
+	full := t.TempDir()
+	if err := os.WriteFile(filepath.Join(full, "a.md"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := post(mk(full), "index"); code == 412 {
+		t.Fatalf("a populated vault was refused: %q", body)
+	}
+}

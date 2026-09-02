@@ -40,7 +40,16 @@ import concurrent.futures as cf
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from openwiki_emit import _fm_block, git_ok                      # noqa: E402
 from distill_sessions import DOC_TYPES                           # noqa: E402
-from schema_v3 import NO_LLM_RE                                  # noqa: E402
+#  ⚠ **The transmission decision is imported, not re-implemented.**  A first version of this
+#     module matched `no_llm` with its own use of the regex and checked nothing else.
+#     `lr_extract`'s own comment had already predicted the failure —— "the judgement happens
+#     in doc_meta and nowhere else.  Two separate regexes drift apart eventually, and these
+#     actually had —— on BOM, leading blank lines and CRLF."  Measured 2026-09-03:
+#     `"no_llm": true` and `no_llm : true` are valid YAML that the local check let through,
+#     and `KAL_NO_LLM` / `KAL_SKIP` were referenced **zero times** —— the folder-level
+#     boundary did not exist here at all.  (codex review, blocker #1 —— reproduced)
+from schema_v3 import doc_meta, is_skipped                       # noqa: E402
+from lr_extract import blocked_path                              # noqa: E402
 from claude_cli import run as claude_run                         # noqa: E402
 
 KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
@@ -92,9 +101,17 @@ def missing(fm_block):
     return [k for k in FILL if not re.search(rf"^{k}:", fm_block, re.M)]
 
 
-def blocked(fm_block):
-    """Does the transmission gate stop this page from being sent."""
-    return bool(NO_LLM_RE.search(fm_block))
+def blocked(path, raw, wiki):
+    """Does the transmission boundary stop this page from being sent —— **all of it**.
+
+    Three gates, and all three are the ones the rest of the pipeline uses:
+      · `no_llm` in the frontmatter, read through `schema_v3.doc_meta` (BOM · CRLF · a trailing
+        comment · a leading blank line all handled there, once)
+      · `KAL_NO_LLM`, matched as **path components** via `lr_extract.blocked_path`
+      · `schema_v3.is_skipped` —— what indexing already refuses to look at
+    """
+    rel = os.path.relpath(path, wiki)
+    return bool(doc_meta(raw)[2]) or blocked_path(rel) or is_skipped(os.path.abspath(path))
 
 
 def body_of(text):
@@ -203,10 +220,11 @@ def main():
 
     todo, gated, complete = [], 0, 0
     for p in pages(a.wiki):
+        raw = open(p, encoding="utf-8", errors="replace").read()
         blk = _fm_block(p)
         if not blk:
             continue                        # no frontmatter — not an OKF page, leave it alone
-        if blocked(blk):
+        if blocked(p, raw, a.wiki):
             gated += 1
             continue
         need = missing(blk)
@@ -280,13 +298,35 @@ def _selftest():
         assert missing('doc_type: analysis\n') == ["why_captured", "description"]
         ok.append("missing() reports absent keys only")
 
-        # ② the transmission gate is read through the one shared regex —— including the comment
-        #    form that used to open it silently
-        assert blocked("no_llm: true\n")
-        assert blocked("no_llm: true # private\n")
-        assert not blocked("no_llm: false\n")
-        assert not blocked('title: "no_llm is discussed here"\n')
-        ok.append("a gated page is never sent (comment form included)")
+        # ② **All three transmission gates**, and all three imported rather than re-implemented.
+        #    The first version of this module checked only its own regex against the frontmatter:
+        #    `"no_llm": true` and `no_llm : true` walked straight through, and KAL_NO_LLM was
+        #    referenced zero times —— the folder boundary did not exist here.
+        import lr_extract as _lr
+        #  ⚠ A **separate** temp root.  Writing these fixtures into `d` polluted the tree check
+        #     below, which asserts exactly which files `pages()` returns.
+        _g = tempfile.mkdtemp()
+        _n0 = _lr.NO_LLM
+        try:
+            _lr.NO_LLM = ("Private", "personal/wiki")
+            for _sub in ("Private", "personal/wiki", "personal/raw"):
+                os.makedirs(os.path.join(_g, _sub), exist_ok=True)
+            _plain = '---\ntitle: "a"\ntype: note\n---\n본문\n'
+            for _fm in ("no_llm: true", '"no_llm": true', "no_llm : true",
+                        'no_llm: "true"', "no_llm: true # private"):
+                _p = os.path.join(_g, "gate.md")
+                _raw = f'---\ntitle: "a"\n{_fm}\n---\n본문\n'
+                open(_p, "w").write(_raw)
+                assert blocked(_p, _raw, _g), f"{_fm} was not gated"
+            for _rel, _want in (("Private/a.md", True), ("personal/wiki/b.md", True),
+                                ("personal/raw/c.md", False), ("top.md", False)):
+                _p = os.path.join(_g, _rel)
+                open(_p, "w").write(_plain)
+                assert blocked(_p, _plain, _g) is _want, f"KAL_NO_LLM verdict wrong for {_rel}"
+        finally:
+            _lr.NO_LLM = _n0
+            shutil.rmtree(_g, ignore_errors=True)
+        ok.append("all three gates: frontmatter (every spelling) · KAL_NO_LLM paths · is_skipped")
 
         # ③ a doc_type outside the vocabulary is **dropped, not written**.  A value nobody filters
         #    on looks filled and matches nothing.

@@ -513,7 +513,17 @@ def classify_origin(rel, raw):
 #     no_llm=False and went to the LLM with nothing said.  `yes`/`on` are YAML 1.1 true and are
 #     accepted for the same reason: the failure mode is silent, so being strict is not safe.
 #     (codex review 2026-09-02, blocker #8 —— reproduced)
-NO_LLM_RE = re.compile(r"^no_llm:[ \t]*(?:true|yes|on)[ \t]*(?:#.*)?$", re.M | re.I)
+#  ⚠ **Quoting the key, or a space before the colon, used to open the gate.**  Both are ordinary
+#     YAML and both parse to `{"no_llm": True}`:
+#         "no_llm": true          no_llm : true          no_llm: "true"
+#     The old pattern required a bare key, no space, and an unquoted value, so all three were read
+#     as **no gate at all** and the document went to the LLM with nothing said.  Reproduced by an
+#     adversarial review 2026-09-03; the hole was in every consumer, because they share this one
+#     constant.  Leading whitespace is still refused —— an indented `no_llm` is a *nested* key, not
+#     the document's own, and treating it as a gate would block pages that merely mention it.
+NO_LLM_RE = re.compile(
+    r"""^["']?no_llm["']?[ \t]*:[ \t]*["']?(?:true|yes|on)["']?[ \t]*(?:\#.*)?$""",
+    re.M | re.I | re.X)
 
 
 def doc_meta(raw):
@@ -1444,9 +1454,20 @@ def _selftest():
     #  said —— the document went to the LLM.  Both directions are checked: a false value with a
     #  comment must stay open, or the guard would block everything and be removed.
     #  (codex review 2026-09-02, blocker #8)
+    #  Quoting the key or spacing the colon is ordinary YAML and used to open the gate silently.
+    for _q in ('"no_llm": true', "'no_llm': true", "no_llm : true", 'no_llm: "true"',
+               "NO_LLM: TRUE", "no_llm:\ttrue"):
+        assert doc_meta(f'---\ntitle: "a"\n{_q}\n---\nx\n')[2], f"{_q} left the gate open"
+    #  ...and the other way: an indented (nested) key, or a mention inside a value, must not gate.
+    for _n2 in ("  no_llm: true", 'description: "no_llm: true"', "x_no_llm: true"):
+        assert not doc_meta(f'---\ntitle: "a"\n{_n2}\n---\nx\n')[2], f"{_n2} closed the gate"
     for _y in ("true", "true # private", "true   # 사적", "yes", "on", "TRUE"):
         assert doc_meta(f'---\ntitle: "a"\nno_llm: {_y}\n---\nx\n')[2], f"no_llm: {_y} left the gate open"
-    for _n in ("false", "false # x", "maybe", "true-ish", '"true"'):
+    #  ⚠ `"true"` moved from this list to the blocking one on 2026-09-03.  It is *strictly* a YAML
+    #     string, not the boolean —— but a person who writes it means "do not send this", and
+    #     under-blocking a transmission gate is the failure that cannot be undone.  The emitter is
+    #     still held to the bare form by okf_convert's own check, so nothing we write depends on it.
+    for _n in ("false", "false # x", "maybe", "true-ish"):
         assert not doc_meta(f'---\ntitle: "a"\nno_llm: {_n}\n---\nx\n')[2], f"no_llm: {_n} closed the gate"
 
     #  ⚠ Order matters and was untested.  A page carrying **both** an OKF `generated.at` and a
