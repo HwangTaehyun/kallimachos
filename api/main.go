@@ -459,14 +459,24 @@ func logging(h http.Handler) http.Handler {
 
 // The knowledge graph the galaxy view reads.  The file the pipeline's 'export the graph' made, served as it is.
 //
-// Why the API serves it —— this file lives inside the vault (the plugin reads the same one) and
-// only the api container mounts the vault.  web (nginx) knows nothing about it.
+// Where it is read from —— **KAL_HOME first, the vault only as a fallback.**  It used to be read
+// only from `<vault>/.obsidian/plugins/kal-galaxy/`, which was this handler's *only* use of the
+// vault mount: the api container mounted the whole vault to serve one 6MB file.  Nothing in the
+// file justifies that —— it is built from LanceDB and its document references are vault-relative
+// (measured 2026-09-02).  Only the Obsidian plugin needs a copy inside a vault, because a plugin
+// cannot open a file outside its own.  The vault arm stays so an installation that exported before
+// this change keeps working until its next export.
 //
 // It is about 6MB, so resending it every time is wasteful.  ServeContent handles
 // If-Modified-Since and a second visit ends in a 304 —— re-run the export and the changed mtime fetches it afresh.
 func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
-	p := filepath.Join(s.vault, ".obsidian", "plugins", "kal-galaxy", "kal-graph.json")
+	p := filepath.Join(s.home, "graph_export", "kal-graph.json")
 	f, err := os.Open(p)
+	if err != nil {
+		//  The pre-2026-09-02 location.  Only reached when KAL_HOME has no copy yet.
+		p = filepath.Join(s.vault, ".obsidian", "plugins", "kal-galaxy", "kal-graph.json")
+		f, err = os.Open(p)
+	}
 	if err != nil {
 		fail(w, http.StatusNotFound,
 			"there is no graph yet — run 'export the graph' from the settings screen")

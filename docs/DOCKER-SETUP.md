@@ -131,7 +131,7 @@ from Markdown by `schema_v3.py`, and every value it needs is already in `.env`:
 
 | Value | What it is inside the container | Why the build stops without it |
 |---|---|---|
-| `VAULT_DIR` | mounted at `/vault`, passed as `KAL_VAULT` | with no vault the indexer finds nothing and reports **every** document deleted |
+| `VAULT_DIR` | mounted at `/vault`, passed as `KAL_VAULT` | with no vault the indexer finds nothing and reports **every** document deleted (the viewer does not need it — [§5c](#5c-what-the-vault-mount-is-actually-for)) |
 | `KAL_DIR` | mounted at `/data/kal`, passed as `KAL_HOME` / `KAL_PATH` | LanceDB has nowhere to live |
 | `UID` / `GID` | the container's user | it can read the mount but not **write** the DB into it |
 | `VAULT_NAME` | `KAL_VAULT_NAME` | compose refuses to start without it (`${VAULT_NAME:?…}`) |
@@ -185,6 +185,28 @@ KAL_RELAY_TOKEN=<what it printed>
 
 Only the boxes marked LLM need the relay. **Path B end to end — convert, index, search — runs with
 nothing but the four values in the table above.**
+
+## 5c. What the vault mount is actually for
+
+Since 2026-09-02 the galaxy graph is read from **`KAL_HOME`**, not from inside the vault. That was
+the api container's only use of the mount — it mounted a whole vault to serve one 6MB file. So:
+
+| Surface | Needs `/vault`? |
+|---|---|
+| galaxy view · search results · Settings · Paths | **no** |
+| the pipeline steps (index · extract · distil · status) | **yes** — they read the Markdown |
+
+Nothing in `kal-graph.json` justified living in the vault: it is built from LanceDB
+(`source: "lancedb"`) and its document references are **vault-relative** — 371 in
+`entities[].docs[]`, 208 in `relations[].docs[]`, none absolute. Only the Obsidian plugin needs a
+copy inside a vault, because a plugin cannot open a file outside its own; `export_kal_graph.py`
+writes that copy **only when the vault has a `.obsidian/`**, so an openwiki bundle no longer gets a
+plugin folder it will never use.
+
+> ⓘ **No `.env` value became removable.** `VAULT_DIR` still mounts the Markdown the pipeline reads;
+> `KAL_VAULT_NAME` still fills the `obsidian://open?vault=…` deep link; `KAL_VAULT_HOST` is still
+> what the Paths screen compares against the DB. What changed is a *dependency*, not a *setting* —
+> a container that only serves the viewer no longer touches the vault at run time.
 
 ## 6. Keeping notes off the machine
 

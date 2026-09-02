@@ -68,6 +68,9 @@ services:
       HOME: /data/kal/container-home
     volumes:
       - ${KAL_DIR:-~/.kal}:/data/kal
+      #  ⓘ The **pipeline** reads this: indexing, extraction, distillation and the status scan all
+      #     walk the Markdown.  The **viewer** does not —— since 2026-09-02 the galaxy graph is read
+      #     from KAL_HOME above, which was this mount's only use by the api process itself.
       - ${VAULT_DIR:?VAULT_DIR is not set —— set it with `just vault <path>`}:/vault
       # The claude CLI settings.  Read-only —— the container has no reason to edit host credentials.
       #

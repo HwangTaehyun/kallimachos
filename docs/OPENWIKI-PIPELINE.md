@@ -233,6 +233,10 @@ docker compose up -d          # the container follows only when the mount is ret
 ```
 
 Reversible: `just vault <the-original-vault>` and `docker compose up -d` again.
+
+The galaxy graph is written to `~/.kal/graph_export/kal-graph.json`, not into the bundle.
+A copy goes into a vault only when that vault has a `.obsidian/` —— a bundle is not an
+Obsidian vault, and a plugin folder inside a git repository no plugin opens is only litter.
 The mount, the `.env` value and `~/.kal/config.json` are three separate things —
 [`DOCKER-SETUP.md`](DOCKER-SETUP.md) §5 has the check that proves all three agree.
 

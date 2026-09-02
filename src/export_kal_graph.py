@@ -18,7 +18,7 @@ Usage:
   python export_kal_graph.py --min-degree 2
 """
 import vault_path
-import os, re, sys, json, argparse, collections
+import os, re, sys, json, shutil, argparse, collections
 import lancedb
 
 
@@ -181,7 +181,28 @@ def communities(n_nodes, edges):
 DB = os.environ.get("KAL_PATH", os.path.join(KAL_HOME, "db"))
 # Where the vault lives.  Mounted at /vault inside the container (see docker-compose).
 VAULT = vault_path.vault()
-DEST = ".obsidian/plugins/kal-galaxy/kal-graph.json"
+#  ⚠ **The canonical copy lives in KAL_HOME, not in the vault.**  It used to be written only into
+#     `<vault>/.obsidian/plugins/kal-galaxy/`, and that one location decided a deployment shape:
+#     the api container had to mount the vault **just to serve the galaxy view**, because
+#     `api/main.go` read the file from there (its only use of the vault mount).
+#
+#     Nothing in the file justifies that.  It is built from LanceDB (`source: "lancedb"`), and the
+#     document references inside it are **vault-relative** —— 371 in `entities[].docs[]`, 208 in
+#     `relations[].docs[]`, none absolute (measured 2026-09-02).  The file is portable; only the
+#     *reader* was not: an Obsidian plugin cannot open a file outside its own vault.
+#
+#     So: KAL_HOME holds the canonical copy (already mounted at /data/kal), and a vault copy is
+#     written **only when the vault really is an Obsidian vault** —— it has a `.obsidian/`.  Since
+#     the vault may now be an openwiki bundle, writing there would create a plugin folder inside a
+#     git repository no plugin will ever open.
+VAULT_DEST = ".obsidian/plugins/kal-galaxy/kal-graph.json"
+DEST = VAULT_DEST                      # kept: the self-check pins the plugin id against this
+HOME_DEST = os.path.join(KAL_HOME, "graph_export", "kal-graph.json")
+
+
+def is_obsidian_vault(root):
+    """Does this folder have a `.obsidian/` —— i.e. will a plugin ever read a file placed in it."""
+    return os.path.isdir(os.path.join(root, ".obsidian"))
 
 # Must be the same set as schema_v3.CANON_TYPES —— a type with no colour turns grey in the viewer.
 
@@ -511,16 +532,30 @@ if __name__ == "__main__":
     ap.add_argument("--vault", default=VAULT)
     ap.add_argument("--out", default=None)
     # An escape hatch for when networkx cannot be installed.  Without it, it fails rather than quietly exporting without communities
+    ap.add_argument("--no-vault-copy", action="store_true",
+                    help="do not write the Obsidian plugin's copy, even into a real vault")
     ap.add_argument("--no-communities", action="store_true",
                     help="skip Louvain clustering (the viewer's community mode is disabled)")
     a = ap.parse_args()
 
     data = build(a.min_degree)
-    path = a.out or os.path.join(a.vault, DEST)
+    #  The canonical copy.  `--out` still overrides it, for experiments and for the self-check.
+    path = a.out or HOME_DEST
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, separators=(",", ":"))
     mb = os.path.getsize(path) / 1e6
+    #  The vault copy exists for one reader —— the Obsidian plugin —— so it is written only where
+    #  that reader can exist.  `--no-vault-copy` is for a run that must not touch the vault at all.
+    if not a.out and not a.no_vault_copy:
+        if is_obsidian_vault(a.vault):
+            vp = os.path.join(a.vault, VAULT_DEST)
+            os.makedirs(os.path.dirname(vp), exist_ok=True)
+            shutil.copyfile(path, vp)
+            print(f"  → {vp}   (copy for the Obsidian plugin)")
+        else:
+            print(f"  ⓘ {a.vault} has no .obsidian/ —— no plugin copy written "
+                  f"(an openwiki bundle is not an Obsidian vault)")
     print(f"  entities {len(data['entities']):,} · relations {len(data['relations']):,}"
           f"   (degree>={a.min_degree})")
     print(f"  types: " + " · ".join(f"{t['name']} {t['count']:,}" for t in data["types"]))

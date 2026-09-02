@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -64,5 +65,61 @@ func TestGraphRevalidates(t *testing.T) {
 	}
 	if w2.Body.Len() != 0 {
 		t.Errorf("304 with a %d-byte body", w2.Body.Len())
+	}
+}
+
+// The graph is served from **KAL_HOME**, and the vault is only a fallback.
+//
+//	Before 2026-09-02 it was read from `<vault>/.obsidian/plugins/kal-galaxy/` and nowhere else,
+//	which was this handler's only use of the vault mount —— the api container mounted a whole
+//	vault to serve one file.  Nothing in the file needs to be there: it is built from LanceDB and
+//	its document references are vault-relative.  Only the Obsidian plugin needs a copy inside a
+//	vault, because a plugin cannot open a file outside its own.
+//
+//	Both arms are checked.  Keeping only the first would let the fallback rot and break every
+//	installation that has not re-exported; keeping only the second is the state this replaced.
+func TestGraphPrefersHomeOverVault(t *testing.T) {
+	write := func(dir, body string) string {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		p := filepath.Join(dir, "kal-graph.json")
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	get := func(s *Server) (int, string) {
+		w := httptest.NewRecorder()
+		s.graph(w, httptest.NewRequest(http.MethodGet, "/api/graph", nil))
+		return w.Code, w.Body.String()
+	}
+
+	//  ① KAL_HOME wins when both exist
+	home, vault := t.TempDir(), t.TempDir()
+	write(filepath.Join(home, "graph_export"), `{"source":"home"}`)
+	write(filepath.Join(vault, ".obsidian", "plugins", "kal-galaxy"), `{"source":"vault"}`)
+	if code, body := get(&Server{home: home, vault: vault, vaultName: "demo"}); code != 200 ||
+		!strings.Contains(body, `"home"`) {
+		t.Fatalf("KAL_HOME did not win: %d %q", code, body)
+	}
+
+	//  ② the vault still serves an installation that has not re-exported
+	home2 := t.TempDir()
+	if code, body := get(&Server{home: home2, vault: vault, vaultName: "demo"}); code != 200 ||
+		!strings.Contains(body, `"vault"`) {
+		t.Fatalf("the fallback did not serve: %d %q", code, body)
+	}
+
+	//  ③ neither —— a 404 that says what to do, not a 500
+	if code, _ := get(&Server{home: t.TempDir(), vault: t.TempDir(), vaultName: "demo"}); code != 404 {
+		t.Fatalf("with no graph anywhere the status was %d, want 404", code)
+	}
+
+	//  ④ **the vault is not needed at all** once KAL_HOME has the file —— this is the property the
+	//     change exists for: a viewer-only container does not have to mount a vault.
+	if code, body := get(&Server{home: home, vault: "/nonexistent-vault", vaultName: "demo"}); code != 200 ||
+		!strings.Contains(body, `"home"`) {
+		t.Fatalf("serving needed the vault after all: %d %q", code, body)
 	}
 }
