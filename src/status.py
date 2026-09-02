@@ -106,7 +106,10 @@ def _empty_status(tables):
             "embedding_model": "", "schema_version": "", "vault_path": "",
             "vault_now": os.environ.get("KAL_VAULT_HOST") or VAULT,
         },
-        "documents": {"indexed": 0, "origin": {}, "added": [], "modified": [], "deleted": []},
+        "documents": {"indexed": 0, "origin": {}, "added": [], "modified": [], "deleted": [],
+                      #  The empty-DB state must carry every field the live one does ——
+                      #  the web reads them unguarded and a missing key blanks the screen.
+                      "vault_absent": False},
         "kg": {"entities": 0, "relations": 0, "stale": [], "stale_ratio": 0.0,
                "stale_error": "", "drift_error": "", "warn_ratio": WARN_RATIO,
                "extracted_at": 0, "extract_drift": 0},
@@ -158,6 +161,16 @@ def collect():
         elif d.get("content_hash") != h:
             modified.append(rel)
     deleted = sorted(set(by_path) - seen)
+    #  ⚠ **"the vault is not visible" and "everything was deleted" are different events.**  A
+    #     container with no vault mounted, a wrong VAULT_DIR, or a path that is simply not there
+    #     all produce an empty walk —— and the subtraction above then reports **every indexed
+    #     document as deleted**.  Measured 2026-09-02: an empty vault against this DB printed
+    #     "deleted 1115" and a high-severity "run sync", which would rebuild the index down to
+    #     nothing.  This page's own comment below says a status board claiming to know what it
+    #     does not is the worst failure —— this was that, on the largest number it shows.
+    vault_absent = bool(by_path) and not seen
+    if vault_absent:
+        deleted = []
 
     # ── Documents whose KG is stale ───────────────────────────────────
     # A **broken query** and **no stale documents** must be told apart.  It used to be one
@@ -251,6 +264,8 @@ def collect():
             "indexed": len(docs),
             "origin": dict(origin),
             "added": added, "modified": modified, "deleted": deleted,
+            #  True when the DB holds documents and the vault yielded none —— see above.
+            "vault_absent": vault_absent,
         },
         "kg": {
             "entities": counts.get("lr_entities", 0),
@@ -420,6 +435,12 @@ def recommend(st):
                         "why": f"{what} failed ({k[key]}) "
                                f"— do not trust readings like '0 stale' below"})
 
+    if d.get("vault_absent"):
+        out.append({"step": "vault", "severity": "high",
+                    "why": f"the index holds {d['indexed']} documents but the vault yielded "
+                           f"none — it is empty, not mounted, or VAULT_DIR points elsewhere.  "
+                           f"This is not 'everything was deleted', and running sync would "
+                           f"empty the index"})
     n_new = len(d["added"]) + len(d["modified"]) + len(d["deleted"])
     if n_new:
         out.append({"step": "sync", "severity": "high",
@@ -1011,6 +1032,57 @@ def _selftest():
 
     assert "documents" in set(r.tables), "the table list cannot be read"
 
+    #  ⑥ **An absent vault must not read as a mass deletion.**  This runs the **real** collect(),
+    #     not a hand-built dict —— a first version of this check only exercised `recommend()`, and
+    #     two mutations (blanking the computation, and removing the advice) both stayed green.
+    #     A check that cannot see the production line is not a check for it.
+    import tempfile as _tf, shutil as _sh
+    import fixture_db as _fx
+    import schema_v3 as _S
+    _empty, _fdb = _tf.mkdtemp(), _fx.build()
+    _keepdb, _keepvault = globals()["DB"], _S.VAULT
+    try:
+        globals()["DB"] = _fdb
+        _S.VAULT = _empty
+        _d = collect()["documents"]
+        assert _d["vault_absent"] is True, "an empty vault was not recognised as absent"
+        assert _d["deleted"] == [], f"an empty vault still reported {len(_d['deleted'])} deletions"
+        #  The other direction —— a vault that really has the documents is not called absent.
+        _real = _tf.mkdtemp()
+        import lancedb as _lc
+        for _r in _lc.connect(_fdb).open_table("documents").search().limit(99).to_list():
+            _fp = os.path.join(_real, _r["path"])
+            os.makedirs(os.path.dirname(_fp), exist_ok=True)
+            open(_fp, "w", encoding="utf-8").write("x" * 200 + "\n")
+        _S.VAULT = _real
+        assert collect()["documents"]["vault_absent"] is False, \
+            "a vault holding the documents was called absent"
+        _sh.rmtree(_real, ignore_errors=True)
+    finally:
+        globals()["DB"], _S.VAULT = _keepdb, _keepvault
+        _sh.rmtree(_empty, ignore_errors=True)
+        _sh.rmtree(_fdb, ignore_errors=True)
+    #     The dict-only arm below stays as well: recommend() must keep telling the two apart,
+    #     and it is the part the screen actually reads.  A container that mounts no vault
+    #     deleted —— measured "deleted 1115" plus a high-severity "run sync", which would have
+    #     rebuilt the index down to nothing.  Both directions are checked: a real deletion must
+    #     still be reported, or the guard would be a blanket that hides the thing it guards.
+    absent = {"documents": {"indexed": 1115, "added": [], "modified": [], "deleted": [],
+                            "vault_absent": True},
+              "kg": {"extract_drift": [], "stale": [], "stale_ratio": 0.0, "warn_ratio": 0.2},
+              "artifacts": {"stale": []}}
+    got = recommend(absent)
+    assert any(a["step"] == "vault" for a in got), "an absent vault produced no advice"
+    assert not any(a["step"] == "sync" for a in got), \
+        "an absent vault still advised sync —— that empties the index"
+    real = {"documents": {"indexed": 1115, "added": [], "modified": [], "deleted": ["a.md", "b.md"],
+                          "vault_absent": False},
+            "kg": {"extract_drift": [], "stale": [], "stale_ratio": 0.0, "warn_ratio": 0.2},
+            "artifacts": {"stale": []}}
+    got = recommend(real)
+    assert any(a["step"] == "sync" for a in got), "a real deletion stopped being reported"
+    assert not any(a["step"] == "vault" for a in got), "a healthy vault was called absent"
+    print("  ✅ status self-check —— an absent vault is told apart from a mass deletion (both ways)")
     print("  ✅ status self-check —— tells a missing table (normal) from a failed query (an error)")
 
 
