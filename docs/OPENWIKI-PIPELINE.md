@@ -203,6 +203,8 @@ docker compose up -d          # the container follows only when the mount is ret
 ```
 
 Reversible: `just vault <the-original-vault>` and `docker compose up -d` again.
+The mount, the `.env` value and `~/.kal/config.json` are three separate things —
+[`DOCKER-SETUP.md`](DOCKER-SETUP.md) §5 has the check that proves all three agree.
 
 ---
 
@@ -273,6 +275,8 @@ The distillation prompt changing is the one case that invalidates everything: de
 
 ## See also
 
+- [`DOCKER-SETUP.md`](DOCKER-SETUP.md) — `.env`, the relay, and why the container keeps the old
+  vault until it is recreated
 - [`PIPELINE.md`](PIPELINE.md) — the older vault-centred path, and the internals of each step
   (caches, masking, `group_nodes`, search weighting) that are still current
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — C4 diagrams and per-use-case sequences

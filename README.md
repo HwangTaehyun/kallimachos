@@ -246,6 +246,7 @@ Everything, unless you say otherwise. The only step that sends note content anyw
 | [`docs/ERD.md`](docs/ERD.md) | Schema, key design, integrity constraints |
 | [`docs/HYBRID_METHODOLOGY.md`](docs/HYBRID_METHODOLOGY.md) | How search quality was measured — and its limits |
 | [`docs/CONNECTING-AGENTS.md`](docs/CONNECTING-AGENTS.md) | Hooking the graph to Buzz, Hermes and other MCP clients |
+| [`docs/DOCKER-SETUP.md`](docs/DOCKER-SETUP.md) | Container setup in order — .env, the relay, changing the vault, what breaks |
 | [`docs/STACK.md`](docs/STACK.md) | Container/relay operations, security review |
 
 ## What it is not
