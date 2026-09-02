@@ -662,6 +662,19 @@ up-prod:
     @{{py}} {{src}}/vault_path.py --check "$(grep -m1 '^VAULT_DIR=' .env | cut -d= -f2-)" \
       || (echo "     Set it with  just vault <notes folder>." && exit 1)
     docker compose -f docker-compose.yml up --build -d
+#  ⚠ **No vault is mounted.**  The api reads the vault at run time for one thing —— the pipeline
+#     steps it shells out to, which walk the Markdown.  Since the galaxy graph moved to KAL_HOME
+#     (2026-09-02) that was the mount's only other use.  So when the pipeline runs on the host,
+#     which on macOS is the only place its LLM steps work at all, the container is a viewer —— and
+#     a viewer has no business holding a writable mount of every note.
+#     The Settings screen's Run buttons still appear and will fail; the Status screen says the
+#     vault yielded nothing, which is the honest reading of this configuration.
+# Start without a vault mount —— screens only, pipeline runs on the host
+up-viewer:
+    @test -f .env || (echo "  there is no .env.  Run  just env  first." && exit 1)
+    @docker compose -f docker-compose.yml -f docker-compose.viewer.yml up -d --build
+    @echo "  viewer → http://127.0.0.1:${WEB_PORT:-5173}   (no vault mounted)"
+
 
 # With a domain and TLS (nginx-proxy + acme)
 up-tls:

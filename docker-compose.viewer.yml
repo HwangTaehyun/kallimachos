@@ -1,0 +1,33 @@
+# Viewer-only —— the container serves the screens and **does not mount a vault.**
+#
+#   docker compose -f docker-compose.yml -f docker-compose.viewer.yml up -d
+#   just up-viewer
+#
+# Why this exists
+#   The api process reads the vault for exactly one thing at run time: the pipeline steps it shells
+#   out to (index · extract · distil · the status scan), which walk the Markdown.  Since 2026-09-02
+#   the galaxy graph is read from KAL_HOME, which used to be the mount's only other use.  So when
+#   the pipeline is run on the host —— which is the only place the LLM steps work on macOS anyway ——
+#   the container is a viewer, and a viewer has no business holding a writable mount of every note.
+#
+# What you give up
+#   The Settings screen's Run buttons.  They still appear; pressing one fails, because the step has
+#   no Markdown to read.  Run the pipeline on the host instead: `just openwiki`, `just openwiki-kg`.
+#   The Status screen reports "the vault yielded none" rather than pretending everything was
+#   deleted (src/status.py) —— that message is the honest reading of this configuration.
+services:
+  api:
+    #  ⚠ `!override`, not `!reset`.  Compose merges volumes by target path, so a plain list here
+    #     would leave the base file's /vault entry in place —— and `!reset` empties the list and
+    #     **discards whatever follows it**, which took every mount away and left the api unable to
+    #     read its own DB (reproduced 2026-09-02: 0 mounts, every endpoint 500).
+    volumes: !override
+      - ${KAL_DIR:-~/.kal}:/data/kal
+      # The alias files stay: the Settings screens edit them, and they are not vault content.
+      - ./aliases.yml:/app/aliases.yml
+      - ./homonyms.yml:/app/homonyms.yml
+    environment:
+      #  Nothing is mounted there.  The value is what the Status screen shows and compares, so an
+      #  empty one is the truthful reading —— not a path that looks mounted and is not.
+      KAL_VAULT: ""
+      KAL_VAULT_HOST: ""

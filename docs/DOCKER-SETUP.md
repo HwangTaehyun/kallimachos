@@ -203,7 +203,33 @@ copy inside a vault, because a plugin cannot open a file outside its own; `expor
 writes that copy **only when the vault has a `.obsidian/`**, so an openwiki bundle no longer gets a
 plugin folder it will never use.
 
-> ⓘ **No `.env` value became removable.** `VAULT_DIR` still mounts the Markdown the pipeline reads;
+### Running without a vault at all
+
+```bash
+just up-viewer      # docker compose -f docker-compose.yml -f docker-compose.viewer.yml up -d
+```
+
+No `/vault` mount. Measured on the running stack: `/api/health` · `/api/steps` · `/api/config` ·
+`/api/status` all 200, and the galaxy view works because the graph is read from `KAL_HOME`.
+
+What you give up: the Settings screen's **Run** buttons. They still appear and will fail — the step
+has no Markdown to read. Run the pipeline on the host (`just openwiki`, `just openwiki-kg`), which
+on macOS is the only place its LLM steps work anyway.
+
+The Status screen then reports:
+
+```
+  vault_absent: true · deleted: 0 · indexed: 1115
+  → vault · "the index holds 1115 documents but the vault yielded none — it is empty,
+             not mounted, or VAULT_DIR points elsewhere.  This is not 'everything was
+             deleted', and running sync would empty the index"
+```
+
+> ⚠ Before that message existed this configuration printed **`deleted: 1115`** and advised running
+> sync — which would have rebuilt the index down to nothing. The honest reading is what makes a
+> vault-less container safe to offer.
+
+> ⓘ **Still no `.env` value became removable.** In the default stack `VAULT_DIR` mounts the Markdown the pipeline reads;
 > `KAL_VAULT_NAME` still fills the `obsidian://open?vault=…` deep link; `KAL_VAULT_HOST` is still
 > what the Paths screen compares against the DB. What changed is a *dependency*, not a *setting* —
 > a container that only serves the viewer no longer touches the vault at run time.
