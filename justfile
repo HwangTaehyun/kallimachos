@@ -434,11 +434,17 @@ index *args:
 #  halves fail for completely different reasons: the session half needs an LLM (and on macOS,
 #  the host relay), while the vault half is pure conversion and never calls one.
 
+#  ⚠ The knowledge **graph** is deliberately not in this chain.  Indexing 1,115 documents takes
+#     ~2 minutes; extracting entities and relations from them took 8 hours at 8 workers (measured
+#     2026-09-02).  Folding an eight-hour step into the command people run after every session
+#     would mean it is never run at all.  `just openwiki-kg` is the fourth step, on its own clock.
 # Everything → the openwiki bundle → the knowledge DB.  VAULT is the Obsidian vault to migrate.
 openwiki wiki=openwiki_dir vault=vault_dir:
     @just openwiki-sessions "{{wiki}}"
     @just openwiki-vault "{{wiki}}" "{{vault}}"
     @just openwiki-index "{{wiki}}"
+    @echo "  next:  just openwiki-kg      entities + relations (hours — see the recipe)"
+    @echo "         just openwiki-adopt   point the CLI · MCP · container at the bundle"
 
 # Agent session logs → the bundle.  Skips what is already distilled, so a re-run is cheap.
 openwiki-sessions wiki=openwiki_dir:
@@ -450,12 +456,23 @@ openwiki-sessions wiki=openwiki_dir:
 #  ⚠ `--exclude /conversations/sessions/` is load-bearing.  The vault holds a copy of the
 #     distilled session documents, and without this they arrive a second time under
 #     personal/raw/ —— the same documents, a second set of doc_ids, both indexed.
+#
+#  ⚠ `--exclude /kg/` keeps the **retired** graph export out.  `export_graph.py --obsidian` writes
+#     one note per entity so Obsidian's graph view can draw the KG as [[wikilinks]] —— 699 pages of
+#     rendering scaffolding, not knowledge.  That approach was already replaced by
+#     `export_kal_graph.py`, whose own docstring says notes "inflate the vault by 700 pages and bury
+#     the curated notes"; it writes kal-graph.json inside the plugin folder instead.  The indexer
+#     has always skipped `kg/` (schema_v3.SKIP_ROOT, the KG→note→KG loop), so those pages were 38%
+#     of the bundle contributing nothing.  Removed 2026-09-02; this line is what keeps them out.
+#
+#  ⓘ **One call over the whole vault**, not a list of its folders.  The folder names used to be
+#     hardcoded (wiki · kg · raw · Clippings), which quietly made the recipe work for exactly one
+#     vault: any other layout migrated nothing and said "✅".  glob skips dot-directories, so
+#     .obsidian/ .git/ .trash/ need no exclude.
 # An Obsidian vault → the bundle.  No LLM is called; this is pure conversion.
 openwiki-vault wiki=openwiki_dir vault=vault_dir:
-    @{{py}} {{src}}/openwiki_emit.py --wiki "{{wiki}}" --from "{{vault}}/wiki"      --into personal/wiki      --force
-    @{{py}} {{src}}/openwiki_emit.py --wiki "{{wiki}}" --from "{{vault}}/kg"        --into personal/kg        --force
-    @{{py}} {{src}}/openwiki_emit.py --wiki "{{wiki}}" --from "{{vault}}/raw"       --into personal/raw       --exclude /conversations/sessions/ --force
-    @if [ -d "{{vault}}/Clippings" ]; then {{py}} {{src}}/openwiki_emit.py --wiki "{{wiki}}" --from "{{vault}}/Clippings" --into personal/clippings --force; fi
+    @{{py}} {{src}}/openwiki_emit.py --wiki "{{wiki}}" --from "{{vault}}" --into personal \
+        --exclude /conversations/sessions/ --exclude /kg/ --force
 
 #  ⚠ This points KAL_VAULT at the bundle for one command instead of changing the saved setting.
 #     `just vault` writes both ~/.kal/config.json and .env, and switching those would leave the
@@ -465,6 +482,20 @@ openwiki-vault wiki=openwiki_dir vault=vault_dir:
 openwiki-index wiki=openwiki_dir:
     @echo "  indexing {{wiki}} → ~/.kal/db"
     @KAL_VAULT="{{wiki}}" {{py}} {{src}}/schema_v3.py
+
+#  ⚠ **Workers.**  lr_extract defaults to 14, which is right for a short incremental run and wrong
+#     here.  Measured 2026-08-21: 14 workers over a 99-minute extraction left the stage after it at
+#     a 91% failure rate, while `claude -p` by hand answered normally at that same moment —— the
+#     limit is accumulated throughput, not concurrency.  8 ran 2,492 chunks with no collapse
+#     (2026-09-02).  Lower it further if a run starts failing: `LR_WORKERS=4 just openwiki-kg`.
+#
+#  ⚠ `KAL_VAULT` is not optional.  lr_extract reads the **saved** vault, so before `openwiki-adopt`
+#     it would extract the Obsidian vault while the DB holds the bundle —— 375 documents that are
+#     not the ones indexed.  `--check-scope` is the cheap way to see that before spending hours.
+# The bundle's documents → entities and relations.  Hours, not minutes — see the note above
+openwiki-kg wiki=openwiki_dir workers="8":
+    @KAL_VAULT="{{wiki}}" LR_WORKERS="{{workers}}" {{py}} {{src}}/lr_extract.py --check-scope
+    @KAL_VAULT="{{wiki}}" LR_WORKERS="{{workers}}" {{py}} {{src}}/lr_extract.py
 
 #  ⚠ Switching the vault is **not** what `openwiki-index` does —— that override lives for one
 #     command.  Until this runs, the MCP server, the container and the web UI all still read the

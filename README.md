@@ -196,6 +196,38 @@ Entities are **grouped into topics** automatically: Louvain community detection 
 - **stdio only** — the MCP server never opens a network listener ([`docs/STACK.md`](docs/STACK.md) §7 explains why that boundary exists).
 - **Incremental** — `just run sync` re-indexes only changed documents in seconds; `just status` knows what's stale.
 
+## Bringing your own knowledge in
+
+Two sources, one destination. Kallimachos gathers both into an **openwiki bundle** —
+[OKF v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format) plus three extension keys
+(`no_llm`, `doc_type`, `why_captured`) — and indexes that.
+
+```
+  agent session logs  ──distil (LLM)──┐
+  ~/.claude · ~/.codex                │
+                                      ├──►  openwiki bundle  ──►  knowledge DB
+  any tree of Markdown ──convert──────┘     personal/**            ~/.kal/db
+  an Obsidian vault, a docs folder
+```
+
+```bash
+just openwiki-sessions                    # session logs → distilled documents → the bundle
+just openwiki-vault <bundle> <vault>      # any Markdown tree → the bundle.  No LLM, seconds
+just openwiki-index                       # the bundle → the knowledge DB
+just openwiki-kg                          # its documents → entities and relations
+just openwiki-adopt                       # point the CLI · MCP · container at the bundle
+```
+
+The vault half calls no LLM and takes seconds; the session half needs one and takes hours. They are
+separate commands because they fail for entirely different reasons —— a rate limit should not stop a
+conversion that never needed the network.
+
+Distillation keeps what a conversation **arrived at**, not what was said along the way: a thread
+becomes a document only once it closed, and a claim that was overturned becomes a `correction`
+document explaining what replaced it and why. On the reference corpus that is 42% of the output.
+
+Full walkthrough, with the measured costs and the traps: [`docs/OPENWIKI-PIPELINE.md`](docs/OPENWIKI-PIPELINE.md).
+
 ## What stays on your machine
 
 Everything, unless you say otherwise. The only step that sends note content anywhere is **extraction**, and it goes through your own `claude` CLI subscription, never to a server of ours.
@@ -209,6 +241,7 @@ Everything, unless you say otherwise. The only step that sends note content anyw
 | | |
 |---|---|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | C4 diagrams + per-use-case sequences |
+| [`docs/OPENWIKI-PIPELINE.md`](docs/OPENWIKI-PIPELINE.md) | Sessions **and** any Markdown tree → an OKF bundle → the DB |
 | [`docs/PIPELINE.md`](docs/PIPELINE.md) | Steps 1–7, caches, what to re-run when |
 | [`docs/ERD.md`](docs/ERD.md) | Schema, key design, integrity constraints |
 | [`docs/HYBRID_METHODOLOGY.md`](docs/HYBRID_METHODOLOGY.md) | How search quality was measured — and its limits |

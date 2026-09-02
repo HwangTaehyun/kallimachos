@@ -221,6 +221,18 @@ def main():
     if not os.path.isdir(a.src):
         print(f"❌ no such source folder: {a.src}")
         return 1
+    #  ⚠ **The source must not sit inside the bundle.**  `openwiki-adopt` points VAULT_DIR at the
+    #     bundle so every surface reads what was indexed —— and from that moment `just openwiki-vault`
+    #     (whose vault argument defaults to VAULT_DIR) would convert the bundle *into itself*: every
+    #     page re-slugged and re-emitted beside the original, doubling the corpus with documents the
+    #     indexer cannot tell apart.  The pipeline's own success is what arms this, which is why it
+    #     is a guard and not a note.
+    if os.path.commonpath([os.path.realpath(a.src), os.path.realpath(a.wiki)]) == os.path.realpath(a.wiki):
+        print(f"❌ --from is inside the bundle: {a.src}\n"
+              f"   Converting the bundle into itself would duplicate every page.\n"
+              f"   After `just openwiki-adopt`, pass the original vault explicitly:\n"
+              f"     just openwiki-vault {a.wiki} <path-to-the-obsidian-vault>")
+        return 1
     if not git_ok(a.wiki):
         print(f"❌ the bundle is not a git repository: {a.wiki}\n"
               f"   This replaces pages, and `git revert` is the only way back.\n"
@@ -519,6 +531,17 @@ def _selftest():
             assert main() == 1, f"--into {bad} was accepted"
         assert open(os.path.join(outside, "keep.md")).read() == "do not touch\n"
         ok.append("--into cannot escape the bundle (absolute or ../)")
+
+        #  ⑦b `--from` may not sit inside the bundle.  `openwiki-adopt` sets VAULT_DIR to the
+        #      bundle, and `openwiki-vault` defaults its vault argument to VAULT_DIR —— so after a
+        #      successful adopt the obvious next run would convert the bundle into itself.
+        before = len(glob.glob(os.path.join(wiki, "**", "*.md"), recursive=True))
+        for inside in (wiki, os.path.join(wiki, "personal")):
+            sys.argv = ["x", "--wiki", wiki, "--from", inside, "--into", "personal/x", "--force"]
+            assert main() == 1, f"--from {inside} was accepted"
+        after = len(glob.glob(os.path.join(wiki, "**", "*.md"), recursive=True))
+        assert before == after, f"a refused self-migration still wrote ({before} → {after})"
+        ok.append("--from cannot be inside the bundle (the adopt → re-run self-migration)")
 
         #  ⑧ A nested source tree migrates whole.  Non-recursive globbing moved 3 of 79 real
         #     vault files and printed a success line.

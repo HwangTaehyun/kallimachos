@@ -38,7 +38,19 @@ def db_is_usable(path):
         if not set(need) <= set(db.table_names()):
             return False
         #  With 0 entities the gate test does not hold
-        return db.open_table("lr_entities").count_rows() > 0
+        if db.open_table("lr_entities").count_rows() == 0:
+            return False
+        #  ⚠ One step further: **rows that reference nothing.**  A `doc_id` is a crc32 of the
+        #     document's path, so re-indexing under a different root gives every document a new one
+        #     and every entity keeps pointing at ids that are gone.  Measured 2026-09-02 between
+        #     `just openwiki-index` and the next extraction: 8,179 entities, **0** live references.
+        #     `most_common(1)[0]` then died with `IndexError` in both export_kal_graph and
+        #     export_graph —— the same defect twice, because both had copied the same precondition.
+        #     An orphaned graph is a real state (extraction is how it is left and how it is
+        #     repaired), so the fixture takes over instead of the run crashing.
+        E = db.open_table("lr_entities").search().limit(999999).to_list()
+        live = {d["doc_id"] for d in db.open_table("documents").search().limit(999999).to_list()}
+        return any(x in live for e in E for x in (e.get("doc_ids") or []))
     except Exception:
         return False
 
@@ -123,7 +135,29 @@ def _selftest():
             assert M.get(k), f"meta has no {k} —— status.py reads that key"
         for t in ("documents", "lr_entities", "lr_relations", "meta"):
             assert db.open_table(t).search().limit(1).to_list(), f"{t} is empty"
-        print(f"  ✅ fixture_db —— 4 tables · {len(solo)} sole-sourced · {len(both)} mixed")
+        #  `db_is_usable` must say yes to this fixture, and **no** to the three states that break
+        #  the gate test: no tables, entities with 0 rows, and entities whose doc_ids are all dead.
+        assert db_is_usable(d), "db_is_usable rejected its own fixture"
+        import tempfile as _tf, os as _os
+        empty = _tf.mkdtemp()
+        assert not db_is_usable(empty), "db_is_usable accepted a folder with no tables"
+        shutil.rmtree(empty, ignore_errors=True)
+
+        orphan = build()
+        try:
+            #  Same rows, every document id changed —— exactly what re-indexing under a new root does.
+            odb = lancedb.connect(orphan)
+            rows = odb.open_table("documents").search().limit(99).to_list()
+            for r in rows:
+                r["doc_id"] = "moved-" + r["doc_id"]
+            odb.drop_table("documents")
+            odb.create_table("documents", rows)
+            assert not db_is_usable(orphan), \
+                "db_is_usable accepted a graph whose entities reference no live document"
+        finally:
+            shutil.rmtree(orphan, ignore_errors=True)
+        print(f"  ✅ fixture_db —— 4 tables · {len(solo)} sole-sourced · {len(both)} mixed · "
+              f"db_is_usable refuses empty · no-tables · orphaned")
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

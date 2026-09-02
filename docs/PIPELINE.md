@@ -4,6 +4,11 @@ The whole path that turns `~/.claude/projects/**/*.jsonl` and the super-brain va
 LanceDB.  It records **what each step does, why it comes in that order, and what has to be
 re-run from where when something changes**.
 
+> ⓘ **Step 3 has moved.**  Documents now land in an openwiki bundle rather than in the vault, and
+> a second source —— any Markdown tree, not just one vault —— enters at the same point.  That path is
+> [`OPENWIKI-PIPELINE.md`](OPENWIKI-PIPELINE.md).  Everything else on this page —— masking, the three
+> caches, `group_nodes`, indexing, search weighting —— is unchanged and current.
+
 ---
 
 ## The whole picture
@@ -199,6 +204,16 @@ memory — to prevent the accident where a resumed run only contains that round'
 ---
 
 ## Step 3 — moving into the vault
+
+> ⚠ **Superseded, 2026-09-02.** Distilled documents now go into an **openwiki bundle**
+> (`openwiki_emit.py`, `just openwiki-sessions`), not into the vault, and the indexer reads the
+> bundle. The destination changed for one reason: the vault is a place a person edits, so writing
+> generated documents into it made "what did I write" and "what was generated" the same question.
+> The bundle answers it by construction —— ownership is a frontmatter line, and a page this tool
+> did not write is never touched. See [`OPENWIKI-PIPELINE.md`](OPENWIKI-PIPELINE.md).
+>
+> `promote_distilled.py` still runs and still passes its self-checks; it is the older path, kept
+> because it is what the measurements below were taken against.
 
 ```bash
 python promote_distilled.py            # --dry-run · --no-commit
