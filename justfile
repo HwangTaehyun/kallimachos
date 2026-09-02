@@ -331,6 +331,7 @@ selftest-py:
     @{{py}} {{src}}/distill_sessions.py --selftest
     @{{py}} {{src}}/okf_convert.py --selftest
     @{{py}} {{src}}/openwiki_emit.py --selftest
+    @{{py}} {{src}}/openwiki_enrich.py --selftest
     #  ⚠ The OKF version string is frozen at 0.2 while its content moved (2026-08-21
     #     tightened every timestamp rule).  A consumer pinning the version cannot see
     #     that, so the **sha256 is the only live signal**.  Upstream also relocated to its
@@ -482,6 +483,18 @@ openwiki-vault wiki=openwiki_dir vault=vault_dir:
 openwiki-index wiki=openwiki_dir:
     @echo "  indexing {{wiki}} → ~/.kal/db"
     @KAL_VAULT="{{wiki}}" {{py}} {{src}}/schema_v3.py
+
+#  ⚠ **This is the only step that sends a converted vault page to an LLM.**  `openwiki-vault` is
+#     pure conversion and stays that way; this fills what conversion could not invent.  It is a
+#     separate recipe for the same reason the two halves of the pipeline are: a rate limit must
+#     not stop a conversion that never needed the network.
+#     Measured 2026-09-02: of the 96 pages migrated from the Obsidian vault, 17% carried
+#     `doc_type` and 28% `why_captured`, against 100% of the 1,017 the distiller wrote —— the
+#     converter carries a key across, it does not make one up.  This step makes one up **and says
+#     so** (`filled_by:` on the page), which a person can then correct.
+# Fill the OKF extension keys a converted page is missing —— one LLM call per page
+openwiki-enrich wiki=openwiki_dir *args:
+    @{{py}} {{src}}/openwiki_enrich.py --wiki "{{wiki}}" {{args}}
 
 #  ⚠ **Workers.**  lr_extract defaults to 14, which is right for a short incremental run and wrong
 #     here.  Measured 2026-08-21: 14 workers over a 99-minute extraction left the stage after it at

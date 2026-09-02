@@ -76,6 +76,7 @@ just openwiki-plan                # what would change.  Writes nothing
 
 just openwiki-sessions            # A ── session logs → distilled → bundle      (hours, LLM)
 just openwiki-vault <vault-path>  # B ── any Markdown tree → bundle             (seconds)
+just openwiki-enrich <bundle>     # fill missing OKF metadata with an LLM        (minutes)
 just openwiki-index               # bundle → knowledge DB                       (~2 min)
 just openwiki-kg                  # DB documents → entities + relations         (hours, LLM)
 just openwiki-adopt               # point CLI · MCP · container at the bundle   (instant)
@@ -171,6 +172,35 @@ Two exclusions are load-bearing:
 - It refuses a `--from` inside the bundle, and an `--into` that escapes it.
 
 ---
+
+## Filling what conversion could not invent
+
+```bash
+just openwiki-enrich <bundle>            # one LLM call per page that is missing metadata
+just openwiki-enrich <bundle> --dry-run  # what it would ask about
+```
+
+`openwiki_emit` carries a key across when the source had one and **never invents metadata**. That
+is right — a vault note that says nothing about why it was kept should not have a sentence made up
+for it and filed as the author's. The consequence is measurable (2026-09-02):
+
+| | `doc_type` | `why_captured` |
+|---|---:|---:|
+| the 1,017 pages `distill_sessions` wrote | 100% | 100% |
+| the 96 pages migrated from a vault | 17% | 28% |
+
+So the choice is not "invent or not" but **who says it**. This step says it out loud: the page
+records `filled_by: "process:openwiki_enrich.py/<version>"`, which a person can correct or delete.
+A value that is silently absent cannot be corrected.
+
+What it refuses to do:
+
+- never sends a page the transmission gate blocks (`no_llm`), nor `references/`, nor an `index.md`
+- never overwrites a key that is already there, including one a person wrote
+- writes a `doc_type` **only** from the vocabulary — a value nobody filters on looks filled and
+  matches nothing, which is worse than an absent key
+- writes `doc_type` bare and inside the first 1,200 characters, because that is how the indexer
+  reads it
 
 ## Index and graph
 
