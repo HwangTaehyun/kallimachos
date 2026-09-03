@@ -672,8 +672,17 @@ up-prod:
 # Start without a vault mount —— screens only, pipeline runs on the host
 up-viewer:
     @test -f .env || (echo "  there is no .env.  Run  just env  first." && exit 1)
-    @docker compose -f docker-compose.yml -f docker-compose.viewer.yml up -d --build
-    @echo "  viewer → http://127.0.0.1:${WEB_PORT:-5173}   (no vault mounted)"
+    @#  ⚠ **VAULT_DIR and VAULT_NAME are supplied here and never used.**  Compose interpolates the
+    @#     base file *before* merging an override, so `${VAULT_DIR:?…}` makes the variable required
+    @#     even though `docker-compose.viewer.yml` replaces both the mount and the environment entry
+    @#     (reproduced 2026-09-03: `--env-file /dev/null` still failed on VAULT_DIR).  Dropping the
+    @#     `:?` from the base would take the loud failure away from the stacks that genuinely need
+    @#     it, and an unset mount source becomes a silently empty anonymous volume —— the exact
+    @#     failure this project keeps refusing.  So the throwaway value lives here, in the one mode
+    @#     that has no vault.
+    @VAULT_DIR="${VAULT_DIR:-/dev/null}" VAULT_NAME="${VAULT_NAME:-none}" \
+      docker compose -f docker-compose.yml -f docker-compose.viewer.yml up -d --build
+    @echo "  viewer → http://127.0.0.1:${WEB_PORT:-5173}   (no vault mounted · VAULT_DIR not needed)"
 
 
 # With a domain and TLS (nginx-proxy + acme)

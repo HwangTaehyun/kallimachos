@@ -31,3 +31,6 @@ services:
       #  empty one is the truthful reading —— not a path that looks mounted and is not.
       KAL_VAULT: ""
       KAL_VAULT_HOST: ""
+      #  The deep-link name too —— there is no vault to open, and a leftover name on the Paths
+      #  screen would name one that is not mounted.
+      KAL_VAULT_NAME: ""

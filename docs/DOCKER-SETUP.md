@@ -209,6 +209,14 @@ plugin folder it will never use.
 just up-viewer      # docker compose -f docker-compose.yml -f docker-compose.viewer.yml up -d
 ```
 
+**It needs no vault settings.** `VAULT_DIR` and `VAULT_NAME` may be unset entirely — verified with
+`--env-file /dev/null`. The recipe supplies throwaway values because Compose interpolates the base
+file *before* merging an override, so `${VAULT_DIR:?…}` makes the variable required even where both
+the mount and the environment entry are replaced. Dropping the `:?` from the base would take the
+loud failure away from the stacks that genuinely need it, and an unset mount source becomes a
+silently empty anonymous volume. So the throwaway lives in the one mode that has no vault, and
+`KAL_VAULT`, `KAL_VAULT_HOST` and `KAL_VAULT_NAME` all resolve to `""` in the container.
+
 No `/vault` mount. Measured on the running stack: `/api/health` · `/api/steps` · `/api/config` ·
 `/api/status` all 200, and the galaxy view works because the graph is read from `KAL_HOME`.
 
@@ -229,7 +237,7 @@ The Status screen then reports:
 > sync — which would have rebuilt the index down to nothing. The honest reading is what makes a
 > vault-less container safe to offer.
 
-> ⓘ **Still no `.env` value became removable.** In the default stack `VAULT_DIR` mounts the Markdown the pipeline reads;
+> ⓘ **In the default stack no `.env` value became removable.** `VAULT_DIR` mounts the Markdown the pipeline reads;
 > `KAL_VAULT_NAME` still fills the `obsidian://open?vault=…` deep link; `KAL_VAULT_HOST` is still
 > what the Paths screen compares against the DB. What changed is a *dependency*, not a *setting* —
 > a container that only serves the viewer no longer touches the vault at run time.
