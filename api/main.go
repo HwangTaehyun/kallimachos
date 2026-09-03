@@ -471,7 +471,7 @@ func logging(h http.Handler) http.Handler {
 // to keep true, and the only installation it served is this one —— which has re-exported.
 // `just export` is the answer to a missing graph, and the 404 below says so.
 //
-// It is about 6MB, so resending it every time is wasteful.  ServeContent handles
+// It is about 18 MB (2026-09-03), so resending it every time is wasteful.  ServeContent handles
 // countMarkdown counts .md files under root, stopping at `limit`.  Dot-directories are skipped,
 // the way every other walk in this project does.
 //
@@ -541,7 +541,7 @@ func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
 	//  ⚠ This response carried no Cache-Control, and browsers then fall back to **heuristic
 	//    freshness** (RFC 9111 §4.2.2 —— with neither Expires nor Cache-Control, a cache may
 	//    invent a lifetime from Last-Modified).  So re-exporting the graph kept serving the old
-	//    6MB JSON with no revalidation —— measured 2026-09-01: the server held 21 English
+	//    an 18 MB JSON with no revalidation —— measured 2026-09-01: the server held 21 English
 	//    cluster labels while a fresh window still showed the old Korean ones.
 	//    `no-cache` means "revalidate before use", not "do not store".
 	//    The 304 design in the comment above is untouched, and a changed mtime is picked up at once.
@@ -795,7 +795,7 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 		//     no vault, and an empty `KAL_VAULT` then falls through to ~/.kal/config.json —— which
 		//     holds a **host** path that does not exist inside the container.  The walk finds
 		//     nothing, and "Rebuild knowledge DB" overwrites every table with empty rowsets while
-		//     "Incremental sync" classifies all 1,115 documents as deleted.  One click, no
+		//     "Incremental sync" classifies all 1,116 documents as deleted.  One click, no
 		//     confirmation, and the DB the container exists to serve is gone.
 		//     The status screen already says the vault yielded nothing; that warning did not gate
 		//     this handler.  (codex review 2026-09-03, blocker #2 —— configuration reproduced)

@@ -407,22 +407,50 @@ def main():
     #     same.  Now every destination is opened **before** anything is deleted, so a run that
     #     cannot finish has not started.
     def _inside(path):
-        """Where will a write to `path` actually land —— inside the bundle, or through a link?"""
+        """Where will a write to `path` actually land —— inside the bundle, or through a link?
+
+        ⚠ **The parent is what matters, not the file.**  A first version asked this only when the
+           destination already existed (`lexists`), so a *new* file under a **symlinked directory**
+           was never checked —— and `os.makedirs(..., exist_ok=True)` happily follows such a link.
+           Reproduced 2026-09-04: `bundle/personal/sessions/claude -> /tmp/outside` and a plain
+           default-route run created `/tmp/outside/new.md` **and overwrote a hand-written
+           `/tmp/outside/index.md`** with a generated index.  `git -C bundle status` said nothing.
+           Resolving the directory catches both spellings; resolving the file catches only one.
+        """
         root = os.path.realpath(a.wiki)
-        real = os.path.realpath(path)
-        return os.path.commonpath([real, root]) == root
+        parent = os.path.realpath(os.path.dirname(path) or ".")
+        if os.path.commonpath([parent, root]) != root:
+            return False
+        #  A link *at* the path itself would still send the bytes elsewhere.
+        return not os.path.islink(path)
+
+    def _guarded(path):
+        """Make the parent, then prove the write lands inside.  Returns False when it would not."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if _inside(path):
+            return True
+        print(f"❌ {os.path.relpath(path, a.wiki)} resolves outside the bundle: "
+              f"{os.path.realpath(path)}\n"
+              f"   A symlink on that path would send the write out of the repository, and\n"
+              f"   `git revert` could not bring it back.  Nothing further is written.")
+        return False
 
     handles = []
     try:
         for rel, _text, _t, _d in plan:
             dst = os.path.join(a.wiki, rel)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            if os.path.lexists(dst) and not _inside(dst):
-                print(f"❌ {rel} resolves outside the bundle: {os.path.realpath(dst)}\n"
-                      f"   A symlink at that path would send the write out of the repository, and\n"
-                      f"   `git revert` could not bring it back.  Nothing was written.")
+            if not _guarded(dst):
+                for _r, fh in handles:
+                    fh.close()
                 return 1
-            handles.append((rel, open(dst, "w", encoding="utf-8")))
+            #  ⚠ **Opened without O_TRUNC.**  `open(dst, "w")` empties the file the moment it is
+            #     opened, so between this loop and the write loop below every destination sat at
+            #     zero bytes —— a crash in that window lost *all* pages at once, where before the
+            #     atomicity fix it lost only those sorted after the failure.  Proving the write can
+            #     start must not be the thing that destroys the old content.  Truncation happens at
+            #     write time, per file, immediately before its new bytes go in.
+            fd = os.open(dst, os.O_WRONLY | os.O_CREAT, 0o644)
+            handles.append((rel, os.fdopen(fd, "r+", encoding="utf-8")))
     except OSError as e:
         for _rel, fh in handles:
             fh.close()
@@ -430,9 +458,18 @@ def main():
               f"   Nothing was deleted and nothing was written.")
         return 1
 
+    #  ⚠ **A planned destination must not be unlinked.**  Opening every file before deleting made
+    #     the run safe against a mid-write failure, but it also meant the delete loop below removed
+    #     files whose handles were already open —— the write then landed in a **deleted inode** and
+    #     the page vanished from the directory while the run reported success.  Reproduced
+    #     2026-09-04 on the ordinary path: `1 page(s) →` and no file afterwards.
+    #     A page that is being rewritten is not stale; only the ones this run does not replace are.
+    planned = {os.path.realpath(os.path.join(a.wiki, rel)) for rel, *_ in plan}
     for d in touched_dirs:
         os.makedirs(d, exist_ok=True)
         for stale in owned(d):
+            if os.path.realpath(stale) in planned:
+                continue
             #  A stale page reached through a link would unlink the link, not its target —— but
             #  refuse anyway: the caller asked to replace pages in the bundle, not to touch links.
             if _inside(stale):
@@ -440,7 +477,9 @@ def main():
     texts = {rel: text for rel, text, *_ in plan}
     for rel, fh in handles:
         with fh:
+            fh.seek(0)
             fh.write(texts[rel])
+            fh.truncate()
 
     #  ── indexes and manifest ──
     #  ⚠ **Built from the whole bundle, not from this run's `plan`.**  They used to be rebuilt
@@ -462,7 +501,10 @@ def main():
             ((fmx.get("title") or slug_of(rel)), rel,
              (d.group(1).strip().strip('"') if d else "")))
     for d, entries in sorted(by_dir.items()):
-        open(os.path.join(a.wiki, d, "index.md"), "w", encoding="utf-8").write(render_index(d, entries))
+        _ix = os.path.join(a.wiki, d, "index.md")
+        if not _guarded(_ix):
+            return 1
+        open(_ix, "w", encoding="utf-8").write(render_index(d, entries))
     #  a parent index listing its children, so no directory is unreachable from the root
     #  every ancestor directory, up to and including the bundle root —— a directory reachable from
     #  nowhere is a directory nobody finds.  §8 calls this progressive disclosure.
@@ -480,7 +522,10 @@ def main():
                  for c in sorted(parents)
                  if c and os.path.dirname(c) == p and c not in by_dir]
         if kids:
-            open(os.path.join(a.wiki, p, "index.md"), "w", encoding="utf-8").write(
+            _ix2 = os.path.join(a.wiki, p, "index.md")
+            if not _guarded(_ix2):
+                return 1
+            open(_ix2, "w", encoding="utf-8").write(
                 render_index(p, kids, root=(p == "")))
 
     #  ── the manifest.  Deterministic and sorted, so a no-change run leaves the file untouched ──
@@ -492,7 +537,10 @@ def main():
                                  open(os.path.join(a.wiki, rel), "rb").read()).hexdigest()}
                             for entries in by_dir.values() for title, rel, _d in entries),
                            key=lambda x: x["path"])}
-    open(os.path.join(a.wiki, MANIFEST), "w", encoding="utf-8").write(
+    _mf = os.path.join(a.wiki, MANIFEST)
+    if not _guarded(_mf):
+        return 1
+    open(_mf, "w", encoding="utf-8").write(
         json.dumps(man, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
     print(f"  ✅ {len(plan)} page(s) → {a.wiki}")
@@ -661,6 +709,65 @@ def _selftest():
         assert os.path.exists(keep), \
             "a run into personal/ deleted a session page under personal/sessions/"
         ok.append("a run deletes only in the directories it writes to, never in their subtrees")
+
+        #  ⑦f **A symlinked *parent* sends the write out too, and the index write had no guard at
+        #      all.**  A first fix checked the destination only when it already existed, so a new
+        #      file under `personal/sessions/claude -> /outside` was never checked —— and it was the
+        #      generated `index.md` that overwrote a hand-written file out there (2026-09-04).
+        _ext = tempfile.mkdtemp()
+        open(os.path.join(_ext, "index.md"), "w").write("PRECIOUS\n")
+        _link = os.path.join(wiki, "personal", "sessions", "linked")
+        os.makedirs(os.path.dirname(_link), exist_ok=True)
+        os.symlink(_ext, _link)
+        _lsrc = os.path.join(d, "linksrc")
+        os.makedirs(_lsrc, exist_ok=True)
+        open(os.path.join(_lsrc, "n.md"), "w").write(
+            '---\ntitle: "n"\ntype: note\n---\n본문\n')
+        sys.argv = ["x", "--wiki", wiki, "--from", _lsrc, "--into", "personal/sessions/linked", "--force"]
+        assert main() == 1, "a write through a symlinked parent was accepted"
+        assert open(os.path.join(_ext, "index.md")).read() == "PRECIOUS\n", \
+            "a file outside the bundle was overwritten through a symlinked directory"
+        assert not os.path.exists(os.path.join(_ext, "n.md")), "a page was written outside the bundle"
+        os.remove(_link)
+        shutil.rmtree(_ext, ignore_errors=True)
+        ok.append("a symlinked parent directory cannot take a write —— pages or generated indexes")
+
+        #      …the **index** and manifest writes carry the same guard.  I could not construct an
+        #      input that distinguishes it: with the index guard removed, a file behind a symlinked
+        #      directory holding no planned page was still untouched (measured 2026-09-04), because
+        #      the escape in the original reproduction came through a directory the *page* write had
+        #      already created —— and that write is now refused first.
+        #      It stays anyway.  It guards a **write**, the cost is one realpath, and the reason it
+        #      is currently unreachable is a property of how the index walk enumerates directories ——
+        #      exactly the kind of thing this repository has changed before (`owned()` moved from
+        #      glob to os.walk for this same class of bug).  Recorded as untested rather than
+        #      deleted, and rather than pinned by an assertion I could not make true: a first
+        #      attempt asserted that glob does not descend into symlinked directories, and it fired
+        #      immediately —— glob reaches one level through a link.
+
+        #  ⑦g **A page that is being rewritten must survive the run, with its new bytes.**  Opening
+        #      every destination before deleting made the run safe against a mid-write failure, but
+        #      the delete loop then unlinked files whose handles were already open —— the write went
+        #      into a deleted inode and the page vanished while the run printed success.  And
+        #      `open(dst, "w")` truncated at open, so a crash between the two loops emptied every
+        #      destination at once.  Both directions are checked: the replaced page is complete and
+        #      short (so a stale tail would show), and a page this run does not write is still gone.
+        _rw = os.path.join(d, 'rw')
+        os.makedirs(_rw, exist_ok=True)
+        _own = '---\ntitle: "a"\ntype: note\nsources:\n  - resource: "claude-session://abc"\n---\n'
+        _dstdir = os.path.join(wiki, 'personal', 'rw')
+        os.makedirs(_dstdir, exist_ok=True)
+        open(os.path.join(_dstdir, 'a.md'), 'w').write(_own + 'OLD ' + 'x' * 200 + '\n')
+        open(os.path.join(_dstdir, 'gone.md'), 'w').write(_own + 'not in the plan\n')
+        open(os.path.join(_rw, 'a.md'), 'w').write(_own + '짧다\n')
+        sys.argv = ['x', '--wiki', wiki, '--from', _rw, '--into', 'personal/rw', '--force']
+        assert main() == 0
+        _after = open(os.path.join(_dstdir, 'a.md'), encoding='utf-8').read()
+        assert '짧다' in _after, 'the rewritten page lost its new content'
+        assert 'xxxx' not in _after, 'the old content survived —— the file was not truncated at write'
+        assert not os.path.exists(os.path.join(_dstdir, 'gone.md')), \
+            'a stale owned page this run does not write was left behind'
+        ok.append('a rewritten page keeps its new bytes while an unplanned stale one is removed')
 
         #  ⑦d A hand-written page whose **block scalar** happens to contain a provenance line is
         #      not ours.  Reproduced 2026-09-02 (codex review, blocker #6): `description: |` with

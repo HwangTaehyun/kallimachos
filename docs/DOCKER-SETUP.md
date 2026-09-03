@@ -239,7 +239,7 @@ nothing but the four values in the table above.**
 ## 5c. What the vault mount is actually for
 
 Since 2026-09-02 the galaxy graph is read from **`KAL_HOME`**, not from inside the vault. That was
-the api container's only use of the mount — it mounted a whole vault to serve one 6MB file. So:
+the api container's only use of the mount — it mounted a whole vault to serve one 18 MB file. So:
 
 | Surface | Needs `/vault`? |
 |---|---|
@@ -282,13 +282,13 @@ on macOS is the only place its LLM steps work anyway.
 The Status screen then reports:
 
 ```
-  vault_absent: true · deleted: 0 · indexed: 1115
-  → vault · "the index holds 1115 documents but the vault yielded none — it is empty,
+  vault_absent: true · deleted: 0 · indexed: 1116
+  → vault · "the index holds 1116 documents but the vault yielded none — it is empty,
              not mounted, or VAULT_DIR points elsewhere.  This is not 'everything was
              deleted', and running sync would empty the index"
 ```
 
-> ⚠ Before that message existed this configuration printed **`deleted: 1115`** and advised running
+> ⚠ Before that message existed this configuration printed **`deleted: 1116`** and advised running
 > sync — which would have rebuilt the index down to nothing. The honest reading is what makes a
 > vault-less container safe to offer.
 

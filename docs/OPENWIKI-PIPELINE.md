@@ -84,7 +84,7 @@ just openwiki-adopt               # point CLI · MCP · container at the bundle 
 just openwiki                     # A + B + index, and prints the two steps it deliberately omits
 ```
 
-`just openwiki` stops at the index on purpose. Indexing 1,115 documents takes about two minutes;
+`just openwiki` stops at the index on purpose. Indexing 1,116 documents takes about two minutes;
 extracting the graph from them took **eight hours**. Folding an eight-hour step into the command
 you run after a day's sessions means the command stops being run.
 
@@ -188,6 +188,7 @@ for it and filed as the author's. The consequence is measurable (2026-09-02):
 |---|---:|---:|
 | the 1,017 pages `distill_sessions` wrote | 100% | 100% |
 | the 96 pages migrated from a vault | 17% | 28% |
+| the same 96, after `openwiki-enrich` ran (2026-09-03) | 100% | 100% |
 
 So the choice is not "invent or not" but **who says it**. This step says it out loud: the page
 records `filled_by: "process:openwiki_enrich.py/<version>"`, which a person can correct or delete.
@@ -205,7 +206,7 @@ What it refuses to do:
 ## Index and graph
 
 ```bash
-just openwiki-index      # ~2 min for 1,115 documents
+just openwiki-index      # ~2 min for 1,116 documents
 just openwiki-kg         # hours
 ```
 
@@ -217,7 +218,8 @@ Measured, 2026-09-02:
 
 | | |
 |---|---|
-| index | 1,115 documents · 9,304 chunks · 6,132,241 postings · **108 s** |
+| index (before enrichment) | 1,115 documents · 9,304 chunks · 6,132,241 postings · **108 s** |
+| index (after, 2026-09-03) | 1,116 documents · 9,329 chunks · 6,146,494 postings · **112 s** |
 | graph | 2,492 chunks · 8 workers · haiku · **~8 h** |
 
 ---

@@ -435,7 +435,7 @@ index *args:
 #  halves fail for completely different reasons: the session half needs an LLM (and on macOS,
 #  the host relay), while the vault half is pure conversion and never calls one.
 
-#  ⚠ The knowledge **graph** is deliberately not in this chain.  Indexing 1,115 documents takes
+#  ⚠ The knowledge **graph** is deliberately not in this chain.  Indexing 1,116 documents takes
 #     ~2 minutes; extracting entities and relations from them took 8 hours at 8 workers (measured
 #     2026-09-02).  Folding an eight-hour step into the command people run after every session
 #     would mean it is never run at all.  `just openwiki-kg` is the fourth step, on its own clock.

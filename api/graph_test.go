@@ -247,3 +247,35 @@ func TestStartRunRefusesDestructiveWithNoNotes(t *testing.T) {
 		t.Fatalf("a populated vault was refused: %q", body)
 	}
 }
+
+// `envOr` treats an empty value as unset, and viewer mode depends on that being deliberate.
+//
+//	`docker-compose.viewer.yml` sets `KAL_VAULT: ""` and `KAL_VAULT_NAME: ""` on purpose, and its
+//	comment says an empty one is "the truthful reading — not a path that looks mounted and is
+//	not."  But `envOr` turns those empties into `/vault` and (via filepath.Base) `"vault"`, so the
+//	412 message names a path that is not mounted and `X-Vault-Name` emits a deep link for a vault
+//	that does not exist.  The rule had no test at all: inverting it left `go test` green.
+//
+//	This pins the behaviour rather than changing it — the default is load-bearing for every other
+//	stack — so the divergence is recorded where the next person will see it.
+func TestEnvOrTreatsEmptyAsUnset(t *testing.T) {
+	t.Setenv("KAL_TEST_ENVOR", "")
+	if got := envOr("KAL_TEST_ENVOR", "fallback"); got != "fallback" {
+		t.Fatalf("an empty value did not fall back: %q", got)
+	}
+	t.Setenv("KAL_TEST_ENVOR", "set")
+	if got := envOr("KAL_TEST_ENVOR", "fallback"); got != "set" {
+		t.Fatalf("a set value was overridden: %q", got)
+	}
+	os.Unsetenv("KAL_TEST_ENVOR")
+	if got := envOr("KAL_TEST_ENVOR", "fallback"); got != "fallback" {
+		t.Fatalf("an unset value did not fall back: %q", got)
+	}
+
+	//  The consequence viewer mode inherits: an explicitly empty KAL_VAULT still reads as /vault.
+	//  If that ever changes, viewer mode's messages change, and this test says where to look.
+	t.Setenv("KAL_VAULT", "")
+	if got := envOr("KAL_VAULT", "/vault"); got != "/vault" {
+		t.Fatalf("KAL_VAULT=\"\" no longer resolves to /vault: %q — viewer mode's messages change", got)
+	}
+}

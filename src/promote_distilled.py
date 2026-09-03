@@ -168,7 +168,20 @@ def owned(d):
     """
     out = []
     for f in sorted(glob.glob(os.path.join(d, "*.md"))):
-        if re.search(r"^[ \t]*" + re.escape(OWN_MARK), _frontmatter(f), re.M):
+        #  ⚠ **Column zero, and block-scalar bodies removed.**  Restricting the search to the
+        #     frontmatter was not enough: `^[ \t]*` still matched a **nested** key (`meta:` then an
+        #     indented `origin: claude-session`) and the *content* of a `description: |` scalar.
+        #     Both were classified as ours and reached `os.remove`, and `foreign()` stayed silent
+        #     about them because it excludes whatever `owned()` claims.  A top-level YAML key has
+        #     no leading whitespace, so anchoring at column zero is the rule —— the same one
+        #     `openwiki_emit.OWNED_LINE` arrived at.  (reproduced 2026-09-04)
+        #
+        #  ⓘ A `_scalar_free()` pass stood here briefly, stripping `|`/`>` block-scalar bodies.
+        #     A mutation test could not distinguish it: YAML requires a block scalar's content to
+        #     be indented, so the column-zero anchor already excludes it, and removing the call
+        #     left every check green.  A branch no test can tell apart is a branch that rots, so
+        #     it is gone —— the anchor is the whole rule.
+        if re.search(r"^" + re.escape(OWN_MARK), _frontmatter(f), re.M):
             out.append(f)
     return out
 
@@ -342,6 +355,15 @@ def _selftest():
             "Session documents carry `" + OWN_MARK + "` in their frontmatter.\n")
         _own = sorted(os.path.basename(x) for x in owned(_od))
         assert _own == ["real.md"], f"ownership read the body: {_own}"
+        #     …and inside the frontmatter, only a **top-level** key counts.  Restricting the
+        #     search to the frontmatter was not enough: a nested key and a block-scalar body both
+        #     still matched and reached os.remove.  (2026-09-04)
+        open(os.path.join(_od, "nested.md"), "w", encoding="utf-8").write(
+            "---\ntitle: n\nmeta:\n  " + OWN_MARK + "\n---\n본문\n")
+        open(os.path.join(_od, "scalar.md"), "w", encoding="utf-8").write(
+            "---\ntitle: s\ndescription: |\n  " + OWN_MARK + "\n  is the marker\n---\n본문\n")
+        _own2 = sorted(os.path.basename(x) for x in owned(_od))
+        assert _own2 == ["real.md"], f"a nested key or block scalar was called ours: {_own2}"
     finally:
         _sh.rmtree(_od, ignore_errors=True)
     _b2 = _tf.mkdtemp(); open(os.path.join(_b2, "index.md"), "w").write('okf_version: "0.2"\n')

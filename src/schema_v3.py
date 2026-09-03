@@ -497,10 +497,18 @@ def classify_origin(rel, raw):
 
        Pulled out of the indexing loop so a mutation can be caught: inlined, removing the
        provenance arm left every self-check green.
+
+    ⚠ **The frontmatter, not the first 2,000 characters.**  `raw[:2000]` reaches into the body,
+       so a note *documenting* the session URI —— at a line start, in a fenced code block, or as a
+       list item —— was classified `session` and dropped from `kal_search --origin vault`.
+       Reproduced 2026-09-04 on all three spellings.  This corpus is largely write-ups about this
+       pipeline, so it fires in practice.  Same body-vs-frontmatter class as `owned()` in
+       openwiki_emit and promote_distilled, which were both fixed for it.
     """
     if rel.startswith(SESSION_DIR):
         return "session"                       # the vault layout, kept for anything predating the bundle
-    return "session" if SESSION_URI.search(raw[:2000]) else "vault"
+    m = re.match(r"\A\ufeff?\s*---[ \t]*\r?\n(.*?)\r?\n(?:---|\.\.\.)[ \t]*\r?\n", raw, re.S)
+    return "session" if (m and SESSION_URI.search(m.group(1))) else "vault"
 
 
 #  **The transmission gate, in one place.**  This exact regex was copied into six modules
@@ -1486,6 +1494,19 @@ def _selftest():
                     "no frontmatter\nno_llm: true\n",
                     "---\nno_llm: false\n---\nbody\n"):
         assert not doc_meta(_openfm)[2], f"prose about the key closed the gate: {_openfm!r}"
+    #  ⚠ `classify_origin` reads the **frontmatter**, not the first 2,000 characters.  A note
+    #     documenting the session URI —— at a line start, in a code block, or as a list item ——
+    #     was classified `session` and vanished from `--origin vault`.  (2026-09-04)
+    for _body in ('resource: "claude-session://abc"',
+                  '```yaml\nresource: "claude-session://abc"\n```',
+                  '- resource: "claude-session://abc"'):
+        _t = '---\ntitle: 설명\ntype: note\n---\n\n' + _body + '\n'
+        assert classify_origin('personal/wiki/x.md', _t) == 'vault', \
+            f'a note documenting the URI was called a session: {_body!r}'
+    #     …and a real session page is still recognised, or the fix would blank the origin filter.
+    assert classify_origin('personal/wiki/x.md',
+                           '---\ntitle: s\nsources:\n  - resource: "claude-session://a"\n---\nb\n'
+                           ) == 'session', 'a real session page stopped being recognised'
     for _n2 in ("  no_llm: true", 'description: "no_llm: true"', "x_no_llm: true"):
         assert not doc_meta(f'---\ntitle: "a"\n{_n2}\n---\nx\n')[2], f"{_n2} closed the gate"
     for _y in ("true", "true # private", "true   # 사적", "yes", "on", "TRUE"):
