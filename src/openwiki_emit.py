@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from okf_convert import parse_fm, to_okf, build_link_index, EXT_OPENWIKI   # noqa: E402
 from schema_v3 import NO_LLM_RE   # the transmission gate lives in one place
 from ingest_sessions import find_leaks                                     # noqa: E402
+from frontmatter import FM_RE
 
 KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
 WIKI = os.environ.get("OPENWIKI_DIR", os.path.expanduser("~/github/HwangTaehyun/openwiki"))
@@ -140,7 +141,7 @@ def _fm_block(path):
         raw = open(path, encoding="utf-8", errors="ignore").read()
     except OSError:
         return ""
-    m = re.match(r"\A\ufeff?\s*---[ \t]*\r?\n(.*?)\r?\n(?:---|\.\.\.)[ \t]*\r?\n", raw, re.S)
+    m = FM_RE.match(raw)
     return m.group(1) if m else ""
 
 
@@ -789,6 +790,36 @@ def _selftest():
         shutil.rmtree(_ext2, ignore_errors=True)
         shutil.rmtree(_s2, ignore_errors=True)
         ok.append("a symlink at an index.md path cannot take the generated index's write")
+
+        #  ⚠ **A source note whose frontmatter opens with a BOM still becomes a page.**  The
+        #     conversion asks `okf_convert.parse_fm`, which carried a narrow `\A---\n…` fence, so a
+        #     BOM or leading blank line made `fm` empty and the file was counted into
+        #     "ⓘ N file(s) skipped —— no frontmatter to convert".  That reads like a correct
+        #     classification, which is why it could sit there: the note simply never appeared in
+        #     the bundle.  (adversarial review 2026-09-04, Q1)
+        _s3 = tempfile.mkdtemp()
+        _fm3 = "title: BOM note\ntype: note\nstatus: draft\nsession_agent: claude"
+        open(os.path.join(_s3, "bom.md"), "wb").write(
+            ("\ufeff---\n" + _fm3 + "\n---\n" + "본문 " * 30 + "\n").encode("utf-8"))
+        open(os.path.join(_s3, "plain.md"), "w", encoding="utf-8").write(
+            "---\n" + _fm3.replace("BOM", "Plain") + "\n---\n" + "본문 " * 30 + "\n")
+        _w3 = tempfile.mkdtemp()
+        subprocess.run(["git", "init", "-q", _w3], check=True)
+        subprocess.run(["git", "-C", _w3, "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+        sys.argv = ["x", "--wiki", _w3, "--from", _s3, "--force"]
+        assert main() == 0, "the run failed"
+        _made = sorted(os.path.basename(f) for f in
+                       glob.glob(os.path.join(_w3, "personal", "sessions", "claude", "*.md"))
+                       if os.path.basename(f) != "index.md")
+        #  Both, and named —— asserting only the count would pass if the BOM note were emitted
+        #  under a fallback name with an empty title.
+        assert _made == ["bom.md", "plain.md"], f"the BOM note did not become a page: {_made}"
+        assert "BOM note" in open(os.path.join(_w3, "personal", "sessions", "claude", "bom.md"),
+                                  encoding="utf-8").read(), "the BOM note lost its title"
+        shutil.rmtree(_s3, ignore_errors=True)
+        shutil.rmtree(_w3, ignore_errors=True)
+        ok.append("a source note opening with a BOM is converted, not silently skipped")
 
         #  ⑦g **A page that is being rewritten must survive the run, with its new bytes.**  Opening
         #      every destination before deleting made the run safe against a mid-write failure, but

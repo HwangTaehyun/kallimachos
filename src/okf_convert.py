@@ -48,6 +48,7 @@ OKF_VERSION = "0.2"
 
 # Documents are selected by **the same rule** as indexing and extraction.  Change one side and the comparison stops holding.
 from schema_v3 import is_skipped, clean as index_clean  # noqa: E402
+from frontmatter import FM_RE
 
 # Our type → an OKF type.  OKF asks only for "a short string denoting the concept kind" (§4).
 # A capitalised noun phrase is the idiom of the spec's examples ("BigQuery Table", "Metric").
@@ -70,7 +71,7 @@ def parse_fm(text):
     """(frontmatter dict, body).  Why no YAML parser —— many values are one-line strings mixing
     colons and quotes, and they break on a round trip.  What we use is only `key: scalar` and
     `key: [a, b]`, so only those two are read."""
-    m = re.match(r"\A---\n(.*?)\n---\n", text, re.S)
+    m = FM_RE.match(text)
     if not m:
         return {}, text
     fm, body = {}, text[m.end():]

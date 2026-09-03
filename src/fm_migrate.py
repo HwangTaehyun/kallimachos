@@ -53,7 +53,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 VAULT = vault_path.vault()
 
-FM_RE = re.compile(r"\A(---\n)(.*?)(\n---\n)", re.S)
+#  The one fence, in its split form —— this module rebuilds the delimiters, so it needs the
+#  three groups.  It used to carry its own narrow copy, which a BOM or a leading blank line
+#  slipped past silently.  See src/frontmatter.py.
+from frontmatter import FM_RE_PARTS as FM_RE
 KEY_RE = re.compile(r"^([A-Za-z_][\w-]*):\s*(.*)$")
 # Is the sN: prefix already there —— a re-run must not produce s1:s1:x
 ID_PREFIXED = re.compile(r"^s(\d+):")   # group 1 = the number (id_sources takes the maximum)

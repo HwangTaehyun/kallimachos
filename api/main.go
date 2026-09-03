@@ -493,18 +493,29 @@ func logging(h http.Handler) http.Handler {
 //	runs).  It is paid once when a run starts, against steps that take 2s to 49min, so it is not
 //	worth splitting the rule into a lighter module —— and the alternative, a second copy of the
 //	rule in Go, already cost one emptied database.
-func (s *Server) indexableCount(root string, limit int) (int, error) {
+func (s *Server) indexableCount(ctx context.Context, root string, limit int) (int, error) {
 	if root == "" {
 		return 0, nil
 	}
-	out, err := exec.Command(s.python, "-c", `
+	//  ⚠ `CommandContext`, not `Command`.  This runs inside an HTTP handler, and the server sets
+	//     `WriteTimeout: 0` on purpose for SSE —— so a Python that blocks (lancedb importing
+	//     against a stalled bind mount, a walk over an unresponsive network mount) would hang the
+	//     request with nothing upstream to rescue it.  Every other subprocess in this file already
+	//     takes a context.  (adversarial review 2026-09-04, C3)
+	cmd := exec.CommandContext(ctx, s.python, "-c", `
 import json, sys
 sys.path.insert(0, `+strconv.Quote(s.src)+`)
 from schema_v3 import indexable_count
 print(indexable_count(sys.argv[1], int(sys.argv[2])))
-`, root, strconv.Itoa(limit)).Output()
+`, root, strconv.Itoa(limit))
+	//  Capture stderr: `.Output()` puts it in `ExitError.Stderr`, which `%w` drops —— so a Python
+	//  traceback reached the caller as a bare "exit status 1".
+	var errb bytes.Buffer
+	cmd.Stderr = &errb
+	out, err := cmd.Output()
 	if err != nil {
-		return 0, fmt.Errorf("could not ask schema_v3 how many documents are indexable: %w", err)
+		return 0, fmt.Errorf("could not ask schema_v3 how many documents are indexable: %w (%s)",
+			err, first(strings.TrimSpace(errb.String()), 300))
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
 	if err != nil {
@@ -793,11 +804,23 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 	//	     something.  `TestVaultGuardCoversEveryVaultReader` pins the resulting set, so
 	//	     rewording `reads` breaks a test instead of silently opening this hole again.
 	if strings.Contains(step.Reads, "vault") && step.Writes != "" {
-		if n, err := s.indexableCount(s.vault, 1); err != nil || n == 0 {
+		//  ⚠ Two branches, not one.  Failing closed is right; **asserting why** is not —— a Python
+		//     crash, a missing schema_v3, an import-time SystemExit and a genuinely empty vault
+		//     all reached the user as "this container was started without a vault", a cause the
+		//     server does not know and which is simply wrong on the host CLI.  This repository's
+		//     own rule: a screen that claims to know what it does not is the worst failure.
+		n, err := s.indexableCount(r.Context(), s.vault, 1)
+		switch {
+		case err != nil:
+			fail(w, 412, "could not find out whether there is anything to read at "+s.vault+
+				" — refusing rather than guessing, because this step would overwrite what is"+
+				" there.  "+first(err.Error(), 400))
+			return
+		case n == 0:
 			fail(w, 412, "there are no notes to read at "+s.vault+
 				" — this step builds from them, so running it now would overwrite what is there"+
-				" with nothing.  This container was started without a vault (see just up-viewer);"+
-				" run the pipeline on the host instead.")
+				" with nothing.  If this is the viewer container, it was started without a vault"+
+				" (see just up-viewer); run the pipeline on the host instead.")
 			return
 		}
 	}

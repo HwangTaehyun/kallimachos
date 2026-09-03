@@ -50,7 +50,7 @@ VAULT = vault_path.vault()
 #   session_*       encoded local paths · employer names · infrastructure topology (280 docs)
 DENY_FM = ("session_id", "session_project", "distilled_from")
 # Uses **the same fence** as schema_v3.doc_meta.  Let the two diverge and the gate opens.
-FM_RE = re.compile(r"\A\ufeff?\s*---[ \t]*\r?\n(.*?)\r?\n(?:---|\.\.\.)[ \t]*\r?\n", re.S)
+from frontmatter import FM_RE      # the one fence —— see src/frontmatter.py
 # What is actually used is an allowlist (kal_doc): schema_v3.FM_KEEP plus the time-axis keys
 # —— a deny-list defaults to "a new key leaks", which makes it useless as a boundary.
 FM_ALLOW = set(_FM_KEEP) | {"created", "updated", "captured", "generated_at",

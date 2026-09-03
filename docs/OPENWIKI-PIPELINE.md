@@ -64,7 +64,7 @@ ADOPT --> SURF : point every surface at the bundle
 - The **`KAL_VAULT` label on the indexer arrow** is load-bearing; see *The vault lives in three
   places* below.
 - `lr_extract` walks the **Markdown under `KAL_VAULT`** — the same tree the indexer walks, never
-  the DB (`lr_extract.py:351`; the file does not import lancedb at all). That is why `KAL_VAULT` is
+  the DB (`lr_extract.py:351` globs `VAULT`; the file does not import lancedb at all). That is why `KAL_VAULT` is
   not optional here, and why `--check-scope` compares the two globs before you spend hours on a
   run whose scope disagrees with the index.
 

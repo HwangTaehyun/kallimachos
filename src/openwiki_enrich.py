@@ -51,6 +51,7 @@ from distill_sessions import DOC_TYPES                           # noqa: E402
 from schema_v3 import doc_meta, is_skipped                       # noqa: E402
 from lr_extract import blocked_path                              # noqa: E402
 from claude_cli import run as claude_run                         # noqa: E402
+from frontmatter import FM_RE, FM_RE_PARTS
 
 KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
 CACHE = os.path.join(KAL_HOME, "openwiki_enrich_cache.jsonl")
@@ -115,7 +116,7 @@ def blocked(path, raw, wiki):
 
 
 def body_of(text):
-    m = re.match(r"\A﻿?\s*---[ \t]*\r?\n.*?\r?\n(?:---|\.\.\.)[ \t]*\r?\n", text, re.S)
+    m = FM_RE.match(text)
     return (text[m.end():] if m else text)[:BODY_CHARS]
 
 
@@ -159,7 +160,7 @@ def insert_keys(text, vals):
        the filter then matches zero rows, and a key past 1,200 characters is not seen at all.
        The other two are quoted, because a sentence with a colon in it is not valid bare YAML.
     """
-    m = re.match(r"\A(﻿?\s*---[ \t]*\r?\n)(.*?)(\r?\n(?:---|\.\.\.)[ \t]*\r?\n)", text, re.S)
+    m = FM_RE_PARTS.match(text)
     if not m:
         return None
     head, fm, tail = m.group(1), m.group(2), m.group(3)

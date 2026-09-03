@@ -28,6 +28,7 @@ Undo:  git -C <vault> revert --no-edit <sha>
 """
 import vault_path
 import os, re, glob, shutil, argparse, collections, datetime, subprocess
+from frontmatter import FM_RE
 
 
 # Where ~/.kal lives.  Mounted at /data/kal inside the container (see docker-compose).
@@ -44,7 +45,7 @@ LOG = os.path.join(VAULT, "wiki/log.md")
 def fm(path):
     """A shallow frontmatter parse — split at the first colon only, so values may contain colons."""
     d, txt = {}, open(path, encoding="utf-8").read()
-    m = re.match(r"---\n(.*?)\n---\n", txt, re.S)
+    m = FM_RE.match(txt)
     if m:
         for line in m.group(1).splitlines():
             k, _, v = line.partition(":")
@@ -151,7 +152,7 @@ def _frontmatter(path):
         raw = open(path, encoding="utf-8", errors="ignore").read()
     except OSError:
         return ""
-    m = re.match(r"\A\ufeff?\s*---[ \t]*\r?\n(.*?)\r?\n(?:---|\.\.\.)[ \t]*\r?\n", raw, re.S)
+    m = FM_RE.match(raw)
     return m.group(1) if m else ""
 
 

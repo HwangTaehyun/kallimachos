@@ -38,6 +38,7 @@ from entity_resolve import build_canon, name_stats, display_name
 import pyarrow as pa
 
 import kal_config as _kal_config
+from frontmatter import FM_RE, FM_OPEN_RE
 # Where the vault lives.  Mounted at /vault inside the container (see docker-compose).
 #  Priority is the same as every other setting: environment > ~/.kal/config.json > default.
 #  This one place used to skip config.json, so `export KAL_VAULT=…` lived **only in that
@@ -460,7 +461,7 @@ FTS_KW = dict(base_tokenizer="ngram", ngram_min_length=NGRAM[0], ngram_max_lengt
 
 # ────────────────────────── Build ──────────────────────────
 def clean(t):
-    m = re.match(r"\A---\n(.*?)\n---\n", t, flags=re.S)
+    m = FM_RE.match(t)
     if not m:
         return t.strip(), ""
     kept, title = [], ""
@@ -507,7 +508,7 @@ def classify_origin(rel, raw):
     """
     if rel.startswith(SESSION_DIR):
         return "session"                       # the vault layout, kept for anything predating the bundle
-    m = re.match(r"\A\ufeff?\s*---[ \t]*\r?\n(.*?)\r?\n(?:---|\.\.\.)[ \t]*\r?\n", raw, re.S)
+    m = FM_RE.match(raw)
     return "session" if (m and SESSION_URI.search(m.group(1))) else "vault"
 
 
@@ -548,8 +549,7 @@ def doc_meta(raw):
     # Matching the fence too narrowly **quietly opens the transmission gate.**  Measured, it
     # diverged from lr_extract's judgement in three cases: BOM, a leading blank line, and
     # CRLF —— the document is indexed with no_llm=False and MCP cannot catch it.
-    m = re.match(r"\A\ufeff?\s*---[ \t]*\r?\n(.*?)\r?\n(?:---|\.\.\.)[ \t]*\r?\n",
-                 raw, flags=re.S)
+    m = FM_RE.match(raw)
     if not m:
         #  ⚠ **A frontmatter that fails to parse must not mean "send it".**  The fence above is
         #     strict, and five ordinary mistakes made it miss —— no closing fence, `----`, `--- x`,
@@ -559,7 +559,7 @@ def doc_meta(raw):
         #     A parse failure is not evidence of consent.  So when the text *looks like* it was
         #     trying to carry frontmatter, the head is scanned and the gate fails **closed**.
         #     Only the head: a `no_llm` far down the body is prose about the key, not a mark.
-        if re.match(r"\A\ufeff?\s*---", raw) and NO_LLM_RE.search(raw[:FM_SCAN_CHARS]):
+        if FM_OPEN_RE.match(raw) and NO_LLM_RE.search(raw[:FM_SCAN_CHARS]):
             return "", "none", True, ""
         return "", "none", False, ""
     fm = m.group(1)
@@ -670,8 +670,15 @@ def indexable(path):
 def indexable_count(root, limit=0):
     """How many files under `root` the indexer would read.  `limit` > 0 stops early.
 
-    The guard only ever asks "is there at least one", so it passes limit=1 and this returns
-    after the first hit instead of reading the whole vault.
+    `limit` bounds the **file reads**, which is the expensive half; the directory walk is paid in
+    full either way.  It used to say "returns after the first hit instead of reading the whole
+    vault", which read as if the walk were bounded too —— it is not, and that is the sentence
+    someone would trust on a vault ten times this size.  `iglob` at least keeps the walk lazy
+    rather than materialising and sorting every path first (measured 2026-09-04: glob+sort alone
+    is 12ms of the guard's cost on 1,134 files; the subprocess's lancedb import is ~1.1s of it).
+
+    Order is not part of the answer here —— a count does not depend on it —— so unlike `scan_vault`
+    this does not sort.
     """
     #  ⚠ `is_skipped` resolves paths against the module-level VAULT, not against its argument ——
     #     so asking about a different root without rebinding it silently evaluates the skip rules
@@ -681,7 +688,7 @@ def indexable_count(root, limit=0):
     was, VAULT = VAULT, os.path.abspath(root)
     try:
         n = 0
-        for f in sorted(glob.glob(os.path.join(VAULT, "**", "*.md"), recursive=True)):
+        for f in glob.iglob(os.path.join(VAULT, "**", "*.md"), recursive=True):
             if indexable(f) is None:
                 continue
             n += 1
@@ -1563,9 +1570,14 @@ def _selftest():
     #  ...and the other way: an indented (nested) key, or a mention inside a value, must not gate.
     #  ⚠ A frontmatter that fails to parse must not read as consent.  Five ordinary mistakes
     #     each returned no_llm=False for a document whose author wrote the mark (2026-09-04).
+    #     ⚠ The last two carry a BOM and a leading blank line.  Every earlier case begins with
+    #        `---` at column zero, so `FM_OPEN_RE`'s `\ufeff?` was never exercised in the
+    #        dangerous direction —— dropping it, and even making the opener match nothing at
+    #        all, left this whole self-check green (measured 2026-09-04).
     for _broken in ("---\nno_llm: true\nbody\n", "---\nno_llm: true\n----\nbody\n",
                     "---\nno_llm: true\n--- x\nbody\n", " ---\nno_llm: true\n ---\nbody\n",
-                    "---\nno_llm: true"):
+                    "---\nno_llm: true",
+                    "\ufeff---\nno_llm: true\nbody\n", "\n---\nno_llm: true\nbody\n"):
         assert doc_meta(_broken)[2], f"a malformed frontmatter failed open: {_broken!r}"
     #     …and the other way: prose about the key is not a mark, and a file with no
     #     frontmatter attempt is untouched.  Without these the fix would block everything.

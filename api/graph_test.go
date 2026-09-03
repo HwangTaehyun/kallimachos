@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -157,7 +158,9 @@ func TestCountMarkdownGatesDestructiveRuns(t *testing.T) {
 			"check indistinguishable from a passing one", err)
 	}
 	srv := &Server{python: py, src: filepath.Join(repo, "src")}
-	countMarkdown := func(root string, limit int) (int, error) { return srv.indexableCount(root, limit) }
+	countMarkdown := func(root string, limit int) (int, error) {
+		return srv.indexableCount(context.Background(), root, limit)
+	}
 
 	empty := t.TempDir()
 	if n, err := countMarkdown(empty, 1); err != nil || n != 0 {
@@ -462,5 +465,78 @@ func TestVaultGuardCoversEveryVaultReader(t *testing.T) {
 	//  vault, so gating it here would refuse the one place it works.
 	if guarded["verify"] {
 		t.Error("the guard covers `verify`, which does not read the vault")
+	}
+}
+
+// A guard that cannot answer must say so, not invent a cause.
+//
+//	One branch used to serve both: a Python crash, a missing `schema_v3`, an import-time
+//	`SystemExit` and a genuinely empty vault all reached the user as "there are no notes to read
+//	… this container was started without a vault", which the server does not know and which is
+//	simply wrong on the host CLI, where there is no container. This repository's own rule, from
+//	`status.py`: a screen that claims to know what it does not is the worst failure.
+func TestVaultGuardTellsFailureFromEmptiness(t *testing.T) {
+	post := func(s *Server) (int, string) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/api/runs", strings.NewReader(`{"step":"index"}`))
+		r.Header.Set("Content-Type", "application/json")
+		s.startRun(w, r)
+		return w.Code, w.Body.String()
+	}
+	mk := func(python string) *Server {
+		return &Server{
+			home: t.TempDir(), vault: t.TempDir(), python: python,
+			src: filepath.Join("..", "src"),
+			steps: map[string]Step{"index": {ID: "index", WritesDB: true,
+				Reads: "vault **/*.md", Writes: "documents · chunks"}},
+			subs: map[string]map[chan string]struct{}{},
+		}
+	}
+
+	//  ① the interpreter is not there —— the guard cannot answer
+	code, body := post(mk(filepath.Join(t.TempDir(), "no-such-python")))
+	if code != 412 {
+		t.Fatalf("an unanswerable guard returned %d, want 412 (%q)", code, body)
+	}
+	if !strings.Contains(body, "could not find out") {
+		t.Errorf("a failure was reported as a cause the server does not know: %q", body)
+	}
+	//  It must not assert the container story, which is wrong on the CLI path.
+	if strings.Contains(body, "started without a vault") {
+		t.Errorf("a subprocess failure was blamed on a missing vault mount: %q", body)
+	}
+
+	//  ①b the interpreter runs but the import blows up —— the traceback has to reach the user.
+	//      `.Output()` puts stderr in `ExitError.Stderr`, which `%w` drops, so this arrived as a
+	//      bare "exit status 1" with nothing to act on.  A missing interpreter does not cover
+	//      this: it fails before Python writes a word.
+	py := filepath.Join("..", ".venv", "bin", "python")
+	if _, err := os.Stat(py); err != nil {
+		t.Fatalf("the project venv is missing (%v) —— run `uv sync`", err)
+	}
+	broken := mk(py)
+	broken.src = t.TempDir() // no schema_v3 here
+	code, body = post(broken)
+	if code != 412 {
+		t.Fatalf("an import failure returned %d, want 412 (%q)", code, body)
+	}
+	//  ⚠ Assert on something only **stderr** can supply.  A first version also accepted
+	//     "schema_v3", which the wrap text itself contains ("could not ask schema_v3 …") —— so it
+	//     passed with stderr thrown away, and the mutation stayed green.
+	if !strings.Contains(body, "ModuleNotFoundError") {
+		t.Errorf("the traceback was dropped —— the user gets nothing to act on: %q", body)
+	}
+
+	//  ② a real interpreter and a genuinely empty vault —— the other sentence
+	code, body = post(mk(py))
+	if code != 412 {
+		t.Fatalf("an empty vault returned %d, want 412 (%q)", code, body)
+	}
+	if !strings.Contains(body, "there are no notes to read") {
+		t.Errorf("an empty vault was not reported as one: %q", body)
+	}
+	//  Both directions, or one message could serve both again without anything noticing.
+	if strings.Contains(body, "could not find out") {
+		t.Errorf("an empty vault was reported as a failure to answer: %q", body)
 	}
 }

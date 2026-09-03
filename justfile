@@ -311,6 +311,9 @@ selftest-py:
     @{{py}} {{src}}/fixture_db.py --selftest
     @{{py}} {{src}}/export_kal_graph.py --selftest
     @{{py}} {{src}}/lr_extract.py --selftest
+    #  The one frontmatter fence.  It runs **before** schema_v3, because every fence-shaped
+    #  defect below it starts here —— twelve copies of this regex once disagreed.
+    @{{py}} {{src}}/frontmatter.py
     @{{py}} {{src}}/schema_v3.py --selftest
     @{{py}} {{src}}/kal_search.py --selftest
     @{{py}} {{src}}/kal_config.py --selftest

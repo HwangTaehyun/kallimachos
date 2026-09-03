@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import time
+from frontmatter import FM_RE
 
 #  The 5 MCP tools.  Missing one breaks the selection rules of the skill (`skills/kal-recall`).
 EXPECT_TOOLS = {"kal_search", "kal_entity", "kal_timeline", "kal_neighbors", "kal_doc"}
@@ -231,7 +232,7 @@ def skills_frontmatter(repo=None):
             continue
         found += 1
         head = open(f, encoding="utf-8").read(4000)
-        m = re.match(r"\A---\n(.*?)\n---\n", head, re.S)
+        m = FM_RE.match(head)
         if not m:
             bad.append(f"{name}: no frontmatter block")
             continue
