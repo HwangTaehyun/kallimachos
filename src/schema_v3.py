@@ -634,15 +634,66 @@ def tokenize(text, lo=NGRAM[0], hi=NGRAM[1]):
             for i in range(len(t) - n + 1) if t[i:i + n].strip()]
 
 
+#  The body a document must have before the indexer will read it.  Below this it is a stub and
+#  contributes nothing but a row.  `clean()` measures **characters**, after it has folded the kept
+#  frontmatter values back in —— so this is not a file size and cannot be approximated by one.
+BODY_FLOOR = 60
+
+
+def indexable(path):
+    """Would the indexer read this file?  → (raw, body, title), or None.
+
+    **The single place that answers this.**  It had two —— `scan_vault` below, and a size floor
+    re-implemented in `api/main.go`'s pre-run guard —— and they disagreed exactly where it hurt:
+    an OKF page carries ~80 bytes of frontmatter, so a file with a three-character body clears a
+    60-**byte** floor while failing this 60-**character** one.  Measured 2026-09-04: three such
+    files on disk counted as 3 in Go and 0 here, the guard let `index` run, and every table was
+    overwritten empty.  Go now calls `indexable_count` rather than keeping its own copy.
+    """
+    if is_skipped(path):
+        return None
+    try:
+        raw = open(path, encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return None                        # unreadable is not indexable, and not a crash either
+    body, title = clean(raw)
+    if len(body) < BODY_FLOOR:
+        return None
+    return raw, body, title
+
+
+def indexable_count(root, limit=0):
+    """How many files under `root` the indexer would read.  `limit` > 0 stops early.
+
+    The guard only ever asks "is there at least one", so it passes limit=1 and this returns
+    after the first hit instead of reading the whole vault.
+    """
+    #  ⚠ `is_skipped` resolves paths against the module-level VAULT, not against its argument ——
+    #     so asking about a different root without rebinding it silently evaluates the skip rules
+    #     against the wrong tree.  Caught by the existing index.md fixture: a vault of nothing but
+    #     generated indexes counted 1 instead of 0 (2026-09-04).
+    global VAULT
+    was, VAULT = VAULT, os.path.abspath(root)
+    try:
+        n = 0
+        for f in sorted(glob.glob(os.path.join(VAULT, "**", "*.md"), recursive=True)):
+            if indexable(f) is None:
+                continue
+            n += 1
+            if limit and n >= limit:
+                break
+        return n
+    finally:
+        VAULT = was
+
+
 def scan_vault():
     out = {}
     for f in sorted(glob.glob(f"{VAULT}/**/*.md", recursive=True)):
-        if is_skipped(f):
+        got = indexable(f)
+        if got is None:
             continue
-        raw = open(f, encoding="utf-8", errors="ignore").read()
-        body, title = clean(raw)
-        if len(body) < 60:
-            continue
+        raw, body, title = got
         rel = os.path.relpath(f, VAULT)
         st = os.stat(f)
         did = stable_doc_id(rel)

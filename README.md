@@ -23,7 +23,7 @@
 
 ![Galaxy view of the author's real vault: 7,974 entities as star clusters, one colour per topic, with the topic list on the left](.github/assets/galaxy-topics.jpg)
 
-<p align="center"><em>The author's actual vault, rendered by the viewer: 7,974 entities in 20 topics, one colour per topic. Topics are found by community detection and named from their top entities. The <a href="#try-it-on-the-demo-vault">demo vault</a> in this repo reproduces a smaller graph end-to-end.</em></p>
+<p align="center"><em>The author's actual vault, rendered by the viewer on 2026-09-01: 7,974 entities in 20 topics, one colour per topic. The same vault now yields 24,527 — a graph grows with the notes, and the picture is a moment in that.  Topics are found by community detection and named from their top entities. The <a href="#try-it-on-the-demo-vault">demo vault</a> in this repo reproduces a smaller graph end-to-end.</em></p>
 
 ## What is this, really?
 
@@ -235,7 +235,9 @@ document explaining what replaced it and why. On the reference corpus that is 42
 
 Conversion never invents metadata, so a migrated vault page keeps only the keys its author wrote
 (measured before enrichment: 17% had `doc_type`, against 100% of the distilled ones;
-`openwiki-enrich` has since brought it to 98%). `openwiki-enrich` fills the
+`openwiki-enrich` has since brought those 96 migrated pages to 100%, and the bundle as a whole to
+1,114 of 1,118 — the four without one are the bundle's own `README.md`, `SPEC.md` and the two
+vendored files under `references/`, which are scaffolding rather than content). `openwiki-enrich` fills the
 rest with an LLM and stamps `filled_by:` on the page, so what a model proposed stays visible and
 correctable.
 

@@ -159,7 +159,25 @@ def selftest():
     assert "chunks" in [b[1] for b in check(_f, _T)], "a genuinely stale count stopped being caught"
     import shutil as _sh2; _sh2.rmtree(_d, ignore_errors=True)
 
+    # ── `--fix` must not claim a repair it did not make ─────────────────────────────────
+    #  It printed `replaced {total}` using **every** finding, including the ones it skips on
+    #  purpose and the symbol citations that never reach it.  So a run that changed nothing said
+    #  "replaced 2. Please check again." and exited 0 —— the exact shape this file exists to
+    #  catch, in this file.  (measured 2026-09-04, git diff empty afterwards)
+    import tempfile
+    _t = os.path.join(tempfile.mkdtemp(), "d.md")
+    #  One line the number swap **can** repair, one it must refuse —— so the count tells them
+    #  apart.  With a single case, returning len(bad) and returning the real figure agree.
+    open(_t, "w", encoding="utf-8").write("a 500 b\n")
+    _n = fix(_t, [(1, "const:CHUNK_CHARS", "500", "2400", ""),
+                  (1, "type-retired:note", "x", "y", "")])
+    assert _n == 1, f"fix() counted {_n}, but it repaired one line of the two given"
+    assert "2400" in open(_t, encoding="utf-8").read(), "the repairable line was not repaired"
+    _n0 = fix(_t, [(1, "db-count (documents)", 1, 2, "")])
+    assert _n0 == 0, f"fix() claimed {_n0} repairs on a finding it skips by design"
+
     print("  ✅ verify_docs constants · type vocabulary · canonical list · table-name look-ahead")
+    print("  ✅ --fix counts what it actually replaced, not what it was asked about")
 
 
 def truth():
@@ -323,8 +341,17 @@ def check(path, T):
 
 
 def fix(path, bad):
-    """Replace a mismatch with the real value.  Line by line, only the number that was caught."""
+    """Replace a mismatch with the real value.  → how many lines it actually changed.
+
+    It returns a count because the caller used to print `replaced {total}` using the **total
+    number of findings**, including the ones this function skips on purpose (broken links,
+    `type-retired:`, `db-count`, and symbol citations, which never even reach here).  So a run
+    that repaired nothing announced "replaced 2. Please check again." and exited 0 —— a fix that
+    reports success without doing anything, in the file whose job is catching exactly that.
+    (measured 2026-09-04: two stale `schema_v3.py:NNN` citations, "replaced 2", git diff empty)
+    """
     lines = open(path, encoding="utf-8").read().split("\n")
+    n_done = 0
     for ln, what, got, want, _ctx in bad:
         i = ln - 1
         if not (0 <= i < len(lines)):
@@ -338,6 +365,7 @@ def fix(path, bad):
             continue                     # a number swap cannot fix it —— a person rewrites the line
         if what == "vocab":              # the whole list —— mechanical, so safe to fix
             lines[i] = lines[i].replace(got, want, 1)
+            n_done += 1
             continue
         pats = [str(got)] if str(what).startswith("const:") else [f"{got:,}", str(got)]
         for pat in pats:
@@ -346,8 +374,10 @@ def fix(path, bad):
                 rep = str(want) if str(what).startswith("const:") else (
                     f"{want:,}" if "," in pat else str(want))
                 lines[i] = rx.sub(rep, lines[i], count=1)
+                n_done += 1
                 break
     open(path, "w", encoding="utf-8").write("\n".join(lines))
+    return n_done
 
 
 CONSTS_TRUTH = {}
@@ -569,7 +599,7 @@ def _main_verify():
     #     findings, hiding the summary line.  Same shape as the `_fold` break above, same
     #     reason it survived: `--links-only` returns first, and that is the path CI runs.
     #     (found 2026-09-01, by running the full path by hand)
-    all_bad = []
+    all_bad, repaired = [], 0
     for root in ROOTS:
         for p in sorted(glob.glob(f"{root}/**/*.md", recursive=True)):
             if "/node_modules/" in p or "/plugin/" in p:
@@ -590,11 +620,19 @@ def _main_verify():
                 print(f"     L{ln:<5}{'broken link':<26}{tgt}")
             total += len(bad) + len(links)
             if a.fix and bad:
-                fix(p, bad)
-                print("     → fixed")
+                n = fix(p, bad)
+                print(f"     → {n} replaced" if n else "     → nothing here a number swap can fix")
+                repaired += n
     if a.fix and total:
-        print(f"\nreplaced {total}.  Please check again.")
-        sys.exit(0)
+        left = total - repaired
+        print(f"\nreplaced {repaired} of {total}.")
+        if left:
+            #  Naming what is left is the point.  A broken link, a symbol citation, a retired type
+            #  and a `db-count` line all need a person, and saying "replaced N" over them is how
+            #  this tool told the truth about the docs while lying about itself.
+            print(f"{left} need a person —— broken links, `file.py:NNN` citations whose symbol "
+                  f"moved, retired types, `db-count` lines.")
+        sys.exit(1 if left else 0)
     # --fix repairs numbers only.  For a broken link, a machine does not know where it should point.
     if total == 0:
         print("\n✅ everything matches")

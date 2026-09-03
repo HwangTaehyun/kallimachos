@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"mime"
 	"net"
@@ -476,50 +475,40 @@ func logging(h http.Handler) http.Handler {
 // `just export` is the answer to a missing graph, and the 404 below says so.
 //
 // It is about 18 MB (2026-09-03), so resending it every time is wasteful.  ServeContent handles
-// countMarkdown counts .md files under root, stopping at `limit`.  Dot-directories are skipped,
-// the way every other walk in this project does.
+// indexableCount answers "is there anything for the indexer to read", and **the only correct
+// answer comes from the indexer's own rules**, so it asks for them instead of restating them.
 //
-// It answers one question —— **is there anything here to index** —— and it answers it in Go rather
-// than by asking Python, because the caller is about to authorise a destructive write and a
-// subprocess that itself resolves the vault differently is not evidence about this path.
-func countMarkdown(root string, limit int) (int, error) {
+//	It used to walk the tree here and skip files under 60 bytes.  That is not the rule: the floor
+//	is 60 **characters of body**, measured after `clean()` has folded the kept frontmatter values
+//	back in.  An OKF page carries ~80 bytes of frontmatter, so a document with a three-character
+//	body clears a byte floor and fails the real one.  Measured 2026-09-04: three such files
+//	counted as 3 here and 0 in `scan_vault`, the guard passed, `index` ran, and every table was
+//	overwritten empty —— precisely what this guard exists to prevent.  The comment that used to
+//	sit here promised "under-count, never over-count" and the code did the opposite.
+//
+//	`limit` > 0 stops the scan early, so the guard's "at least one" costs one file, not a vault.
+//	Errors are returned, never swallowed: a guard that cannot answer must not answer "empty".
+//
+//	Cost: ~1.1s, nearly all of it importing lancedb through schema_v3 (measured 2026-09-04, three
+//	runs).  It is paid once when a run starts, against steps that take 2s to 49min, so it is not
+//	worth splitting the rule into a lighter module —— and the alternative, a second copy of the
+//	rule in Go, already cost one emptied database.
+func (s *Server) indexableCount(root string, limit int) (int, error) {
 	if root == "" {
 		return 0, nil
 	}
-	n := 0
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // an unreadable subtree is not a reason to call the whole vault empty
-		}
-		if d.IsDir() {
-			if name := d.Name(); name != "." && strings.HasPrefix(name, ".") {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		//  ⚠ **This must under-count, never over-count.**  It answers "is there anything for the
-		//     indexer to read", and the indexer reads less than the disk holds: `schema_v3.is_skipped`
-		//     drops every generated `index.md`, and `scan_vault` drops any document whose body is
-		//     under 60 characters.  Counting those made the guard pass on a vault the indexer would
-		//     read **nothing** from —— measured 2026-09-04: 3 files on disk, 0 indexed —— and the
-		//     rebuild then emptied the DB, which is exactly what this exists to stop.
-		//     Full parity would mean re-implementing those rules here, in a second place, which is
-		//     the defect this repository keeps paying for.  So: approximate in the safe direction.
-		//     Refusing a run that would have worked is annoying and recoverable; permitting one
-		//     that empties the DB is not.
-		if strings.HasSuffix(d.Name(), ".md") && d.Name() != "index.md" {
-			if fi, err := d.Info(); err == nil && fi.Size() < 60 {
-				return nil // too small to survive scan_vault's body-length floor
-			}
-			n++
-			if n >= limit {
-				return fs.SkipAll
-			}
-		}
-		return nil
-	})
+	out, err := exec.Command(s.python, "-c", `
+import json, sys
+sys.path.insert(0, `+strconv.Quote(s.src)+`)
+from schema_v3 import indexable_count
+print(indexable_count(sys.argv[1], int(sys.argv[2])))
+`, root, strconv.Itoa(limit)).Output()
 	if err != nil {
-		return n, err
+		return 0, fmt.Errorf("could not ask schema_v3 how many documents are indexable: %w", err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, fmt.Errorf("schema_v3 answered %q, which is not a count: %w", first(string(out), 80), err)
 	}
 	return n, nil
 }
@@ -789,25 +778,34 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 	// read instead.  It is not perfect (a race window remains) but it catches the commonest
 	// mistake: pressing the web button while `just index` runs on the host.  The proper answer
 	// is a single writer, and the relay architecture keeps that (docs/STACK.md §6).
+	//  ⚠ **A step that reads the vault and writes anything must not run with no notes to read.**
+	//     `up-viewer` mounts no vault, and an empty `KAL_VAULT` falls through to ~/.kal/config.json
+	//     —— a **host** path that does not exist inside the container.  The walk finds nothing, and
+	//     "Rebuild knowledge DB" overwrites every table with empty rowsets while "Incremental sync"
+	//     classifies all 1,116 documents as deleted.  One click, no confirmation.
+	//
+	//	   ⚠ It used to be gated on `WritesDB`, and **`extract` slipped through**: it reads the
+	//	     vault and writes `~/.kal/lr_kg.json`, but not the DB.  Clicked in a viewer-mode
+	//	     container it ran to completion in seconds and left a 117-byte graph —— 0 entities,
+	//	     0 relations —— over the output of an eight-hour extraction.  (destroyed and recovered
+	//	     from `lr_cache.jsonl`, 2026-09-04.)  So the condition comes from the step's **own
+	//	     declaration** rather than a flag someone has to remember: reads the vault, writes
+	//	     something.  `TestVaultGuardCoversEveryVaultReader` pins the resulting set, so
+	//	     rewording `reads` breaks a test instead of silently opening this hole again.
+	if strings.Contains(step.Reads, "vault") && step.Writes != "" {
+		if n, err := s.indexableCount(s.vault, 1); err != nil || n == 0 {
+			fail(w, 412, "there are no notes to read at "+s.vault+
+				" — this step builds from them, so running it now would overwrite what is there"+
+				" with nothing.  This container was started without a vault (see just up-viewer);"+
+				" run the pipeline on the host instead.")
+			return
+		}
+	}
+
 	if step.WritesDB {
 		if holder := s.lockHolder(); holder != "" {
 			fail(w, 409, "something else is writing the DB — "+holder+
 				"  (if it is running on the host, press again once it finishes)")
-			return
-		}
-		//  ⚠ **A step that writes the DB must not run with no notes to read.**  `up-viewer` mounts
-		//     no vault, and an empty `KAL_VAULT` then falls through to ~/.kal/config.json —— which
-		//     holds a **host** path that does not exist inside the container.  The walk finds
-		//     nothing, and "Rebuild knowledge DB" overwrites every table with empty rowsets while
-		//     "Incremental sync" classifies all 1,116 documents as deleted.  One click, no
-		//     confirmation, and the DB the container exists to serve is gone.
-		//     The status screen already says the vault yielded nothing; that warning did not gate
-		//     this handler.  (codex review 2026-09-03, blocker #2 —— configuration reproduced)
-		if n, err := countMarkdown(s.vault, 1); err != nil || n == 0 {
-			fail(w, 412, "there are no notes to read at "+s.vault+
-				" — this step rebuilds the knowledge DB from them, so running it now would empty it."+
-				"  This container was started without a vault (see just up-viewer);"+
-				" run the pipeline on the host instead.")
 			return
 		}
 	}
@@ -880,6 +878,18 @@ func (s *Server) exec(ctx context.Context, step Step, run Run) {
 
 	argv := append([]string{}, step.Cmd...)
 	argv = append(argv, run.Args...)
+	//  ⚠ `argv[0]` below panics on a step with no `cmd`, and this runs in a goroutine —— a panic
+	//     there is not recoverable by the handler, it takes the **whole API process** down.  The
+	//     shipped list always has one, so this is about a malformed `status.py` reaching a
+	//     running server, not about normal operation.  Surfaced 2026-09-04 by a test whose
+	//     fixture step had no cmd: the binary died mid-suite instead of failing that one run.
+	if len(argv) == 0 {
+		msg := "step '" + step.ID + "' declares no command to run"
+		log.Print(msg)
+		fmt.Fprintln(lf, msg)
+		s.finish(run, 1, "failed", msg, lf)
+		return
+	}
 	var cmd *exec.Cmd
 	if strings.HasSuffix(argv[0], ".sh") {
 		cmd = exec.CommandContext(ctx, "bash", append([]string{filepath.Join(s.src, argv[0])}, argv[1:]...)...)

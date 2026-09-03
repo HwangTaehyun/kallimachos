@@ -732,18 +732,36 @@ def _selftest():
         shutil.rmtree(_ext, ignore_errors=True)
         ok.append("a symlinked parent directory cannot take a write —— pages or generated indexes")
 
-        #      …the **index** and manifest writes carry the same guard.  I could not construct an
-        #      input that distinguishes it: with the index guard removed, a file behind a symlinked
-        #      directory holding no planned page was still untouched (measured 2026-09-04), because
-        #      the escape in the original reproduction came through a directory the *page* write had
-        #      already created —— and that write is now refused first.
-        #      It stays anyway.  It guards a **write**, the cost is one realpath, and the reason it
-        #      is currently unreachable is a property of how the index walk enumerates directories ——
-        #      exactly the kind of thing this repository has changed before (`owned()` moved from
-        #      glob to os.walk for this same class of bug).  Recorded as untested rather than
-        #      deleted, and rather than pinned by an assertion I could not make true: a first
-        #      attempt asserted that glob does not descend into symlinked directories, and it fired
-        #      immediately —— glob reaches one level through a link.
+        #  ⑦f2 **The index write's guard is reachable, and the page write does not shield it.**
+        #      I recorded this one as untestable and that was wrong (adversarial review supplied
+        #      the input, 2026-09-04).  The index loop is built from a whole-bundle walk, not from
+        #      `plan` —— so a symlink sitting *at* an `index.md` path, in a directory the plan never
+        #      touches, is written to after the page write has already succeeded.  Under the code
+        #      before the guard that `open(..., "w")` overwrote a file outside any repository.
+        _ext2 = tempfile.mkdtemp()
+        _pre = os.path.join(_ext2, "precious.md")
+        open(_pre, "w").write("PRECIOUS\n")
+        #  A real page here is what puts `personal/foo` into the index walk at all.
+        _foo = os.path.join(wiki, "personal", "foo")
+        os.makedirs(_foo, exist_ok=True)
+        open(os.path.join(_foo, "page.md"), "w").write("---\ntitle: Existing\n---\nbody\n")
+        os.symlink(_pre, os.path.join(_foo, "index.md"))
+        _s2 = tempfile.mkdtemp()
+        open(os.path.join(_s2, "n2.md"), "w").write(
+            "---\ntitle: New\ntype: note\nstatus: draft\nsession_agent: claude\n---\nnew body\n")
+        sys.argv = ["x", "--wiki", wiki, "--from", _s2, "--force"]
+        assert main() == 1, "a symlinked index.md was accepted"
+        assert open(_pre).read() == "PRECIOUS\n", \
+            "a file outside the bundle was overwritten through a symlinked index.md"
+        #  ⚠ And the page write **did** succeed first —— that is the point of this case.  Asserting
+        #     it keeps the fixture honest: if a future change refuses the page first, this case
+        #     stops exercising the index guard and would otherwise pass while testing nothing.
+        assert os.path.exists(os.path.join(wiki, "personal", "sessions", "claude", "n2.md")), \
+            "the page write did not happen, so this case no longer reaches the index guard"
+        os.remove(os.path.join(_foo, "index.md"))
+        shutil.rmtree(_ext2, ignore_errors=True)
+        shutil.rmtree(_s2, ignore_errors=True)
+        ok.append("a symlink at an index.md path cannot take the generated index's write")
 
         #  ⑦g **A page that is being rewritten must survive the run, with its new bytes.**  Opening
         #      every destination before deleting made the run safe against a mid-write failure, but

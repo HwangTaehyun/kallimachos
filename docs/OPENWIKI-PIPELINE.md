@@ -218,9 +218,23 @@ Measured, 2026-09-02:
 
 | | |
 |---|---|
-| index (before enrichment) | 1,115 documents · 9,304 chunks · 6,132,241 postings · **108 s** |
-| index (after, 2026-09-03) | 1,116 documents · 9,329 chunks · 6,146,494 postings · **112 s** |
+| index, 2026-09-02 | 1,115 documents · 9,304 chunks · 6,132,241 postings · **108 s** |
+| index, 2026-09-03 | 1,116 documents · 9,329 chunks · 6,146,494 postings · **112 s** |
 | graph | 2,492 chunks · 8 workers · haiku · **~8 h** |
+
+> ⓘ The rows are dates, not before/after `openwiki-enrich` —— an earlier version labelled them
+> that way and it was wrong.  Enrichment rewrites frontmatter on pages already indexed, so it
+> explains the chunk and posting growth but **cannot add a document**; the extra row came from
+> the bundle gaining a page.
+>
+> ⓘ And `indexed: 1,116` is three more than the `1,113` that `just openwiki-status` reports,
+> which looks like three missing documents and is not.  The bundle's page count is its
+> `personal/**` pages; the DB also holds the three files at the bundle root:
+>
+> ```
+> documents 1,116  =  personal/** 1,113  +  INSTRUCTIONS.md · README.md · SPEC.md
+> origin: {'session': 1017, 'vault': 99}       # 96 of the 99 are personal/**
+> ```
 
 ---
 

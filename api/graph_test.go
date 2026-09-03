@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -139,6 +141,24 @@ func TestGraphPrefersHomeOverVault(t *testing.T) {
 //	Both directions: a vault with notes must still be allowed, or the guard would block the
 //	normal case and be removed the first time someone hit it.
 func TestCountMarkdownGatesDestructiveRuns(t *testing.T) {
+	//  The count now comes from `schema_v3.indexable_count`, so this exercises the real rule
+	//  rather than a Go restatement of it —— which is the whole point: the restatement is what
+	//  disagreed.  It needs the project venv; `go test` in this repository runs after `uv sync`,
+	//  and a missing one is a broken checkout, not a reason to pass quietly.
+	//
+	//	⚠ **Mutate the Python and you must pass `-count=1`.**  Go's test cache keys on Go inputs,
+	//	  so editing `schema_v3.py` leaves it valid and the run prints `ok (cached)`.  That is how
+	//	  the first mutation sweep of this test reported "the check does not fire" when it does
+	//	  (2026-09-04) —— a cached pass and a real pass are indistinguishable on screen.
+	repo := ".."
+	py := filepath.Join(repo, ".venv", "bin", "python")
+	if _, err := os.Stat(py); err != nil {
+		t.Fatalf("the project venv is missing (%v) —— run `uv sync`; skipping would make this "+
+			"check indistinguishable from a passing one", err)
+	}
+	srv := &Server{python: py, src: filepath.Join(repo, "src")}
+	countMarkdown := func(root string, limit int) (int, error) { return srv.indexableCount(root, limit) }
+
 	empty := t.TempDir()
 	if n, err := countMarkdown(empty, 1); err != nil || n != 0 {
 		t.Fatalf("an empty folder counted %d (err %v)", n, err)
@@ -185,6 +205,28 @@ func TestCountMarkdownGatesDestructiveRuns(t *testing.T) {
 		t.Fatalf("a vault of index.md and stubs counted %d — the indexer reads none of them", n)
 	}
 
+	//  ⚠ **F5** —— the shape that actually occurs, and the one a size floor cannot see.  An OKF
+	//     page carries ~80 bytes of frontmatter, so a document with a three-character body is a
+	//     66-byte file: over any 60-**byte** floor, under the real 60-**character** body floor.
+	//     Measured 2026-09-04: three such files counted as 3 in Go and 0 in `scan_vault`, the
+	//     guard passed, `index` ran, and every table was overwritten empty.
+	fatFM := t.TempDir()
+	for i := range 3 {
+		if err := os.WriteFile(filepath.Join(fatFM, fmt.Sprintf("p%d.md", i)),
+			[]byte("---\ntype: note\ntitle: page\nstatus: draft\ndescription: d\n---\nabc\n"),
+			0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	//  Proves the premise rather than assuming it —— if frontmatter ever shrinks below the old
+	//  floor this case stops testing what it says it tests, silently.
+	if fi, err := os.Stat(filepath.Join(fatFM, "p0.md")); err != nil || fi.Size() < 60 {
+		t.Fatalf("the fixture no longer clears a 60-byte floor (%d bytes) — it tests nothing", fi.Size())
+	}
+	if n, err := countMarkdown(fatFM, 1); err != nil || n != 0 {
+		t.Fatalf("a stub with fat frontmatter counted %d (err %v) — the indexer reads none of them", n, err)
+	}
+
 	//  The other direction —— a real vault, including one where the notes are nested.
 	full := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(full, "a", "b"), 0o755); err != nil {
@@ -213,25 +255,47 @@ func TestStartRunRefusesDestructiveWithNoNotes(t *testing.T) {
 		s.startRun(w, r)
 		return w.Code, w.Body.String()
 	}
+	//  The guard now asks schema_v3 for the count, so the server needs the interpreter and src.
+	//  Without them `indexableCount` errors and every vault looks empty —— which would make the
+	//  "a populated vault is allowed" half pass for the wrong reason.
+	py := filepath.Join("..", ".venv", "bin", "python")
+	if _, err := os.Stat(py); err != nil {
+		t.Fatalf("the project venv is missing (%v) —— run `uv sync`", err)
+	}
 	mk := func(vault string) *Server {
 		return &Server{
-			home:  t.TempDir(),
-			vault: vault,
+			home:   t.TempDir(),
+			python: py,
+			src:    filepath.Join("..", "src"),
+			vault:  vault,
+			//  The fixtures carry the same `reads`/`writes` the real steps declare, because that
+			//  is what the guard reads now.  A bare `{ID: "index", WritesDB: true}` stopped
+			//  matching the moment the condition moved off WritesDB —— and a fixture that no
+			//  longer trips the guard tests nothing while still passing.
 			steps: map[string]Step{
-				"index":  {ID: "index", WritesDB: true},
-				"verify": {ID: "verify"},
+				"index": {ID: "index", WritesDB: true,
+					Reads: "vault **/*.md + ~/.kal/lr_kg.json", Writes: "documents · chunks · ix_* · lr_*"},
+				//  ⚠ `extract` is the one that got through: it reads the vault and writes, but not
+				//     the DB.  Keep it here or the hole reopens unnoticed.
+				"extract": {ID: "extract", WritesDB: false,
+					Reads: "vault **/*.md", Writes: "~/.kal/lr_kg.json"},
+				"verify": {ID: "verify", Reads: "docs/**/*.md + LanceDB"},
 			},
 			subs: map[string]map[chan string]struct{}{},
 		}
 	}
 
-	//  ① no notes → 412, and the message has to say what would happen
-	code, body := post(mk(t.TempDir()), "index")
-	if code != 412 {
-		t.Fatalf("a DB-writing step with an empty vault returned %d, want 412 (body %q)", code, body)
-	}
-	if !strings.Contains(body, "empty it") {
-		t.Errorf("the refusal does not say the DB would be emptied: %q", body)
+	//  ① no notes → 412, and the message has to say what would happen.  Both steps: `index`
+	//     writes the DB, `extract` does not —— and gating on WritesDB is exactly how `extract`
+	//     ran against an empty vault and overwrote an eight-hour graph with 117 bytes.
+	for _, id := range []string{"index", "extract"} {
+		code, body := post(mk(t.TempDir()), id)
+		if code != 412 {
+			t.Fatalf("%s with an empty vault returned %d, want 412 (body %q)", id, code, body)
+		}
+		if !strings.Contains(body, "overwrite what is there") {
+			t.Errorf("%s: the refusal does not say what would be lost: %q", id, body)
+		}
 	}
 
 	//  ② a vault with a note → the guard does not fire.  Without this the guard could block
@@ -243,8 +307,10 @@ func TestStartRunRefusesDestructiveWithNoNotes(t *testing.T) {
 		[]byte("---\ntitle: a\n---\n"+strings.Repeat("본문 ", 40)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if code, body := post(mk(full), "index"); code == 412 {
-		t.Fatalf("a populated vault was refused: %q", body)
+	for _, id := range []string{"index", "extract"} {
+		if code, body := post(mk(full), id); code == 412 {
+			t.Fatalf("%s was refused on a populated vault: %q", id, body)
+		}
 	}
 }
 
@@ -308,8 +374,14 @@ func TestStartRunRefusesRepoStepWithoutRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	mk := func(src string) *Server {
+		//  Case ② deliberately passes the guard, which starts a real run —— give it a runs/
+		//  directory so the background writer does not fail against a temp dir it does not own.
+		home := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(home, "runs"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		return &Server{
-			home: t.TempDir(), vault: vault, src: src,
+			home: home, vault: vault, src: src,
 			steps: map[string]Step{"verify": {ID: "verify", NeedsRepo: true}},
 			subs:  map[string]map[chan string]struct{}{},
 		}
@@ -338,5 +410,57 @@ func TestStartRunRefusesRepoStepWithoutRepo(t *testing.T) {
 	}
 	if code, body := post(mk(filepath.Join(repo, "src"))); code == 412 {
 		t.Fatalf("a source checkout was refused: %q", body)
+	}
+}
+
+// Which steps the empty-vault guard covers, pinned against the real step list.
+//
+//	The guard was gated on `WritesDB` and **`extract` slipped through** —— it reads the vault and
+//	writes `~/.kal/lr_kg.json`, not the DB.  Clicked in a viewer-mode container it finished in
+//	seconds and left a 117-byte graph, 0 entities, over an eight-hour extraction (2026-09-04).
+//	The condition now derives from the step's own `reads`/`writes`, which covers a future step
+//	nobody remembers to flag —— but a derived condition can also stop matching if someone rewords
+//	`reads`, and that failure is silent.  So the resulting set is written down here.
+//
+//	It loads the **real** STEPS through the same path the server does.  A table of fixtures would
+//	keep passing after status.py changed, which is the failure this pins.
+func TestVaultGuardCoversEveryVaultReader(t *testing.T) {
+	py := filepath.Join("..", ".venv", "bin", "python")
+	if _, err := os.Stat(py); err != nil {
+		t.Fatalf("the project venv is missing (%v) —— run `uv sync`", err)
+	}
+	s := &Server{python: py, src: filepath.Join("..", "src")}
+	if err := s.loadSteps(); err != nil {
+		t.Fatalf("could not load the real step list: %v", err)
+	}
+
+	guarded := map[string]bool{}
+	for id, st := range s.steps {
+		if strings.Contains(st.Reads, "vault") && st.Writes != "" {
+			guarded[id] = true
+		}
+	}
+	//  Every step that builds something out of the vault.  Add one to status.py and this fails
+	//  until you decide whether it belongs —— which is the point.
+	want := []string{"extract", "index", "sync"}
+	for _, id := range want {
+		if !guarded[id] {
+			t.Errorf("%q reads the vault and writes, but the guard does not cover it "+
+				"(reads=%q writes=%q)", id, s.steps[id].Reads, s.steps[id].Writes)
+		}
+	}
+	if len(guarded) != len(want) {
+		got := make([]string, 0, len(guarded))
+		for id := range guarded {
+			got = append(got, id)
+		}
+		sort.Strings(got)
+		t.Errorf("the guard covers %v, expected exactly %v — if that is intended, change this test "+
+			"deliberately rather than widening it", got, want)
+	}
+	//  And it must not cover a step that only reads: `verify` touches docs and the DB, never the
+	//  vault, so gating it here would refuse the one place it works.
+	if guarded["verify"] {
+		t.Error("the guard covers `verify`, which does not read the vault")
 	}
 }
