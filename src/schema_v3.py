@@ -645,14 +645,25 @@ BODY_FLOOR = 60
 DB_SHRINK_RATIO = 0.67
 
 
-#  Paths `glob` produced but `open` refused, for the most recent walk.  **Not discarded.**
-#  A dangling symlink —— which an Obsidian rename or a moved attachment leaves routinely —— is
-#  yielded by `glob`, passes `is_skipped`, and then raises in `open`.  Swallowing that made it
-#  leave `seen`, which on the incremental path is not "unreadable" but **`deleted`**, and `sync`
-#  removes it from the index.  A file that is present is neither content nor a deletion, and
-#  CLAUDE.md names this failure directly: 조용한 실패를 만들지 않는다.  Same idiom as
-#  `lr_extract.NO_LLM_SKIPPED` —— count them, surface them, let the caller decide.
-UNREADABLE: list[str] = []
+#  From a walk's point of view a path is in one of **three** states, and only the third is a
+#  deletion:
+#
+#    ① present and readable  → indexable, or not (`is_skipped`, the body floor)
+#    ② present, unreadable   → `glob` returned it; nothing was learned about its content
+#    ③ absent                → `glob` did not return it
+#
+#  ② used to collapse into ③: the `OSError` was swallowed, the file left `seen`, `diff_vault`
+#  saw an indexed document with no file, and `sync` deleted its row, chunks and postings.  A
+#  dangling symlink —— which an Obsidian rename or a moved attachment leaves routinely —— is the
+#  ordinary trigger.  CLAUDE.md names the failure: 조용한 실패를 만들지 않는다.  Here the screen
+#  did not even say "0"; it said **deleted**.
+#
+#  ⚠ A **returned sentinel**, not a module-level accumulator.  A first fix used the
+#     `lr_extract.NO_LLM_SKIPPED` idiom and it is wrong here: two callers interleave on the same
+#     module (and `indexable_count` temporarily rebinds `VAULT`), so a later call clears what an
+#     earlier walk recorded.  Measured 2026-09-04: `scan_vault(a)` then `indexable_count(b)` left
+#     a's unreadable file forgotten, which would have un-done the rescue below it.
+UNREADABLE = object()   # ② — present, but nothing was learned from it
 
 
 def indexable(path):
@@ -670,23 +681,17 @@ def indexable(path):
     try:
         raw = open(path, encoding="utf-8", errors="ignore").read()
     except OSError:
-        #  ⚠ Recorded, not swallowed.  It is still not indexable —— there are no bytes to index ——
-        #     but the caller has to be able to tell "the vault does not have this any more" from
-        #     "the vault has it and I could not read it".  Those get opposite treatment.
-        UNREADABLE.append(path)
-        return None
+        #  Not `None`.  The caller has to tell "the vault does not have this any more" from "the
+        #  vault has it and I could not read it" —— those get opposite treatment, and returning
+        #  the same value for both is what made a dangling symlink a deletion.
+        return UNREADABLE
     body, title = clean(raw)
     if len(body) < BODY_FLOOR:
         return None
     return raw, body, title
 
 
-def _begin_walk():
-    """Start a walk —— the unreadable list belongs to one walk, not to the process."""
-    UNREADABLE.clear()
-
-
-def indexable_count(root, limit=0):
+def indexable_count(root, limit=0, with_unreadable=False):
     """How many files under `root` the indexer would read.  `limit` > 0 stops early.
 
     `limit` bounds the **file reads**, which is the expensive half; the directory walk is paid in
@@ -705,25 +710,40 @@ def indexable_count(root, limit=0):
     #     generated indexes counted 1 instead of 0 (2026-09-04).
     global VAULT
     was, VAULT = VAULT, os.path.abspath(root)
-    _begin_walk()
     try:
-        n = 0
+        n, unread = 0, 0
         for f in glob.iglob(os.path.join(VAULT, "**", "*.md"), recursive=True):
-            if indexable(f) is None:
+            got = indexable(f)
+            if got is UNREADABLE:
+                #  Counted as **not** indexable, so the pre-run guard stays fail-closed —— but
+                #  counted separately, so its refusal can say which of the three states it saw.
+                #  "empty", "cannot answer" and "present but unreadable" are three situations,
+                #  and two of them used to share one sentence.
+                unread += 1
+                continue
+            if got is None:
                 continue
             n += 1
             if limit and n >= limit:
                 break
-        return n
+        return (n, unread) if with_unreadable else n
     finally:
         VAULT = was
 
 
-def scan_vault():
-    out = {}
-    _begin_walk()
+def scan_vault(with_unreadable=False):
+    """The vault as the indexer sees it.  → {doc_id: row}, or (rows, unreadable) when asked.
+
+    `with_unreadable` is opt-in so every existing caller keeps its shape.  `sync_v3` asks for it
+    because it is the path that deletes: a document whose file is present but unreadable must
+    keep its row, and only this walk knows which those were.
+    """
+    out, unreadable = {}, []
     for f in sorted(glob.glob(f"{VAULT}/**/*.md", recursive=True)):
         got = indexable(f)
+        if got is UNREADABLE:
+            unreadable.append(os.path.relpath(f, VAULT))
+            continue
         if got is None:
             continue
         raw, body, title = got
@@ -757,7 +777,7 @@ def scan_vault():
                     "doc_date": ddate, "date_src": dsrc, "no_llm": no_llm,
                     "doc_updated": dupd,
                     "_body": body}
-    return out
+    return (out, unreadable) if with_unreadable else out
 
 
 def diff_vault(new, db):
@@ -1741,6 +1761,23 @@ def _selftest():
                       capture_output=True, text=True)
         assert "would throw away" not in _r2.stdout + _r2.stderr, \
             "--allow-shrink did not get past the guard"
+    # ── The three states, at the counter the pre-run guard reads ────────────────────────
+    #  A vault of nothing but dangling symlinks must count **zero** indexable documents, or the
+    #  412 says "there are notes here" about a vault the indexer can read nothing from —— and the
+    #  guard stops being fail-closed.  Counted separately so the refusal can name which of the
+    #  three it saw: "empty", "cannot answer" and "present but unreadable" are three situations.
+    with _tf.TemporaryDirectory() as _td:
+        os.symlink(os.path.join(_td, "nowhere.md"), os.path.join(_td, "dangling.md"))
+        assert indexable_count(_td) == 0, "a dangling symlink counted as an indexable document"
+        assert indexable_count(_td, with_unreadable=True) == (0, 1), \
+            f"the unreadable file was not counted separately: {indexable_count(_td, with_unreadable=True)}"
+        #  …and a readable one still counts, or "always zero" would satisfy the line above.
+        open(os.path.join(_td, "real.md"), "w", encoding="utf-8").write(
+            "---\ntitle: r\n---\n" + "본문 " * 40 + "\n")
+        assert indexable_count(_td, with_unreadable=True) == (1, 1), \
+            f"a readable document beside an unreadable one: {indexable_count(_td, with_unreadable=True)}"
+    print("  ✅ present-but-unreadable counts as not indexable, and is counted separately")
+
     print("  ✅ a rebuild refuses to replace a populated DB with an empty vault (and --allow-shrink passes)")
 
     print("  ✅ origin from session provenance · kg export skipped at any depth")

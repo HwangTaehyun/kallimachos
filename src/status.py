@@ -128,7 +128,7 @@ def _empty_status(tables):
 
 def collect():
     import lancedb
-    from schema_v3 import SKIP, is_skipped, clean, VAULT
+    from schema_v3 import SKIP, is_skipped, clean, VAULT, indexable, UNREADABLE
 
     db = lancedb.connect(DB)
     tables = sorted(db.list_tables().tables)
@@ -159,22 +159,29 @@ def collect():
     #     file the indexer was quietly deleting.  A dangling symlink is the ordinary trigger: an
     #     Obsidian rename or a moved attachment leaves one, `glob` yields it, `is_skipped` passes
     #     it.  Neither behaviour was right.  It is counted, kept out of `deleted`, and reported.
+    #  ⚠ **`indexable()`, not a second copy of it.**  This walk used to re-implement the read,
+    #     `clean()` and the 60-character floor with **different error handling** —— a bare `open`,
+    #     so the board died with `FileNotFoundError` on exactly the file the indexer was silently
+    #     deleting.  Making the two agree by hand would leave a second copy to drift; calling the
+    #     one rule removes the disagreement instead of settling it.  (Same move as Go dropping its
+    #     own size floor for `indexable_count`.)
+    #
+    #     Three states, and only the third is a deletion: readable → judged; **present but
+    #     unreadable → its index entry is preserved, neither deleted nor updated**, because its
+    #     stored hash is still the best knowledge available and nothing was learned; absent →
+    #     deleted.  The floor stays *outside* `seen` on purpose —— a document edited down below it
+    #     really has left the index's scope.
     seen, added, modified, unreadable = set(), [], [], []
     for f in sorted(glob.glob(f"{VAULT}/**/*.md", recursive=True)):
-        if is_skipped(f):
-            continue
-        try:
-            raw = open(f, encoding="utf-8", errors="ignore").read()
-        except OSError as e:
-            unreadable.append({"path": os.path.relpath(f, VAULT), "why": str(e)})
-            #  It is present, so the index entry for it is **not** stale —— leaving it out of
-            #  `seen` is what turned it into a deletion.
-            seen.add(os.path.relpath(f, VAULT))
-            continue
-        body, _ = clean(raw)
-        if len(body) < 60:
-            continue
+        got = indexable(f)
         rel = os.path.relpath(f, VAULT)
+        if got is UNREADABLE:
+            unreadable.append({"path": rel, "why": "present but could not be read"})
+            seen.add(rel)                 # present, so not a deletion
+            continue
+        if got is None:
+            continue                      # skipped, or under the body floor
+        raw, _body, _title = got
         seen.add(rel)
         h = hashlib.sha256(raw.encode()).hexdigest()[:16]
         d = by_path.get(rel)
@@ -1276,6 +1283,22 @@ def _selftest():
             os.remove(os.path.join(_uvault, "dangling.md"))
             assert collect()["documents"]["unreadable"] == [], \
                 "a healthy vault reported unreadable files"
+            #  ⑤ **The body floor must stay outside `seen`.**  A document edited down below it has
+            #     genuinely left the index's scope and belongs in `deleted` —— the unreadable case
+            #     is the *only* one that gets rescued.  Adding the floor's files to `seen` too
+            #     would hide real deletions, and nothing caught that until this case existed.
+            #  ⚠ Another readable document has to stay, or `seen` empties, `vault_absent` fires
+            #     and it clears `deleted` —— the assertion below would then fail against correct
+            #     code.  (It did, first try.)
+            open(os.path.join(_uvault, "other.md"), "w", encoding="utf-8").write(
+                "---\ntitle: other\n---\n" + "본문 " * 40 + "\n")
+            open(os.path.join(_uvault, "real.md"), "w", encoding="utf-8").write(
+                "---\ntitle: real\n---\ntiny\n")
+            _fd = collect()["documents"]
+            assert _fd["vault_absent"] is False, "the fixture emptied the vault, so nothing is tested"
+            assert "real.md" in [x if isinstance(x, str) else x.get("path") for x in _fd["deleted"]], \
+                f"a document edited below the body floor was not reported deleted: {_fd['deleted']}"
+            assert _fd["unreadable"] == [], "a short document was called unreadable"
         finally:
             _sv.VAULT = _keepsv2
             _sh.rmtree(_uvault, ignore_errors=True)

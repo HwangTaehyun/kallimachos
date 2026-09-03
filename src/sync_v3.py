@@ -40,10 +40,7 @@ import pyarrow as pa
 from sentence_transformers import SentenceTransformer
 from schema_v3 import (VAULT, DB, MODEL, CHUNK, OVERLAP, NGRAM, schemas, INDEXES,
                        FTS_COL, FTS_KW, scan_vault, diff_vault, tokenize,
-                       build_inverted, stable_doc_id,
-                       #  Mutated in place by each walk, never rebound —— so importing the
-                       #  list object here stays correct across runs.
-                       UNREADABLE)
+                       build_inverted, stable_doc_id)
 
 # S_STALE lives in schema_v3 (two files write the same table — the definition lives in one place)
 
@@ -284,7 +281,7 @@ def sync(dry_run=False):
     m = SentenceTransformer(MODEL)
     S = schemas(m.get_embedding_dimension())
 
-    docs = scan_vault()
+    docs, unreadable = scan_vault(with_unreadable=True)
     d = diff_vault(docs, db)
     if d["first_build"]:
         return print("a first build is required — run schema_v3.py first")
@@ -295,16 +292,17 @@ def sync(dry_run=False):
     #     simply never appears in `scan_vault()`'s result.  `diff_vault` then sees a document in
     #     the index with no file behind it and calls it deleted, and the lines below remove its
     #     row, its chunks and its postings.  Nothing said a word.
-    #     `schema_v3.UNREADABLE` records them during the walk so this can put them back.
+    #     `scan_vault(with_unreadable=True)` returns them **from this walk**, so nothing
+    #     else can clear the list between the walk and the rescue.
     #     (measured 2026-09-04: a two-file vault with one dangling symlink lost that document.)
-    if UNREADABLE:
-        _unread = {stable_doc_id(os.path.relpath(_p, VAULT)) for _p in UNREADABLE}
+    if unreadable:
+        _unread = {stable_doc_id(_rel) for _rel in unreadable}
         _rescued = d["deleted"] & _unread
         d["deleted"] -= _unread
-        print(f"  ⚠ {len(UNREADABLE)} file(s) in the vault could not be read "
-              f"(first: {os.path.relpath(UNREADABLE[0], VAULT)}).  A dangling symlink is the "
-              f"usual cause." + (f"  {len(_rescued)} of them would have been deleted from the "
-                                 f"index —— kept." if _rescued else ""))
+        print(f"  ⚠ {len(unreadable)} file(s) in the vault could not be read "
+              f"(first: {unreadable[0]}).  A dangling symlink is the usual cause."
+              + (f"  {len(_rescued)} of them would have been deleted from the index —— kept."
+                 if _rescued else ""))
 
     touched = d["added"] | d["modified"] | set(d["renamed"].values())
     gone = d["deleted"] | set(d["renamed"].keys())
