@@ -451,7 +451,12 @@ openwiki wiki=openwiki_dir vault=vault_dir:
 openwiki-sessions wiki=openwiki_dir:
     @{{py}} {{src}}/ingest_sessions.py
     @{{py}} {{src}}/ingest_codex_sessions.py
-    @{{py}} {{src}}/distill_sessions.py
+    @#  ⚠ **`--workers` is passed explicitly.**  The script's own default is 10 while every
+    @#     measurement in OPENWIKI-PIPELINE.md and the note above `openwiki-kg` is at 8 —— and 28
+    @#     collapsed outright (436 failures in 8.4 minutes).  Leaving it to the default meant this
+    @#     recipe ran at a concurrency no measurement covers.  Same trap as the worker note at the
+    @#     `run` recipe: a default in two places drifts, and the drift is silent.
+    @{{py}} {{src}}/distill_sessions.py --workers 8
     @{{py}} {{src}}/openwiki_emit.py --wiki "{{wiki}}"
 
 #  ⚠ `--exclude /conversations/sessions/` is load-bearing.  The vault holds a copy of the
@@ -463,7 +468,9 @@ openwiki-sessions wiki=openwiki_dir:
 #     rendering scaffolding, not knowledge.  That approach was already replaced by
 #     `export_kal_graph.py`, whose own docstring says notes "inflate the vault by 700 pages and bury
 #     the curated notes"; it writes kal-graph.json inside the plugin folder instead.  The indexer
-#     has always skipped `kg/` (schema_v3.SKIP_ROOT, the KG→note→KG loop), so those pages were 38%
+#     skips `kg/` (schema_v3.SKIP_ROOT, the KG→note→KG loop) —— though only at the first path
+#     segment until 2026-09-02, which is how the migrated copy briefly slipped in —— so those
+#     pages were 38%
 #     of the bundle contributing nothing.  Removed 2026-09-02; this line is what keeps them out.
 #
 #  ⓘ **One call over the whole vault**, not a list of its folders.  The folder names used to be

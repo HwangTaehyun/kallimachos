@@ -163,12 +163,35 @@ func TestCountMarkdownGatesDestructiveRuns(t *testing.T) {
 		t.Fatalf("a note inside a dot-directory counted %d", n)
 	}
 
+	//  ⚠ It must **under**-count, not over-count.  The indexer drops every generated `index.md`
+	//     and every body under 60 characters, so counting those made the guard pass on a vault the
+	//     indexer reads nothing from —— and the rebuild then emptied the DB (2026-09-04).
+	onlyIndex := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(onlyIndex, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	//  Big enough to clear the size floor, so only the **name** rule can exclude them —— otherwise
+	//  the two conditions cannot be told apart and deleting either leaves the test green.
+	for _, rel := range []string{"index.md", "sub/index.md"} {
+		if err := os.WriteFile(filepath.Join(onlyIndex, rel),
+			[]byte("---\ntitle: i\n---\n"+strings.Repeat("생성된 색인 ", 40)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(onlyIndex, "stub.md"), []byte("tiny\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := countMarkdown(onlyIndex, 1); n != 0 {
+		t.Fatalf("a vault of index.md and stubs counted %d — the indexer reads none of them", n)
+	}
+
 	//  The other direction —— a real vault, including one where the notes are nested.
 	full := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(full, "a", "b"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(full, "a", "b", "deep.md"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(full, "a", "b", "deep.md"),
+		[]byte("---\ntitle: d\n---\n"+strings.Repeat("본문 ", 40)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if n, err := countMarkdown(full, 1); err != nil || n != 1 {
@@ -213,8 +236,11 @@ func TestStartRunRefusesDestructiveWithNoNotes(t *testing.T) {
 
 	//  ② a vault with a note → the guard does not fire.  Without this the guard could block
 	//     everything and nobody would notice until it was removed.
+	//  A realistic note —— `countMarkdown` deliberately ignores anything the indexer would drop,
+	//  so a one-byte fixture is not a populated vault.
 	full := t.TempDir()
-	if err := os.WriteFile(filepath.Join(full, "a.md"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(full, "a.md"),
+		[]byte("---\ntitle: a\n---\n"+strings.Repeat("본문 ", 40)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if code, body := post(mk(full), "index"); code == 412 {

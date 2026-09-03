@@ -493,7 +493,20 @@ func countMarkdown(root string, limit int) (int, error) {
 			}
 			return nil
 		}
-		if strings.HasSuffix(d.Name(), ".md") {
+		//  ⚠ **This must under-count, never over-count.**  It answers "is there anything for the
+		//     indexer to read", and the indexer reads less than the disk holds: `schema_v3.is_skipped`
+		//     drops every generated `index.md`, and `scan_vault` drops any document whose body is
+		//     under 60 characters.  Counting those made the guard pass on a vault the indexer would
+		//     read **nothing** from —— measured 2026-09-04: 3 files on disk, 0 indexed —— and the
+		//     rebuild then emptied the DB, which is exactly what this exists to stop.
+		//     Full parity would mean re-implementing those rules here, in a second place, which is
+		//     the defect this repository keeps paying for.  So: approximate in the safe direction.
+		//     Refusing a run that would have worked is annoying and recoverable; permitting one
+		//     that empties the DB is not.
+		if strings.HasSuffix(d.Name(), ".md") && d.Name() != "index.md" {
+			if fi, err := d.Info(); err == nil && fi.Size() < 60 {
+				return nil // too small to survive scan_vault's body-length floor
+			}
 			n++
 			if n >= limit {
 				return fs.SkipAll

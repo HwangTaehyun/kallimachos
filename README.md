@@ -231,10 +231,11 @@ conversion that never needed the network.
 Distillation keeps what a conversation **arrived at**, not what was said along the way: a thread
 becomes a document only once it closed, and a claim that was overturned becomes a `correction`
 document explaining what replaced it and why. On the reference corpus that is 42% of the output —
-431 documents of a shape the older window-splitting prompt produced **none** of.
+430 documents of a shape the older window-splitting prompt produced **none** of.
 
 Conversion never invents metadata, so a migrated vault page keeps only the keys its author wrote
-(measured: 17% had `doc_type`, against 100% of the distilled ones). `openwiki-enrich` fills the
+(measured before enrichment: 17% had `doc_type`, against 100% of the distilled ones;
+`openwiki-enrich` has since brought it to 98%). `openwiki-enrich` fills the
 rest with an LLM and stamps `filled_by:` on the page, so what a model proposed stays visible and
 correctable.
 

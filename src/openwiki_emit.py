@@ -388,14 +388,59 @@ def main():
         return 1
 
     #  ── write ──
+    #
+    #  ⚠ **Two things had to change here, and both were losing data.**
+    #
+    #  ① `open(dst, "w")` **follows a symlink.**  `git_ok()` validates the bundle root and `--into`
+    #     is realpath-contained, but `dst` itself was never resolved —— so a pre-existing link at a
+    #     planned path wrote **through** it, outside the repository.  Reproduced 2026-09-04: a file
+    #     in no repository at all was overwritten, and the run printed "leaving 1 file(s) this tool
+    #     did not write" —— it counted the link as foreign and then destroyed its target.  The
+    #     module's whole safety story is "`git revert` is the only way back", and it was void
+    #     exactly where the bytes land.
+    #
+    #  ② **Delete and write were not one step.**  The comment used to say "plan first, write later.
+    #     Nothing is removed before the whole run is known good" —— but a plan being *computable* is
+    #     not a plan being *writable*.  With a stray directory at a planned path, the loop deleted
+    #     every owned page, wrote the files before the failure, and died: the pages sorted after it
+    #     were gone and never replaced.  ENOSPC, a read-only mount and a permission error do the
+    #     same.  Now every destination is opened **before** anything is deleted, so a run that
+    #     cannot finish has not started.
+    def _inside(path):
+        """Where will a write to `path` actually land —— inside the bundle, or through a link?"""
+        root = os.path.realpath(a.wiki)
+        real = os.path.realpath(path)
+        return os.path.commonpath([real, root]) == root
+
+    handles = []
+    try:
+        for rel, _text, _t, _d in plan:
+            dst = os.path.join(a.wiki, rel)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if os.path.lexists(dst) and not _inside(dst):
+                print(f"❌ {rel} resolves outside the bundle: {os.path.realpath(dst)}\n"
+                      f"   A symlink at that path would send the write out of the repository, and\n"
+                      f"   `git revert` could not bring it back.  Nothing was written.")
+                return 1
+            handles.append((rel, open(dst, "w", encoding="utf-8")))
+    except OSError as e:
+        for _rel, fh in handles:
+            fh.close()
+        print(f"❌ a destination could not be opened: {e}\n"
+              f"   Nothing was deleted and nothing was written.")
+        return 1
+
     for d in touched_dirs:
         os.makedirs(d, exist_ok=True)
         for stale in owned(d):
-            os.remove(stale)
-    for rel, text, _t, _d in plan:
-        dst = os.path.join(a.wiki, rel)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        open(dst, "w", encoding="utf-8").write(text)
+            #  A stale page reached through a link would unlink the link, not its target —— but
+            #  refuse anyway: the caller asked to replace pages in the bundle, not to touch links.
+            if _inside(stale):
+                os.remove(stale)
+    texts = {rel: text for rel, text, *_ in plan}
+    for rel, fh in handles:
+        with fh:
+            fh.write(texts[rel])
 
     #  ── indexes and manifest ──
     #  ⚠ **Built from the whole bundle, not from this run's `plan`.**  They used to be rebuilt

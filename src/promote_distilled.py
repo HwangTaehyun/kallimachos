@@ -145,15 +145,31 @@ SHRINK_RATIO = 0.8
 OWN_MARK = "origin: claude-session"
 
 
+def _frontmatter(path):
+    """The raw frontmatter block, or ''.  Body text is never searched for ownership."""
+    try:
+        raw = open(path, encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return ""
+    m = re.match(r"\A\ufeff?\s*---[ \t]*\r?\n(.*?)\r?\n(?:---|\.\.\.)[ \t]*\r?\n", raw, re.S)
+    return m.group(1) if m else ""
+
+
 def owned(d):
-    """Only the `.md` files inside `d` **that this script wrote**.  The rest belong to someone else."""
+    """Only the `.md` files inside `d` **that this script wrote**.  The rest belong to someone else.
+
+    ⚠ **Frontmatter only.**  This used to look for `OWN_MARK` anywhere in the first 2,000
+       characters, so a hand-written note *about* how session documents are marked —— one that
+       merely contains the words `origin: claude-session` in a sentence —— was classified as ours
+       and reached `os.remove`.  Worse, `foreign()` excludes what `owned()` claims, so the
+       "leaving N file(s) that belong to someone else" reassurance stayed silent about it.
+       `openwiki_emit.OWNED_LINE` was hardened against exactly this class and says so in its own
+       comment; this script never got the fix.  (reproduced 2026-09-04)
+    """
     out = []
     for f in sorted(glob.glob(os.path.join(d, "*.md"))):
-        try:
-            if OWN_MARK in open(f, encoding="utf-8", errors="ignore").read(2000):
-                out.append(f)
-        except OSError:
-            pass
+        if re.search(r"^[ \t]*" + re.escape(OWN_MARK), _frontmatter(f), re.M):
+            out.append(f)
     return out
 
 
@@ -308,8 +324,26 @@ def _selftest():
     #  ⚠ An **openwiki bundle** must be refused, and a plain vault must not be.  A guard that
     #     refused both would be removed the first time it fired on a real vault.
     import tempfile as _tf
+    import shutil as _sh
     _b = _tf.mkdtemp(); open(os.path.join(_b, ".page-manifest.json"), "w").write("{}")
     assert is_openwiki_bundle(_b), "a manifest did not identify a bundle"
+
+    #  ⚠ Ownership is decided by the **frontmatter**, never the body.  A hand-written note *about*
+    #     how session documents are marked —— one that merely contains the words in a sentence ——
+    #     was classified as ours and reached `os.remove`, while `foreign()` (which excludes what
+    #     `owned()` claims) stayed silent about it.  The fixture used to be a note that never
+    #     mentions the marker, so nothing distinguished body from frontmatter.  (2026-09-04)
+    _od = _tf.mkdtemp()
+    try:
+        open(os.path.join(_od, "real.md"), "w", encoding="utf-8").write(
+            "---\ntitle: x\n" + OWN_MARK + "\n---\n본문\n")
+        open(os.path.join(_od, "about.md"), "w", encoding="utf-8").write(
+            "---\ntitle: how session docs are marked\n---\n\n"
+            "Session documents carry `" + OWN_MARK + "` in their frontmatter.\n")
+        _own = sorted(os.path.basename(x) for x in owned(_od))
+        assert _own == ["real.md"], f"ownership read the body: {_own}"
+    finally:
+        _sh.rmtree(_od, ignore_errors=True)
     _b2 = _tf.mkdtemp(); open(os.path.join(_b2, "index.md"), "w").write('okf_version: "0.2"\n')
     assert is_openwiki_bundle(_b2), "a root index with okf_version did not identify a bundle"
     _v = _tf.mkdtemp(); os.makedirs(os.path.join(_v, "wiki"), exist_ok=True)

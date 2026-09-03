@@ -28,6 +28,11 @@ import time
 
 
 # Where ~/.kal lives.  Mounted at /data/kal inside the container (see docker-compose).
+#  Above this share of the indexed documents disappearing at once, `sync` is not advised ——
+#  the run is more likely to be looking at a vault that is not fully there than at a
+#  deletion the user made.  See the note at the computation.
+VAULT_SHRINK_RATIO = 0.5
+
 KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -109,7 +114,7 @@ def _empty_status(tables):
         "documents": {"indexed": 0, "origin": {}, "added": [], "modified": [], "deleted": [],
                       #  The empty-DB state must carry every field the live one does ——
                       #  the web reads them unguarded and a missing key blanks the screen.
-                      "vault_absent": False},
+                      "vault_absent": False, "vault_shrunk": False},
         "kg": {"entities": 0, "relations": 0, "stale": [], "stale_ratio": 0.0,
                "stale_error": "", "drift_error": "", "warn_ratio": WARN_RATIO,
                "extracted_at": 0, "extract_drift": 0},
@@ -169,6 +174,16 @@ def collect():
     #     nothing.  This page's own comment below says a status board claiming to know what it
     #     does not is the worst failure —— this was that, on the largest number it shows.
     vault_absent = bool(by_path) and not seen
+    #  ⚠ **Zero visible is not the only shape of this failure.**  One surviving file disarmed the
+    #     check above: with 1,115 indexed and 1 visible it reported "deleted 1,114" and advised
+    #     `sync`, which rebuilds the index down to that one document —— the very outcome the
+    #     comment above says it prevents.  A half-finished iCloud/Dropbox sync, a dropped bind
+    #     mount, or a wrong VAULT_DIR that happens to hold one .md all land here.
+    #     A real bulk deletion is possible too, and the honest answer is the same for both: say
+    #     what vanished and let a person decide, rather than advising an irreversible rebuild.
+    #     Half is the line —— an editing session changes a handful of notes, not most of them.
+    vault_shrunk = (not vault_absent and by_path
+                    and len(deleted) > len(by_path) * VAULT_SHRINK_RATIO)
     if vault_absent:
         deleted = []
 
@@ -266,6 +281,7 @@ def collect():
             "added": added, "modified": modified, "deleted": deleted,
             #  True when the DB holds documents and the vault yielded none —— see above.
             "vault_absent": vault_absent,
+                "vault_shrunk": vault_shrunk,
         },
         "kg": {
             "entities": counts.get("lr_entities", 0),
@@ -441,8 +457,17 @@ def recommend(st):
                            f"none — it is empty, not mounted, or VAULT_DIR points elsewhere.  "
                            f"This is not 'everything was deleted', and running sync would "
                            f"empty the index"})
+    if d.get("vault_shrunk"):
+        out.append({"step": "vault", "severity": "high",
+                    "why": f"{len(d['deleted'])} of {d['indexed']} indexed documents are not "
+                           f"in the vault — more than half.  If you deleted them, run sync "
+                           f"yourself; if not, the vault is only partly visible (a sync still "
+                           f"running, a dropped mount, the wrong VAULT_DIR) and sync would "
+                           f"rebuild the index down to what is there"})
     n_new = len(d["added"]) + len(d["modified"]) + len(d["deleted"])
-    if n_new:
+    #  A shrunken vault already got its own, louder advice —— adding "run sync" beside it is
+    #  advising the very rebuild that would empty the index.
+    if n_new and not d.get("vault_shrunk") and not d.get("vault_absent"):
         out.append({"step": "sync", "severity": "high",
                     "why": f"{n_new} documents are not reflected in the index "
                            f"(added {len(d['added'])} · modified {len(d['modified'])} · deleted {len(d['deleted'])}) "
@@ -1057,6 +1082,21 @@ def _selftest():
         _S.VAULT = _real
         assert collect()["documents"]["vault_absent"] is False, \
             "a vault holding the documents was called absent"
+        #  …and a vault holding **only some** of them is neither absent nor a mass deletion.  This
+        #  runs the real collect(), so blanking the computation is caught here and not only in
+        #  recommend()'s hand-built dicts.
+        _rows = _lc.connect(_fdb).open_table("documents").search().limit(99).to_list()
+        if len(_rows) > 1:
+            _part = _tf.mkdtemp()
+            _fp = os.path.join(_part, _rows[0]["path"])
+            os.makedirs(os.path.dirname(_fp), exist_ok=True)
+            open(_fp, "w", encoding="utf-8").write("x" * 200 + "\n")
+            _S.VAULT = _part
+            _dd = collect()["documents"]
+            assert _dd["vault_absent"] is False, "a partly visible vault was called absent"
+            assert _dd["vault_shrunk"] is True, \
+                "most of the documents missing did not read as a shrunken vault"
+            _sh.rmtree(_part, ignore_errors=True)
         _sh.rmtree(_real, ignore_errors=True)
     finally:
         globals()["DB"], _S.VAULT = _keepdb, _keepvault
@@ -1075,6 +1115,24 @@ def _selftest():
     assert any(a["step"] == "vault" for a in got), "an absent vault produced no advice"
     assert not any(a["step"] == "sync" for a in got), \
         "an absent vault still advised sync —— that empties the index"
+
+    #  ⚠ **Zero visible is not the only shape.**  One surviving file disarmed the check: with
+    #     1,115 indexed and 1 visible the board said "deleted 1,114" and advised sync, which
+    #     rebuilds the index down to that one document.  Three rows, so the boundary is pinned
+    #     from both sides —— a guard that fired on ordinary edits would be removed at once.
+    for _del, _want_vault, _want_sync in ((2, False, True),        # an ordinary editing session
+                                          (557, False, True),      # just under the line
+                                          (558, True, False),      # just over it
+                                          (1114, True, False)):    # a mount that half-appeared
+        _d = {"documents": {"indexed": 1115, "added": [], "modified": [],
+                            "deleted": [f"{i}.md" for i in range(_del)],
+                            "vault_absent": False,
+                            "vault_shrunk": _del > 1115 * VAULT_SHRINK_RATIO},
+              "kg": {"extract_drift": [], "stale": [], "stale_ratio": 0.0, "warn_ratio": 0.2},
+              "artifacts": {"stale": []}}
+        _steps = [a["step"] for a in recommend(_d)]
+        assert ("vault" in _steps) is _want_vault, f"{_del} deleted: vault advice wrong ({_steps})"
+        assert ("sync" in _steps) is _want_sync, f"{_del} deleted: sync advice wrong ({_steps})"
     real = {"documents": {"indexed": 1115, "added": [], "modified": [], "deleted": ["a.md", "b.md"],
                           "vault_absent": False},
             "kg": {"extract_drift": [], "stale": [], "stale_ratio": 0.0, "warn_ratio": 0.2},

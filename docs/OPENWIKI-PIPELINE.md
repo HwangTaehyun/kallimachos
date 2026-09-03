@@ -75,7 +75,7 @@ just openwiki-status              # what is behind what.  Runs nothing, changes 
 just openwiki-plan                # what would change.  Writes nothing
 
 just openwiki-sessions            # A ── session logs → distilled → bundle      (hours, LLM)
-just openwiki-vault <vault-path>  # B ── any Markdown tree → bundle             (seconds)
+just openwiki-vault <bundle> <vault>   # B ── any Markdown tree → bundle        (seconds)
 just openwiki-enrich <bundle>     # fill missing OKF metadata with an LLM        (minutes)
 just openwiki-index               # bundle → knowledge DB                       (~2 min)
 just openwiki-kg                  # DB documents → entities + relations         (hours, LLM)
@@ -120,11 +120,11 @@ things: what was believed, what overturned it, and why the first belief was reas
 Measured on the full corpus (2026-09-02, opus, 492/493 sessions → 1,017 documents):
 
 ```
-  correction     432  (42%)      ← a category the old prompt could not produce
-  analysis       238
-  investigation  225
-  decision        90
-  design 25 · retro 18 · plan 4 · discussion 4
+  correction     430  (42%)      ← a category the old prompt could not produce
+  analysis       230
+  investigation  221
+  decision        89
+  design 22 · retro 18 · discussion 4 · plan 3      —— 1,017 pages, counted from frontmatter
 ```
 
 ### Rate limits are about throughput, not concurrency
@@ -265,7 +265,7 @@ a JSON graph. It is rendering scaffolding.
 
 That approach was already replaced. `export_kal_graph.py` writes `kal-graph.json` inside the plugin
 folder where Obsidian's search and graph never see it, and its docstring says why: notes *"inflate
-the vault by 700 pages and bury the curated notes."* The indexer has always skipped `kg/`
+the vault by 700 pages and bury the curated notes."* The indexer skips `kg/`
 (`schema_v3.SKIP_ROOT`) because indexing it feeds the graph's own summaries back in as sources.
 
 Those 699 pages were 38% of the bundle and contributed nothing to the DB. Removed 2026-09-02;

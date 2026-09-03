@@ -186,7 +186,7 @@ That is enough for **Rebuild knowledge DB** and **Incremental sync** in the UI, 
 
 ### The steps that do need more
 
-Four of the seven pipeline steps call `claude -p`, and the API blocks them with a **412 before
+Six of the ten pipeline steps call `claude -p`, and the API blocks them with a **412 before
 they start** rather than letting them fail chunk by chunk for half an hour:
 
 | Step | LLM | Writes the DB | Runs in the container? |
@@ -194,10 +194,15 @@ they start** rather than letting them fail chunk by chunk for half an hour:
 | Distill sessions | ✅ | | needs the relay |
 | Extract knowledge graph | ✅ | | needs the relay |
 | Export graph | ✅ | | needs the relay |
-| Fill OKF metadata (`openwiki-enrich`) | ✅ | | needs the relay |
+| Refresh stale KG · Apply aliases · Full rebuild | ✅ | ✅ | needs the relay |
+| Promote to vault | | | rewrites the **vault**, not the DB —— refused on a bundle |
 | **Rebuild knowledge DB** | | ✅ | **yes, on its own** |
 | **Incremental sync** | | ✅ | **yes, on its own** |
 | Verify docs | | | yes |
+
+> ⓘ `openwiki-enrich` calls an LLM too, but it is a **justfile recipe, not a step in
+> `src/status.py`** —— the 412 gate does not cover it, and the Settings screen does not
+> list it.  Run it on the host.
 
 To make the LLM steps work from the container, add the two relay values — and start the relay on
 the **host**, because that is where the credentials are:
@@ -246,8 +251,8 @@ removed on 2026-09-03. A missing graph is a **404 that says to re-export**, not 
 served from a second location.
 
 Nothing in `kal-graph.json` justified living in the vault: it is built from LanceDB
-(`source: "lancedb"`) and its document references are **vault-relative** — 371 in
-`entities[].docs[]`, 208 in `relations[].docs[]`, none absolute. Only the Obsidian plugin needs a
+(`source: "lancedb"`) and its document references are **vault-relative** — 34,814 references in `entities[].docs[]` and 37,009 in `relations[].docs[]`, spanning
+1,116 documents —— none absolute. Only the Obsidian plugin needs a
 copy inside a vault, because a plugin cannot open a file outside its own; `export_kal_graph.py`
 writes that copy **only when the vault has a `.obsidian/`**, so an openwiki bundle no longer gets a
 plugin folder it will never use.
@@ -258,8 +263,9 @@ plugin folder it will never use.
 just up-viewer      # docker compose -f docker-compose.yml -f docker-compose.viewer.yml up -d
 ```
 
-**It needs no vault settings.** `VAULT_DIR` and `VAULT_NAME` may be unset entirely — verified with
-`--env-file /dev/null`. The recipe supplies throwaway values because Compose interpolates the base
+**The container needs no vault settings.** `VAULT_DIR` and `VAULT_NAME` still have to *exist*
+for Compose to interpolate the base file —— `--env-file /dev/null` alone still fails on them ——
+which is why `just up-viewer` supplies throwaways.  Nothing in the container reads them. The recipe supplies throwaway values because Compose interpolates the base
 file *before* merging an override, so `${VAULT_DIR:?…}` makes the variable required even where both
 the mount and the environment entry are replaced. Dropping the `:?` from the base would take the
 loud failure away from the stacks that genuinely need it, and an unset mount source becomes a
