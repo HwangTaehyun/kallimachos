@@ -595,10 +595,18 @@ FM_SCAN_CHARS = 4000
 #        elsewhere in the document, and a regex cannot resolve it.  A pattern that matched `*a`
 #        would be guessing —— and half-covering aliases is worse than visibly not covering them,
 #        because it reads as handled.  Recorded rather than attempted.
-#     ⚠ `y` is **not** a boolean here.  An adversarial review listed it as a missed true value;
-#        measured, `yaml.safe_load("no_llm: y")` gives the **string** `'y'` (YAML 1.2 dropped the
-#        y/n forms and PyYAML follows it).  Blocking on it would be blocking on a value the parser
-#        does not read as consent.  (2026-09-04)
+#     ⚠ `y` is **not** a boolean.  An adversarial review listed it as a missed true value, and
+#        the measurement says otherwise —— PyYAML's bool resolver is literally
+#        `yes|no|true|false|on|off`, with no single letters, so `no_llm: y` loads as the **string**
+#        `'y'`.  (My first note here said "YAML 1.2 dropped the y/n forms and PyYAML follows it";
+#        that reasoning was wrong —— PyYAML never accepted them.)  So the accept list above is now
+#        *exactly* the set a parser reads as true, which is a stronger property than "we allow a
+#        few extra spellings".
+#        ⚠ And PyYAML is a **proxy, not the authority**: nothing in this pipeline parses this
+#           frontmatter with a YAML library at all —— kal uses this regex, and `fm_migrate.py:22`
+#           records why `yaml.safe_load` was rejected for it.  The claim that survives is "no
+#           parser in play reads bare `y` as consent".  If a consumer ever parses these files with
+#           a YAML 1.1 library, that negative fixture is the thing to re-measure.  (2026-09-04)
 NO_LLM_RE = re.compile(
     r"""^["']?no_llm["']?[ \t]*:[ \t]*
         (?:!(?:!|<)[^\s>]*>?[ \t]*)?      # an explicit tag —— !!bool, !!python/bool, !<tag>
@@ -1691,9 +1699,12 @@ def _selftest():
         assert doc_meta(f"---\ntitle: t\n{_y}\n---\nbody\n")[2], \
             f"a YAML spelling that parses to True was missed: {_y!r}"
     #     …and the ones that must stay open, or "block anything containing no_llm" would
-    #     satisfy the loop above.  `y` is here because it is **not** a boolean —— measured,
-    #     `yaml.safe_load('no_llm: y')` gives the string 'y'.  An alias is here because its
-    #     value lives at the anchor and a regex cannot resolve it: uncovered, on purpose.
+    #     satisfy the loop above.  `y` is here because it is **not** a boolean —— PyYAML's bool
+    #     resolver has no single letters, so it loads as the string 'y'.  (PyYAML is evidence, not
+    #     the authority: nothing here parses this with a YAML library.  See the note on NO_LLM_RE.)
+    #     An alias is here because its value lives at the anchor and a regex cannot resolve it ——
+    #     uncovered **on purpose**, and written down rather than left inside a group labelled
+    #     "uncoverable", because a documented gap stays re-examinable and a mislabelled one does not.
     #     The last two keep the tag pattern **narrow**: a greedy one would match `true` anywhere
     #     on the line rather than as the value, which is over-blocking a page that merely talks
     #     about the key —— the defect `kal_mcp.py:356` was already fixed for once.
