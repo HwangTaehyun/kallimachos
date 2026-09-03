@@ -114,6 +114,7 @@ def _empty_status(tables):
             "vault_now": os.environ.get("KAL_VAULT_HOST") or VAULT,
         },
         "documents": {"indexed": 0, "origin": {}, "added": [], "modified": [], "deleted": [],
+                      "unreadable": [],
                       #  The empty-DB state must carry every field the live one does ——
                       #  the web reads them unguarded and a missing key blanks the screen.
                       "vault_absent": False, "vault_shrunk": False},
@@ -151,11 +152,25 @@ def collect():
     # ── Walk the vault for real and compare against the index ─────────────
     # mtime alone counts a touched file as changed and misses editors that leave mtime
     # alone.  The judgement is by content hash (the same formula schema_v3 stored).
-    seen, added, modified = set(), [], []
+    #  ⚠ **A file `glob` found but `open` refuses is neither content nor a deletion.**  The two
+    #     readers of this walk used to disagree about the same input: the indexer swallowed the
+    #     `OSError` (so the file left `seen`, became `deleted`, and `sync` removed it from the
+    #     index) while this one had a bare `open` and **died** —— `FileNotFoundError` on the very
+    #     file the indexer was quietly deleting.  A dangling symlink is the ordinary trigger: an
+    #     Obsidian rename or a moved attachment leaves one, `glob` yields it, `is_skipped` passes
+    #     it.  Neither behaviour was right.  It is counted, kept out of `deleted`, and reported.
+    seen, added, modified, unreadable = set(), [], [], []
     for f in sorted(glob.glob(f"{VAULT}/**/*.md", recursive=True)):
         if is_skipped(f):
             continue
-        raw = open(f, encoding="utf-8", errors="ignore").read()
+        try:
+            raw = open(f, encoding="utf-8", errors="ignore").read()
+        except OSError as e:
+            unreadable.append({"path": os.path.relpath(f, VAULT), "why": str(e)})
+            #  It is present, so the index entry for it is **not** stale —— leaving it out of
+            #  `seen` is what turned it into a deletion.
+            seen.add(os.path.relpath(f, VAULT))
+            continue
         body, _ = clean(raw)
         if len(body) < 60:
             continue
@@ -281,6 +296,9 @@ def collect():
             "indexed": len(docs),
             "origin": dict(origin),
             "added": added, "modified": modified, "deleted": deleted,
+            #  Present but unreadable —— see the walk above.  A separate population from `deleted`
+            #  on purpose: one wants `sync`, the other wants a person to look at the filesystem.
+            "unreadable": unreadable,
             #  True when the DB holds documents and the vault yielded none —— see above.
             "vault_absent": vault_absent,
                 "vault_shrunk": vault_shrunk,
@@ -472,6 +490,21 @@ def recommend(st):
                            f"yourself; if not, the vault is only partly visible (a sync still "
                            f"running, a dropped mount, the wrong VAULT_DIR) and sync would "
                            f"rebuild the index down to what is there"})
+    #  ⚠ Present-but-unreadable is its own advice.  A dangling symlink is a filesystem question,
+    #     not an index one, and `sync` cannot fix it —— so this carries **no step**, unlike every
+    #     other line here.  It deliberately does not gate `sync` either: the readable files really
+    #     are out of date and the index should still catch up.  What it must not do is stay
+    #     silent, which is what the swallowed `OSError` did while the same file was simultaneously
+    #     being counted as a deletion.
+    #     (Order is by severity at the return, so this sits below the `high` lines regardless of
+    #      where it is appended —— `medium` because nothing is being lost, only left unindexed.)
+    if d.get("unreadable"):
+        _u = d["unreadable"]
+        out.append({"step": "", "severity": "medium",
+                    "why": f"{len(_u)} file(s) are in the vault but cannot be read "
+                           f"(first: {_u[0]['path']} —— {_u[0]['why']}).  A dangling symlink is the "
+                           f"usual cause.  They are **not** counted as deleted, so sync will not "
+                           f"remove them from the index —— but nothing can index them either"})
     n_new = len(d["added"]) + len(d["modified"]) + len(d["deleted"])
     #  A shrunken vault already got its own, louder advice —— adding "run sync" beside it is
     #  advising the very rebuild that would empty the index.
@@ -1202,6 +1235,51 @@ def _selftest():
             _sv.VAULT = _keepsv
             _sh.rmtree(_bvault, ignore_errors=True)
             _sh.rmtree(_bdir, ignore_errors=True)
+
+        #  ⚠ **A file that is there but cannot be read is neither content nor a deletion.**
+        #     A dangling symlink —— an Obsidian rename or a moved attachment leaves one routinely
+        #     —— is yielded by `glob` and passes `is_skipped`, and then the two readers of this
+        #     walk disagreed about it: the indexer swallowed the `OSError`, so the file left
+        #     `seen`, became `deleted`, and `sync` removed it from the index; this board had a
+        #     bare `open` and **died** on the very same file.  Measured 2026-09-04, both.
+        #     Driven through the real `collect()`, because the whole failure was that the two
+        #     walks were separate.
+        _udir, _uvault = _tf.mkdtemp(), _tf.mkdtemp()
+        _udb = _lc.connect(_udir)
+        _udb.create_table("documents", data=[
+            {"doc_id": "r", "path": "real.md", "no_llm": False,
+             "title": "real", "mtime": 1.0, "sha": "a" * 8},
+            {"doc_id": "g", "path": "dangling.md", "no_llm": False,
+             "title": "gone", "mtime": 1.0, "sha": "b" * 8}])
+        _udb.create_table("meta", data=[{"key": "built_at", "value": "0"}])
+        open(os.path.join(_uvault, "real.md"), "w", encoding="utf-8").write(
+            "---\ntitle: real\n---\n" + "본문 " * 40 + "\n")
+        os.symlink(os.path.join(_uvault, "nothing-here.md"),
+                   os.path.join(_uvault, "dangling.md"))
+        _keepsv2 = _sv.VAULT
+        try:
+            globals()["DB"], _S.VAULT, _sv.VAULT = _udir, _uvault, _uvault
+            _ud = collect()["documents"]          # ① it must not raise at all
+            #  ② and it must not read as a deletion —— that is the path that removes it
+            assert not [x for x in _ud["deleted"]
+                        if (x if isinstance(x, str) else x.get("path")) == "dangling.md"], \
+                f"an unreadable file was counted as deleted: {_ud['deleted']}"
+            #  ③ …and it must be *said*.  Not counting it and not mentioning it is the silent
+            #     failure with an extra step.
+            assert [u for u in _ud["unreadable"] if u["path"] == "dangling.md"], \
+                f"an unreadable file was dropped without a word: {_ud['unreadable']}"
+            assert any(not _a["step"] and "cannot be read" in _a["why"]
+                       for _a in recommend({**collect(), "documents": _ud})), \
+                "nothing in the advice mentions the unreadable file"
+            #  ④ The other direction: a healthy vault reports none, or the field would be noise
+            #     that people learn to ignore.
+            os.remove(os.path.join(_uvault, "dangling.md"))
+            assert collect()["documents"]["unreadable"] == [], \
+                "a healthy vault reported unreadable files"
+        finally:
+            _sv.VAULT = _keepsv2
+            _sh.rmtree(_uvault, ignore_errors=True)
+            _sh.rmtree(_udir, ignore_errors=True)
 
         _sh.rmtree(_real, ignore_errors=True)
     finally:

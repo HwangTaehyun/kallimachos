@@ -645,6 +645,16 @@ BODY_FLOOR = 60
 DB_SHRINK_RATIO = 0.67
 
 
+#  Paths `glob` produced but `open` refused, for the most recent walk.  **Not discarded.**
+#  A dangling symlink —— which an Obsidian rename or a moved attachment leaves routinely —— is
+#  yielded by `glob`, passes `is_skipped`, and then raises in `open`.  Swallowing that made it
+#  leave `seen`, which on the incremental path is not "unreadable" but **`deleted`**, and `sync`
+#  removes it from the index.  A file that is present is neither content nor a deletion, and
+#  CLAUDE.md names this failure directly: 조용한 실패를 만들지 않는다.  Same idiom as
+#  `lr_extract.NO_LLM_SKIPPED` —— count them, surface them, let the caller decide.
+UNREADABLE: list[str] = []
+
+
 def indexable(path):
     """Would the indexer read this file?  → (raw, body, title), or None.
 
@@ -660,11 +670,20 @@ def indexable(path):
     try:
         raw = open(path, encoding="utf-8", errors="ignore").read()
     except OSError:
-        return None                        # unreadable is not indexable, and not a crash either
+        #  ⚠ Recorded, not swallowed.  It is still not indexable —— there are no bytes to index ——
+        #     but the caller has to be able to tell "the vault does not have this any more" from
+        #     "the vault has it and I could not read it".  Those get opposite treatment.
+        UNREADABLE.append(path)
+        return None
     body, title = clean(raw)
     if len(body) < BODY_FLOOR:
         return None
     return raw, body, title
+
+
+def _begin_walk():
+    """Start a walk —— the unreadable list belongs to one walk, not to the process."""
+    UNREADABLE.clear()
 
 
 def indexable_count(root, limit=0):
@@ -686,6 +705,7 @@ def indexable_count(root, limit=0):
     #     generated indexes counted 1 instead of 0 (2026-09-04).
     global VAULT
     was, VAULT = VAULT, os.path.abspath(root)
+    _begin_walk()
     try:
         n = 0
         for f in glob.iglob(os.path.join(VAULT, "**", "*.md"), recursive=True):
@@ -701,6 +721,7 @@ def indexable_count(root, limit=0):
 
 def scan_vault():
     out = {}
+    _begin_walk()
     for f in sorted(glob.glob(f"{VAULT}/**/*.md", recursive=True)):
         got = indexable(f)
         if got is None:

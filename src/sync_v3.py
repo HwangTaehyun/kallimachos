@@ -40,7 +40,10 @@ import pyarrow as pa
 from sentence_transformers import SentenceTransformer
 from schema_v3 import (VAULT, DB, MODEL, CHUNK, OVERLAP, NGRAM, schemas, INDEXES,
                        FTS_COL, FTS_KW, scan_vault, diff_vault, tokenize,
-                       build_inverted, stable_doc_id)
+                       build_inverted, stable_doc_id,
+                       #  Mutated in place by each walk, never rebound —— so importing the
+                       #  list object here stays correct across runs.
+                       UNREADABLE)
 
 # S_STALE lives in schema_v3 (two files write the same table — the definition lives in one place)
 
@@ -211,6 +214,43 @@ def _selftest():
         _l.connect = _real
         globals()["SentenceTransformer"] = _real_st
 
+    # ── A present-but-unreadable file must not be deleted from the index ────────────────
+    #  This is the path that actually removes rows, so it is the one that has to be pinned.
+    #  A dangling symlink never appears in `scan_vault()`'s result, `diff_vault` sees an indexed
+    #  document with no file, and everything below deletes it —— silently.  Measured 2026-09-04:
+    #  a two-document vault with one dangling symlink came out of `sync` holding one.
+    #
+    #  ⚠ Driven end to end as a **subprocess**, not by calling the rescue: the whole failure was
+    #     that two walks disagreed, and a unit test of the arithmetic would agree with itself.
+    import subprocess as _sp, tempfile as _tf2, lancedb as _lc2
+    _v, _h = _tf2.mkdtemp(), _tf2.mkdtemp()
+    _dbp = os.path.join(_h, "db")
+    for _n in ("keep.md", "victim.md"):
+        open(os.path.join(_v, _n), "w", encoding="utf-8").write(
+            f"---\ntitle: {_n}\n---\n" + "본문 " * 40 + "\n")
+    _env = {**os.environ, "KAL_VAULT": _v, "KAL_PATH": _dbp, "KAL_HOME": _h}
+    _here = os.path.dirname(os.path.abspath(__file__))
+    _r = _sp.run([sys.executable, os.path.join(_here, "schema_v3.py")],
+                 env=_env, capture_output=True, text=True)
+    assert _lc2.connect(_dbp).open_table("documents").count_rows() == 2, \
+        f"the fixture did not index two documents, so this tests nothing: {_r.stderr[-300:]}"
+    #  The shape an Obsidian rename leaves behind.
+    os.remove(os.path.join(_v, "victim.md"))
+    os.symlink(os.path.join(_v, "moved-away.md"), os.path.join(_v, "victim.md"))
+    _r2 = _sp.run([sys.executable, os.path.join(_here, "sync_v3.py")],
+                  env=_env, capture_output=True, text=True)
+    _left = _lc2.connect(_dbp).open_table("documents").count_rows()
+    assert _left == 2, (
+        f"sync deleted a document whose file is present but unreadable —— {_left} left of 2.\n"
+        f"{_r2.stdout[-400:]}")
+    #  …and it has to **say so**, or the rescue is itself a silent behaviour.
+    assert "could not be read" in _r2.stdout, \
+        f"the unreadable file was rescued without a word: {_r2.stdout[-300:]}"
+    _sh2 = __import__("shutil")
+    _sh2.rmtree(_v, ignore_errors=True)
+    _sh2.rmtree(_h, ignore_errors=True)
+    print("  ✅ sync_v3 self-check —— a dangling symlink is not a deletion (and it says so)")
+
     print("  ✅ sync_v3 self-check —— a different model stops the incremental path (no space mixing)")
 
 
@@ -248,6 +288,23 @@ def sync(dry_run=False):
     d = diff_vault(docs, db)
     if d["first_build"]:
         return print("a first build is required — run schema_v3.py first")
+
+    #  ⚠ **A file that is present but could not be read is not a deletion, and this is the path
+    #     that would delete it.**  `glob` yields a dangling symlink —— an Obsidian rename or a
+    #     moved attachment leaves one routinely —— `is_skipped` passes it, `open` raises, and it
+    #     simply never appears in `scan_vault()`'s result.  `diff_vault` then sees a document in
+    #     the index with no file behind it and calls it deleted, and the lines below remove its
+    #     row, its chunks and its postings.  Nothing said a word.
+    #     `schema_v3.UNREADABLE` records them during the walk so this can put them back.
+    #     (measured 2026-09-04: a two-file vault with one dangling symlink lost that document.)
+    if UNREADABLE:
+        _unread = {stable_doc_id(os.path.relpath(_p, VAULT)) for _p in UNREADABLE}
+        _rescued = d["deleted"] & _unread
+        d["deleted"] -= _unread
+        print(f"  ⚠ {len(UNREADABLE)} file(s) in the vault could not be read "
+              f"(first: {os.path.relpath(UNREADABLE[0], VAULT)}).  A dangling symlink is the "
+              f"usual cause." + (f"  {len(_rescued)} of them would have been deleted from the "
+                                 f"index —— kept." if _rescued else ""))
 
     touched = d["added"] | d["modified"] | set(d["renamed"].values())
     gone = d["deleted"] | set(d["renamed"].keys())

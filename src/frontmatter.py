@@ -26,6 +26,16 @@ despite a three-character body, because the frontmatter carried it over the 60-c
    the regex sees it.  Passing a CRLF string straight to `clean()` reproduces a defect that the
    file path does not have —— both of us did exactly that while reviewing this.
 
+⚠ **Changing this fence is a rebuild, not a sync.**  `content_hash` is `sha256(raw)` on both
+   sides (`status.py:164`, `schema_v3.py`), so a document whose *parsed* form changes while its
+   bytes do not is neither added nor modified —— the incremental path cannot see it, and its stale
+   entry (frontmatter embedded in the chunk text, empty title) survives until someone edits the
+   file or a full `index` runs.  Generally: **anything that changes what `clean()` computes is
+   invisible to `sync` and requires a rebuild.**  Measured against the live corpus when this fence
+   was widened, the delta was zero —— 1,114 of 1,116 matched under both spellings and 0 changed ——
+   so no migration was needed then.  The sentence is here for the next fence or `FM_KEEP` change,
+   when it will not be.  (adversarial review 2026-09-04)
+
 ⚠ So who is `\r?\n` for, given every file-read caller has already lost its `\r`?  **`openwiki_enrich`**
    —— it matches against **LLM replies**, which are in-memory strings and can carry CRLF.  Written
    down because a reader who checks only the file callers will correctly conclude it is dead weight
