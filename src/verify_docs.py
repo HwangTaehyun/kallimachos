@@ -640,8 +640,10 @@ def _main_verify():
         n_link = sum(len(check_links(p)) for root in ROOTS
                      for p in sorted(glob.glob(f"{root}/**/*.md", recursive=True))
                      if "/node_modules/" not in p and "/plugin/" not in p)
-        _manual = n_link + sum(1 for _, w, *_ in all_bad
-                               if str(w).startswith(("type-retired:", "db-count (")))
+        #  Symbol citations belong here too —— they never reach `fix()`, so counting them as
+        #  auto-repairable is the same overstatement `replaced {total}` used to make.
+        _manual = n_link + len(_cite) + sum(1 for _, w, *_ in all_bad
+                                            if str(w).startswith(("type-retired:", "db-count (")))
         tail = (f" ({total - _manual} number(s) via --fix, {_manual} by hand)" if _manual
                 else " (auto-replaced with --fix)")
         print(f"\n{total} mismatch(es){tail}")

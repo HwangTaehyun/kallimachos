@@ -500,11 +500,6 @@ def main():
         by_dir.setdefault(os.path.dirname(rel), []).append(
             ((fmx.get("title") or slug_of(rel)), rel,
              (d.group(1).strip().strip('"') if d else "")))
-    for d, entries in sorted(by_dir.items()):
-        _ix = os.path.join(a.wiki, d, "index.md")
-        if not _guarded(_ix):
-            return 1
-        open(_ix, "w", encoding="utf-8").write(render_index(d, entries))
     #  a parent index listing its children, so no directory is unreachable from the root
     #  every ancestor directory, up to and including the bundle root —— a directory reachable from
     #  nowhere is a directory nobody finds.  §8 calls this progressive disclosure.
@@ -514,19 +509,28 @@ def main():
             d = os.path.dirname(d)
             parents.add(d)
     parents.add("")                                    # the bundle root
-    for p in sorted(parents):
-        kids = [(os.path.basename(d) or d, os.path.join(d, "index.md").replace(os.sep, "/"),
-                 "%d page(s)" % len(v))
-                for d, v in sorted(by_dir.items()) if os.path.dirname(d) == p]
-        kids += [(os.path.basename(c), os.path.join(c, "index.md").replace(os.sep, "/"), "")
-                 for c in sorted(parents)
-                 if c and os.path.dirname(c) == p and c not in by_dir]
-        if kids:
-            _ix2 = os.path.join(a.wiki, p, "index.md")
-            if not _guarded(_ix2):
-                return 1
-            open(_ix2, "w", encoding="utf-8").write(
-                render_index(p, kids, root=(p == "")))
+
+    def _kids(p):
+        out = [(os.path.basename(d) or d, os.path.join(d, "index.md").replace(os.sep, "/"),
+                "%d page(s)" % len(v))
+               for d, v in sorted(by_dir.items()) if os.path.dirname(d) == p]
+        out += [(os.path.basename(c), os.path.join(c, "index.md").replace(os.sep, "/"), "")
+                for c in sorted(parents)
+                if c and os.path.dirname(c) == p and c not in by_dir]
+        return out
+
+    #  ⚠ **Check every index destination before writing the first one.**  The page loop already
+    #     proves each destination openable before it deletes anything; the index loop had no
+    #     equivalent, so a symlink partway through left new pages on disk with stale-or-absent
+    #     indexes and no manifest, and `git status` showed that as an ordinary edit.  "Nothing
+    #     further is written" was true and not enough.  (adversarial review 2026-09-04)
+    _writes = ([(os.path.join(a.wiki, d, "index.md"), render_index(d, entries))
+                for d, entries in sorted(by_dir.items())]
+               + [(os.path.join(a.wiki, p, "index.md"), render_index(p, _kids(p), root=(p == "")))
+                  for p in sorted(parents) if _kids(p)])
+    for _path, _ in _writes:
+        if not _guarded(_path):
+            return 1
 
     #  ── the manifest.  Deterministic and sorted, so a no-change run leaves the file untouched ──
     man = {"generated_by": "process:openwiki_emit",
@@ -540,6 +544,10 @@ def main():
     _mf = os.path.join(a.wiki, MANIFEST)
     if not _guarded(_mf):
         return 1
+    #  Every destination has now passed.  Write them together, so a refusal above leaves the
+    #  bundle exactly as it was rather than half-indexed.
+    for _path, _text in _writes:
+        open(_path, "w", encoding="utf-8").write(_text)
     open(_mf, "w", encoding="utf-8").write(
         json.dumps(man, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
@@ -741,14 +749,23 @@ def _selftest():
         _ext2 = tempfile.mkdtemp()
         _pre = os.path.join(_ext2, "precious.md")
         open(_pre, "w").write("PRECIOUS\n")
-        #  A real page here is what puts `personal/foo` into the index walk at all.
-        _foo = os.path.join(wiki, "personal", "foo")
+        #  A real page here is what puts that directory into the index walk at all.
+        #  ⚠ The name sorts **after** `personal/sessions/…` on purpose.  With the symlink at
+        #     `personal/foo` the index loop refuses on its first entry, so write-as-you-go and
+        #     check-everything-first behave identically and the fixture distinguishes nothing
+        #     (measured: the mutation stayed green).  It has to sit past a directory whose index
+        #     this run would rewrite.
+        _foo = os.path.join(wiki, "personal", "zzz-after-sessions")
         os.makedirs(_foo, exist_ok=True)
         open(os.path.join(_foo, "page.md"), "w").write("---\ntitle: Existing\n---\nbody\n")
         os.symlink(_pre, os.path.join(_foo, "index.md"))
         _s2 = tempfile.mkdtemp()
         open(os.path.join(_s2, "n2.md"), "w").write(
             "---\ntitle: New\ntype: note\nstatus: draft\nsession_agent: claude\n---\nnew body\n")
+        _ix_claude = os.path.join(wiki, "personal", "sessions", "claude", "index.md")
+        _ix_before = open(_ix_claude, encoding="utf-8").read() if os.path.exists(_ix_claude) else None
+        assert _ix_before is not None, \
+            "this case needs an index that the run would rewrite, or it distinguishes nothing"
         sys.argv = ["x", "--wiki", wiki, "--from", _s2, "--force"]
         assert main() == 1, "a symlinked index.md was accepted"
         assert open(_pre).read() == "PRECIOUS\n", \
@@ -758,6 +775,16 @@ def _selftest():
         #     stops exercising the index guard and would otherwise pass while testing nothing.
         assert os.path.exists(os.path.join(wiki, "personal", "sessions", "claude", "n2.md")), \
             "the page write did not happen, so this case no longer reaches the index guard"
+        #  ⚠ …and **no index changed**.  The refusal used to come partway through the index loop,
+        #     leaving new pages beside indexes that already listed them and no manifest, which
+        #     `git status` shows as an ordinary edit.  Every destination is checked before the
+        #     first write, so a refusal leaves the indexes exactly as they were.
+        #     Asserting the file's *absence* would not distinguish anything —— earlier cases in
+        #     this self-check already created it.  What this run would change is its **content**.
+        assert _ix_before is not None and open(_ix_claude, encoding="utf-8").read() == _ix_before, \
+            "an index was rewritten before the refusal —— the bundle is left half-indexed"
+        assert "n2" not in open(_ix_claude, encoding="utf-8").read(), \
+            "the refused run's page reached an index anyway"
         os.remove(os.path.join(_foo, "index.md"))
         shutil.rmtree(_ext2, ignore_errors=True)
         shutil.rmtree(_s2, ignore_errors=True)

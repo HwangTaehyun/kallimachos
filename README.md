@@ -23,7 +23,7 @@
 
 ![Galaxy view of the author's real vault: 7,974 entities as star clusters, one colour per topic, with the topic list on the left](.github/assets/galaxy-topics.jpg)
 
-<p align="center"><em>The author's actual vault, rendered by the viewer on 2026-09-01: 7,974 entities in 20 topics, one colour per topic. The same vault now yields 24,527 — a graph grows with the notes, and the picture is a moment in that.  Topics are found by community detection and named from their top entities. The <a href="#try-it-on-the-demo-vault">demo vault</a> in this repo reproduces a smaller graph end-to-end.</em></p>
+<p align="center"><em>The author's actual vault, rendered by the viewer on 2026-09-01: 7,974 entities, one colour per topic. The same vault now yields 24,527, of which 14,311 fall into the 20 topics and 10,216 into none — clustering names the dense parts of a graph, it does not partition it.  Topics are found by community detection and named from their top entities. The <a href="#try-it-on-the-demo-vault">demo vault</a> in this repo reproduces a smaller graph end-to-end.</em></p>
 
 ## What is this, really?
 
@@ -170,7 +170,7 @@ python src/export_kal_graph.py            # graph → .obsidian/plugins/kal-gala
 cd plugin && npm install && node esbuild.web.mjs      # → viewer/galaxy.html (self-contained)
 ```
 
-Entities are **grouped into topics** automatically: Louvain community detection splits the graph (20 topics for the vault above), and a model names each topic from its three most connected entities. Hover a topic and only that cluster stays lit, with its summary beside it.
+Entities are **grouped into topics** automatically: Louvain community detection finds the dense clusters (20 of them in the vault above; the entities in none of them stay in an *Other* bucket rather than being forced into one), and a model names each topic from its three most connected entities. Hover a topic and only that cluster stays lit, with its summary beside it.
 
 ![The same graph with the topic "Hybrid search systems" hovered: its cluster stays lit while the rest dims, and a card shows the summary and top entities](.github/assets/galaxy-topic-hover.jpg)
 

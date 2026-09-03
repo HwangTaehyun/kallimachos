@@ -639,6 +639,11 @@ def tokenize(text, lo=NGRAM[0], hi=NGRAM[1]):
 #  frontmatter values back in —— so this is not a file size and cannot be approximated by one.
 BODY_FLOOR = 60
 
+#  How far the document count may fall in one run before the rebuild refuses.  An edit session
+#  changes a handful of notes; losing more than a third of them means the vault is not what the
+#  DB was built from.  `promote_distilled.SHRINK_RATIO` guards the vault the same way.
+DB_SHRINK_RATIO = 0.67
+
 
 def indexable(path):
     """Would the indexer read this file?  → (raw, body, title), or None.
@@ -1190,6 +1195,29 @@ def _main_index():
                                 for x in docs.values()],
                   "chunks": chunks, "ix_terms": ixt, "ix_postings": ixp,
                   "ix_doclen": ixd, "lr_entities": ents, "lr_relations": rels}
+        #  ⚠ **Refuse to overwrite the DB with nothing.**  Every table below is written with
+        #     `mode="overwrite"`, unconditionally —— so `scan_vault()` returning {} silently
+        #     replaced a populated database with empty rowsets, and `n_documents: 0` went into
+        #     `meta` without complaint.  The only thing standing in the way was a guard in the Go
+        #     API, in another process and another language: delete it and no Python check failed,
+        #     and `just index` / `just sync` / `rebuild_all.sh` had **no guard at all**.  This is
+        #     the same shape as `promote_distilled.would_shrink`, and for the same reason —— it
+        #     belongs where the overwrite happens.  (adversarial review 2026-09-04, Q2)
+        _prior = 0
+        try:
+            if "documents" in db.table_names():
+                _prior = db.open_table("documents").count_rows()
+        except Exception as e:
+            #  Not knowing is not permission.  A broken read here must not read as "nothing to
+            #  lose" —— that is how a silent failure turns into a deletion.
+            raise SystemExit(f"❌ cannot tell what the DB holds, so refusing to overwrite it: {e}")
+        if _prior and len(docs) < _prior * DB_SHRINK_RATIO and "--allow-shrink" not in sys.argv:
+            raise SystemExit(
+                f"❌ the vault yields {len(docs)} documents but the DB holds {_prior} —— "
+                f"this rewrites every table, so it would throw away {_prior - len(docs)} of them.\n"
+                f"   VAULT={VAULT}\n"
+                f"   If the vault really did shrink, pass --allow-shrink.")
+
         TABLES = [(n, rowset[n]) for n in TABLE_ORDER]
         for name, rows in TABLES:
             tbl = db.create_table(name, mode="overwrite", schema=S[name], data=rows)
@@ -1620,6 +1648,67 @@ def _selftest():
     #  a session URI far down a long body must not reclassify an ordinary note
     assert classify_origin("personal/wiki/x.md", "---\ntitle: t\n---\n" + "x" * 3000
                            + "\nresource: claude-session://z\n") == "vault"
+
+    # ── The rebuild must refuse to replace a populated DB with nothing ──────────────────
+    #  ⚠ Run as a **subprocess against the real entry point**, not by calling the comparison.
+    #     `promote_distilled`'s shrink guard was tested by calling the predicate, and replacing
+    #     the production check with `if False:` still passed `just selftest` —— the guard was
+    #     unreachable for months.  This drives `python schema_v3.py` with an empty vault against
+    #     a DB that holds documents, and asserts the DB is still there afterwards.
+    import subprocess as _sp, tempfile as _tf, lancedb as _ldb, pyarrow as _pa
+    with _tf.TemporaryDirectory() as _d:
+        _db = os.path.join(_d, "db")
+        _c = _ldb.connect(_db)
+        #  Enough rows that any sane ratio refuses going to zero.
+        #  Built from the module's **own** schema —— a hand-written fixture missed `content_hash`
+        #  and the run died inside `diff_vault` before ever reaching the guard, which would have
+        #  read as "the guard fired".
+        #  `DIM` is only known after loading the embedding model, and this fixture never reads a
+        #  vector —— the guard counts rows and `diff_vault` reads `content_hash`.  Any width does.
+        _sc = schemas(384)["documents"]
+        _blank = {f.name: ("" if _pa.types.is_string(f.type)
+                           else [] if _pa.types.is_list(f.type)
+                           else 0.0 if _pa.types.is_floating(f.type) else 0)
+                  for f in _sc}
+        _c.create_table("documents", schema=_sc,
+                        data=[{**_blank, "doc_id": i, "path": f"p{i}.md",
+                               "content_hash": f"h{i}"} for i in range(50)])
+        _r = _sp.run([sys.executable, os.path.abspath(__file__)],
+                     env={**os.environ, "KAL_VAULT": os.path.join(_d, "empty"),
+                          "KAL_PATH": _db, "KAL_HOME": _d},
+                     capture_output=True, text=True)
+        assert _r.returncode != 0, f"an empty vault rebuilt the DB anyway (exit {_r.returncode})"
+        assert "would throw away" in _r.stdout + _r.stderr, \
+            f"the refusal does not say what would be lost: {(_r.stdout + _r.stderr)[-300:]}"
+        assert _ldb.connect(_db).open_table("documents").count_rows() == 50, \
+            "the guard fired but the table was overwritten anyway"
+        #  ⚠ **An unreadable DB must refuse too.**  "I could not tell what is there" and "there
+        #     is nothing there" look identical to a caller, and treating the first as the second
+        #     is how a read failure becomes a deletion.  Without this case, replacing the raise
+        #     with `_prior = 0` passed the whole self-check (measured 2026-09-04).
+        _tbl = os.path.join(_db, "documents.lance")
+        _mode = os.stat(_tbl).st_mode
+        os.chmod(_tbl, 0o000)
+        try:
+            _r3 = _sp.run([sys.executable, os.path.abspath(__file__)],
+                          env={**os.environ, "KAL_VAULT": os.path.join(_d, "empty"),
+                               "KAL_PATH": _db, "KAL_HOME": _d},
+                          capture_output=True, text=True)
+        finally:
+            os.chmod(_tbl, _mode)
+        assert _r3.returncode != 0, "an unreadable DB was overwritten anyway"
+        assert "cannot tell what the DB holds" in _r3.stdout + _r3.stderr, \
+            f"a read failure was not reported as one: {(_r3.stdout + _r3.stderr)[-300:]}"
+
+        #  ⚠ And the escape hatch must actually work, or the guard becomes something people
+        #     route around by deleting it.
+        _r2 = _sp.run([sys.executable, os.path.abspath(__file__), "--allow-shrink"],
+                      env={**os.environ, "KAL_VAULT": os.path.join(_d, "empty"),
+                           "KAL_PATH": _db, "KAL_HOME": _d},
+                      capture_output=True, text=True)
+        assert "would throw away" not in _r2.stdout + _r2.stderr, \
+            "--allow-shrink did not get past the guard"
+    print("  ✅ a rebuild refuses to replace a populated DB with an empty vault (and --allow-shrink passes)")
 
     print("  ✅ origin from session provenance · kg export skipped at any depth")
     print("  ✅ doc_meta —— OKF generated.at (flow · block) · not a verified/source date · "

@@ -51,7 +51,7 @@ VA  --> EMIT : --from <vault>  --into personal
 EMIT --> BUN : OKF v0.2 + no_llm · doc_type · why_captured
 BUN --> IDX : KAL_VAULT=<bundle>
 IDX --> DB : documents · chunks · BM25
-DB --> KG : chunks → entities · relations
+BUN --> KG : the same Markdown the indexer walks
 KG --> DB
 DB --> SURF
 BUN --> ADOPT
@@ -63,8 +63,16 @@ ADOPT --> SURF : point every surface at the bundle
   sources converge, and it is the only thing that writes into the bundle.
 - The **`KAL_VAULT` label on the indexer arrow** is load-bearing; see *The vault lives in three
   places* below.
-- `lr_extract` reads the **DB**, not the bundle — it never re-reads Markdown, which is why the
-  index has to be rebuilt before the graph.
+- `lr_extract` walks the **Markdown under `KAL_VAULT`** — the same tree the indexer walks, never
+  the DB (`lr_extract.py:351`; the file does not import lancedb at all). That is why `KAL_VAULT` is
+  not optional here, and why `--check-scope` compares the two globs before you spend hours on a
+  run whose scope disagrees with the index.
+
+  > ⚠ This bullet used to say the opposite — "reads the DB, not the bundle … which is why the index
+  > has to be rebuilt before the graph". Both halves were wrong, and `justfile:505` and
+  > `PIPELINE.md`'s own Step 4 had it right the whole time. Re-indexing first matters because both
+  > programs read the same Markdown and the two scopes must agree, not because one feeds the other.
+  > (adversarial review 2026-09-04, #13)
 
 ---
 
