@@ -799,7 +799,7 @@ def _selftest():
     #    What this check **cannot see**: anything that only shows up when run (an unreachable
     #    assert, say).  Injecting `assert False` into all 28 tests would be exact, but model
     #    loading makes that impractical every run.  Only **known dangerous shapes** are blocked here.
-    import ast as _ast
+    import ast as _ast, glob as _glob
 
     def _exits_zero(node):
         """Is this node 'end quietly with 0'."""
@@ -918,6 +918,47 @@ def _selftest():
             assert _fn in _recipes, (
                 f"{_fn} has tests in its __main__ and is not in the justfile —— nobody runs them.  "
                 f"Add it to `just selftest`, or record why it cannot go there in status.py's _EXEMPT.")
+
+    # ⑧b **Is any module-level constant assigned twice.**
+    #    A second assignment at module level is legal Python and **silently wins**, so it is
+    #    invisible to the reader and —— worse —— to a mutation: a mutation aimed at the first
+    #    definition changes a name that no longer resolves to the code under test, and reports
+    #    "the check does not fire" about a check that does.  That happened here on 2026-09-04:
+    #    a botched edit left `FM_OPEN_RE` defined twice in frontmatter.py and the mutation sweep
+    #    read as green.
+    #      ⚠ `ruff`'s F811 does **not** cover this, which is worth stating because it is the
+    #        obvious place to look.  F811 is "redefinition of an unused **name**" —— imports,
+    #        functions, classes.  Measured: with a duplicate `FM_OPEN_RE = …` appended,
+    #        `ruff check --select ALL` reports nothing.  Reassignment is ordinary Python; only
+    #        "twice at module top level, in one file" is the suspicious shape, and that is what
+    #        this walks.
+    #      Only **direct** children of the module body count.  A name assigned in both arms of a
+    #      try/except or if/else is nested inside that statement, not a top-level duplicate, and
+    #      those are the legitimate patterns this must not flag.
+    import ast as _ast
+    for _f in sorted(_glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), "*.py"))):
+        try:
+            _tree = _ast.parse(open(_f, encoding="utf-8").read())
+        except SyntaxError:
+            continue
+        _seen, _dup = {}, []
+        for _node in _tree.body:
+            if not isinstance(_node, _ast.Assign):
+                continue
+            #  ⚠ **Refining a value is not shadowing it.**  `VAULT = env` / validate /
+            #     `VAULT = expanduser(VAULT)` is the ordinary shape (eval_sessions.py:39-44), and
+            #     a check that fires on it is a check somebody deletes the first time it does.
+            #     What separates the two is whether the later assignment **reads** the name: the
+            #     refinement does, the duplicate definition ignores what came before entirely.
+            _reads = {n.id for n in _ast.walk(_node.value) if isinstance(n, _ast.Name)}
+            for _t2 in _node.targets:
+                if isinstance(_t2, _ast.Name):
+                    if _t2.id in _seen and _t2.id not in _reads:
+                        _dup.append((_t2.id, _seen[_t2.id], _node.lineno))
+                    _seen[_t2.id] = _node.lineno
+        assert not _dup, (
+            f"{os.path.basename(_f)}: assigned twice at module level, and the later one wins "
+            f"silently —— " + ", ".join(f"`{n}` at :{a} then :{b}" for n, a, b in _dup))
 
     # ⑨ **Are published ports bound to loopback only.**
     #    This app has no authentication (docs/ARCHITECTURE.md:628).  Loopback binding is the

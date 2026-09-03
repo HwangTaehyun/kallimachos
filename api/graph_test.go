@@ -454,6 +454,14 @@ func TestEveryStepIsClassifiedAgainstTheVaultGuard(t *testing.T) {
 		//     vault" is the wrong shape for it.  It is the one step that rewrites the user's
 		//     notes, and it is guarded in Python where the deletion happens ——
 		//     `is_openwiki_bundle` + `vault_is_git` + `would_shrink`.  Do not pull it in here.
+		//
+		//     ⚠ The asymmetry is a **plan, not an oversight**: every vault-*reading* step is gated
+		//        in a Go HTTP handler, while the one vault-*writing* step is gated in Python beside
+		//        its writes.  After `lr_kg.json` and the `mode="overwrite"` finding, Python next to
+		//        the write is the place we settled on —— so `promote` is the one that is already
+		//        right, and the direction of travel is the reader guards following it there, leaving
+		//        Go with one advisory pre-flight allowed to be approximate.  Not done here: the
+		//        current guard is tested and works, and moving it is a change to make deliberately.
 		"promote":       false,
 		"extract":       true,  //  vault → ~/.kal/lr_kg.json.  The one that got through.
 		"index":         true,  //  vault → every table

@@ -24,7 +24,12 @@ despite a three-character body, because the frontmatter carried it over the 60-c
 ⚠ CRLF is **not** among them, and the difference is worth keeping: production reads through
    `open(path, encoding="utf-8")`, and Python's universal newlines turn `\\r\\n` into `\\n` before
    the regex sees it.  Passing a CRLF string straight to `clean()` reproduces a defect that the
-   file path does not have.  The pattern still tolerates `\\r?` — cheap, and byte-mode readers exist.
+   file path does not have —— both of us did exactly that while reviewing this.
+
+⚠ So who is `\r?\n` for, given every file-read caller has already lost its `\r`?  **`openwiki_enrich`**
+   —— it matches against **LLM replies**, which are in-memory strings and can carry CRLF.  Written
+   down because a reader who checks only the file callers will correctly conclude it is dead weight
+   and simplify it out, and only that one caller will break.
 """
 import re
 

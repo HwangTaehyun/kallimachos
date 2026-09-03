@@ -506,6 +506,18 @@ func logging(h http.Handler) http.Handler {
 //	remember to set, which is exactly how `extract` slipped through and overwrote an eight-hour
 //	graph.  The substring is loose —— `reads: "vaults"` would match —— and the classification test
 //	pins every step against an expectation so that looseness fails by name rather than silently.
+//
+//	The real predicate is not "reads the vault" but **"its output is derived from the vault, so an
+//	empty vault means it overwrites something with nothing"**.  Worth stating, because `promote`
+//	reads the vault's *destination* and writes into it —— the same words, the opposite direction ——
+//	and belongs outside this guard rather than being an exception to it.
+//
+//	⚠ `Writes != ""` reads a free-text field as a predicate, and "blank means it writes nothing"
+//	  is convention (`verify` declares `"writes": ""  # writes nothing`), not type.  It is safe
+//	  **because** `TestEveryStepIsClassifiedAgainstTheVaultGuard` compares this answer against a
+//	  written-down expectation for every step: a step that left `writes` blank for cosmetic
+//	  reasons used to slip through silently, and now disagrees with the table by name.  The clause
+//	  has a named guarantor rather than being trusted.
 func buildsFromVault(step Step) bool {
 	return strings.Contains(step.Reads, "vault") && step.Writes != ""
 }
