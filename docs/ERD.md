@@ -63,7 +63,7 @@ hide circle
 skinparam linetype ortho
 skinparam shadowing false
 
-entity "**documents**\n//376 rows//" as documents {
+entity "**documents**\n//1116 rows//" as documents {
   * doc_id : int32 <<PK>> crc32(path)
   --
   * path : string <<UK>> the natural key
@@ -83,7 +83,7 @@ entity "**documents**\n//376 rows//" as documents {
   no_llm : bool  // must not be sent to an LLM //
 }
 
-entity "**chunks**\n//3,370 rows//" as chunks {
+entity "**chunks**\n//9,329 rows//" as chunks {
   * chunk_id : int64 <<PK>> doc_id*10000+seq
   --
   * doc_id : int32 <<FK>>
@@ -95,7 +95,7 @@ entity "**chunks**\n//3,370 rows//" as chunks {
   **vector : float32[384]**  ← the chunk embedding
 }
 
-entity "**lr_entities**\n//8,179 rows//" as entities {
+entity "**lr_entities**\n//25,372 rows//" as entities {
   * entity_id : int32 <<PK>>
   --
   name : string
@@ -112,7 +112,7 @@ entity "**lr_entities**\n//8,179 rows//" as entities {
   **vector : float32[384]**  ← the description embedding
 }
 
-entity "**lr_relations**\n//12,355 rows//" as relations {
+entity "**lr_relations**\n//35,158 rows//" as relations {
   * rel_id : int32 <<PK>>
   --
   * src_id : int32 <<FK>>
@@ -131,7 +131,7 @@ entity "**lr_relations**\n//12,355 rows//" as relations {
   **vector : float32[384]**  ← the description embedding
 }
 
-entity "**ix_terms**\n//159,408 rows//" as terms {
+entity "**ix_terms**\n//275,957 rows//" as terms {
   * term_id : int32 <<PK>>
   --
   term : string  // 2–3 character n-grams //
@@ -139,7 +139,7 @@ entity "**ix_terms**\n//159,408 rows//" as terms {
   idf : float32
 }
 
-entity "**ix_postings**\n//2,107,702 rows//" as postings {
+entity "**ix_postings**\n//6,146,494 rows//" as postings {
   * term_id : int32 <<FK>>
   * chunk_id : int64 <<FK>>
   --
@@ -148,7 +148,7 @@ entity "**ix_postings**\n//2,107,702 rows//" as postings {
   pos_truncated : bool
 }
 
-entity "**ix_doclen**\n//3,370 rows//" as doclen {
+entity "**ix_doclen**\n//9,329 rows//" as doclen {
   * chunk_id : int64 <<PK,FK>>
   --
   num_tokens : int32
@@ -194,7 +194,7 @@ end note
 
 - **Read this first** — only `documents ─1:N─ chunks` is a solid FK.  The two KG tables point at documents through a `doc_ids` **list**, an M:N with a different cardinality.
 - **Vectors sit in three places** (`chunks`, `lr_entities`, `lr_relations`).  Three of the search's four weighted components correspond to them (the fourth is BM25).
-- `ix_postings`'s 2,107,702 rows derive from `chunks`'s 3,370.  They are statistics, not the original.
+- `ix_postings`'s 6,146,494 rows derive from `chunks`'s 9,329.  They are statistics, not the original.
 - Only `stale_docs` has a different lifetime —— `sync_v3` marks and `schema_v3` clears.
 
 ---

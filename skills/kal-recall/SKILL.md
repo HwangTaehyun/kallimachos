@@ -1,8 +1,8 @@
 ---
 name: kal-recall
 description: |
-  Use to find something in the personal knowledge database (Super Brain — 376 documents, <!-- db-count -->
-  8,179 entities <!-- db-count -->, accumulated since 2026-04), or to check **when and how** a concept, tool, or
+  Use to find something in the personal knowledge database (Super Brain — 1116 documents, <!-- db-count -->
+  25,372 entities <!-- db-count -->, accumulated since 2026-04), or to check **when and how** a concept, tool, or
   person changed.
   Triggers (kept verbatim: these are matching keys, not prose — translating them would stop the
   skill from firing on Korean prompts): "내 노트에", "예전에 뭐라 했더라", "이거 언제 정했지",
@@ -115,8 +115,8 @@ for another spelling with `kal_search(name)` and ask again under that name.
 
 `kal_entity` gives you **the change count and the latest one** only. For the whole thing, use
 `kal_timeline`. When a neighbour in `kal_neighbors` carries a `timeline`, that is a **state
-transition of the relation** (like `planned → implemented`). Measured: only **7** of
-12,355 relations <!-- db-count --> have one. (Re-measured 2026-08-21 — exactly one relation has more than one event.)
+transition of the relation** (like `planned → implemented`). Measured: only **3** of
+35,158 relations <!-- db-count --> have one. (Re-measured 2026-09-04 — still exactly one relation carries more than one entry.)
 
 - An empty `timeline` means **either "it did not change" or "it was not eligible for change
   extraction" (fewer than 8 description fragments)**, and **this response cannot tell them

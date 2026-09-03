@@ -138,7 +138,28 @@ def selftest():
     assert stale and stale[0][2] == want, f"a stale list was missed: {stale}"
     assert check_vocab("entity_types_canonical is defined in the ERD") == [], "a mention with no value passes"
 
-    print("  ✅ verify_docs constants · type vocabulary · canonical list")
+    # ── The table-name scan must not read the *next* population's number ──────────
+    #  ⚠ `| index | 1,115 documents · 9,304 chunks · 6,132,241 postings |` reads forward from
+    #     `chunks`, finds postings' number and calls chunks wrong —— and `--fix` would then have
+    #     written the live chunk count over a **dated timing record**.  The look-ahead list held
+    #     only the four table names; `postings`, `terms` and `doclen` are counted the same way.
+    #     This is the false-positive shape the note in `check()` describes, in the guard written
+    #     to prevent it.  (reproduced 2026-09-04)
+    import tempfile as _tf, os as _os
+    _T = {"documents": 1116, "chunks": 9329, "lr_entities": 25372, "lr_relations": 35158,
+          "ix_terms": 275957, "ix_postings": 6146494, "ix_doclen": 9329, "_types": {}}
+    _d = _tf.mkdtemp()
+    _f = _os.path.join(_d, "t.md")
+    open(_f, "w", encoding="utf-8").write(
+        "| index | 1,115 documents · 9,304 chunks · 6,132,241 postings · 108 s |\n")
+    _hits = [b[1] for b in check(_f, _T)]
+    assert "chunks" not in _hits, f"a trailing population's number was read as chunks: {_hits}"
+    #     …and the check still fires when the number really is the table's own.
+    open(_f, "w", encoding="utf-8").write("chunks 3,370 rows\n")
+    assert "chunks" in [b[1] for b in check(_f, _T)], "a genuinely stale count stopped being caught"
+    import shutil as _sh2; _sh2.rmtree(_d, ignore_errors=True)
+
+    print("  ✅ verify_docs constants · type vocabulary · canonical list · table-name look-ahead")
 
 
 def truth():
@@ -244,8 +265,16 @@ def check(path, T):
                 #     under this rule the 999 is read as chunks'.  A number sandwiched between two
                 #     table names is ambiguous to a machine either way, and a false alarm is
                 #     worse here than a miss —— a missed one still has the other table's check.
+                #  ⚠ **The look-ahead list has to hold every counted population, not just the
+                #     four table names.**  `| index | 1,115 documents · 9,304 chunks · 6,132,241
+                #     postings |` reads forward from `chunks`, finds postings' number, and reports
+                #     chunks as wrong —— and `--fix` would have written 9,329 over a **dated timing
+                #     record**.  `postings`, `terms` and `doclen` are counted the same way and were
+                #     missing.  This is the false-positive shape the note above describes, in the
+                #     very guard written to prevent it.  (reproduced 2026-09-04)
                 if re.match(r"\s*(?:\w+\s+){0,2}\b(documents|chunks|lr_entities|lr_relations"
-                            r"|entities|relations)\b", line[m.end():]):
+                            r"|entities|relations|postings|terms|doclen|ix_postings|ix_terms"
+                            r"|ix_doclen)\b", line[m.end():]):
                     continue
                 n = int(m.group(1).replace(",", ""))
                 if n != T[tbl]:

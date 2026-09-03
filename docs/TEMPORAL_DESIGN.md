@@ -12,7 +12,7 @@ Every basis is a measurement from this repository.  Estimates are marked `assump
 
 ## 0. What the problem is (measured)
 
-`group_nodes()` ([`src/lr_extract.py:423`](../src/lr_extract.py)) collects fragments like this
+`group_nodes()` ([`src/lr_extract.py:439`](../src/lr_extract.py)) collects fragments like this
 ([`:336-343`](../src/lr_extract.py)):
 
 ```python
@@ -145,8 +145,8 @@ Lines affected: `260 · 276 · 283 · 286 · 353-357 · 492` (`v.pop("descriptio
 ### 2.3 Merging happens **twice**
 
 After `lr_extract.group_nodes()`, [`entity_resolve.py:197 build_canon()`](../src/entity_resolve.py)
-merges again —— called from [`schema_v3.py:759`](../src/schema_v3.py) (inside `build_graph()`),
-and folded by `merged[k]["docs"] |= set(e["docs"])` at [`schema_v3.py:759`](../src/schema_v3.py).
+merges again —— called from [`schema_v3.py:879`](../src/schema_v3.py) (inside `build_graph()`),
+and folded by `merged[k]["docs"] |= set(e["docs"])` at [`schema_v3.py:879`](../src/schema_v3.py).
 
 Timeline combination rules in the second merge:
 
@@ -182,7 +182,7 @@ The fragments are given **in date order** and `profile` + `changes` come back.  
 **"only what changed"** —— most of 123 fragments repeat the same thing, and including them all buries the signal.
 
 > ⚠ **`_sum_key` does not look at the prompt.**
-> [`lr_extract.py:590-600`](../src/lr_extract.py): `sha1(name + sorted(descs))`.
+> [`lr_extract.py:606-616`](../src/lr_extract.py): `sha1(name + sorted(descs))`.
 > Change the prompt and the key stays the same, so **everything hits the cache and `changes` never appears.**
 > → put `PROMPT_VERSION` in the key and change the cached value to `{profile, changes}`.
 > The existing `lr_summary_cache.jsonl` is invalidated.

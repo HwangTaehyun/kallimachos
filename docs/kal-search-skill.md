@@ -187,10 +187,10 @@ Read <abs_path>                                    # the whole document
 ## DB composition
 
 ```
-   documents      376    vault 98 + session 278
-   chunks       3,370    500 chars · e5-small 384d · FTS ngram(2,3)
-   lr_entities  8,179    artifact 2,001 · method 1,738 · concept 1,293 · tool 810 · failure 803 …
-   lr_relations 12,355   undirected
+   documents      1116    vault 98 + session 278
+   chunks       9,329    500 chars · e5-small 384d · FTS ngram(2,3)
+   lr_entities  25,372    artifact 7,143 · method 4,175 · concept 3,822 · tool 2030 · failure 3545 …
+   lr_relations 35,158   undirected
    ix_*                  raw BM25 inverted index (for debugging; not used by search)
 ```
 
