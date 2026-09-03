@@ -78,6 +78,35 @@ Two ways to run it:
 | **generated** (default) | `just relay`, copy both printed lines into `.env`. ⚠ Restarting the relay makes a **new** token, and the container's old one then gets 401 |
 | **fixed** | put a value in `.env` first, then `KAL_RELAY_TOKEN="$(grep '^KAL_RELAY_TOKEN=' .env \| cut -d= -f2-)" just relay` — it survives restarts |
 
+**Making a fixed token.** The relay uses `secrets.token_urlsafe(24)` — 24 bytes of entropy, 32
+characters. Match it:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(24))"
+```
+
+Or without Python:
+
+```bash
+openssl rand -base64 24 | tr '+/' '-_' | tr -d '=\n'
+```
+
+To write one straight into `.env` without it appearing on screen or in your shell history:
+
+```bash
+python3 -c "
+import re, secrets, pathlib
+p = pathlib.Path('.env'); s = p.read_text()
+p.write_text(re.sub(r'^KAL_RELAY_TOKEN=.*$',
+                    'KAL_RELAY_TOKEN=' + secrets.token_urlsafe(24), s, flags=re.M))
+print('  written')
+"
+```
+
+> ⚠ `KAL_RELAY_TOKEN=` with **no value** is not a fixed token —— it reads as unset, and the relay
+> generates a fresh one on every start. The point of the fixed form is that the value is there
+> before the relay looks.
+
 The cancel path (`DELETE /job/<id>`) checks the same token, so nobody can kill someone else's run
 without it. The comparison is `hmac.compare_digest`, not `==`: a plain comparison leaks how many
 characters matched through its timing.
