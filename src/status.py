@@ -626,6 +626,13 @@ def _selftest():
     finishes, so **a missing table is normal**.  Raising that as an error is a false alarm
     every single run.  Telling the two apart is the point of this check.
     """
+    #  ⚠ One alias for schema_v3, hoisted to the top.  There were two (`_S` and `_sv`) purely
+    #     because the second use came before the first import —— and `_S.VAULT, _sv.VAULT = x, x`
+    #     then read as if two modules needed keeping in sync.  A reviewer read it exactly that
+    #     way and reported a coupling that does not exist.  One name, imported before any use.
+    import schema_v3 as _S
+
+
     #  ── Every key in STEPS must exist in Go's `Step` struct ────────────────────────────────
     #  Go re-serialises this list, so a key absent from the struct is **dropped without a word**.
     #  That is not hypothetical: `writes_vault` went missing exactly this way and `promote` ——
@@ -1057,7 +1064,6 @@ def _selftest():
         assert _sec in _rt, (
             f"README has no `{_sec}` section —— that is where the outbound controls are "
             f"documented, and this guard reads it.  Re-point it if the section was renamed.")
-        import schema_v3 as _sv
         #  The frontmatter key that keeps one note out of extraction (schema_v3.doc_meta).
         assert "no_llm" in _rt, (
             "README does not mention `no_llm` —— it is the only per-note way to keep a note "
@@ -1073,7 +1079,7 @@ def _selftest():
         assert "path components" in _rt, (
             "README does not say KAL_NO_LLM matches path components from the vault root —— "
             "a user reading it as a substring match will believe the wrong folders are blocked.")
-        assert _sv.SKIP, "schema_v3.SKIP is empty —— the display list lost its contents"
+        assert _S.SKIP, "schema_v3.SKIP is empty —— the display list lost its contents"
 
     # ⑫ **Did a real secret get into `.env.example`.**
     #    This file **is committed.**  `.env` is gitignored; the sample is not —— commit it
@@ -1169,7 +1175,6 @@ def _selftest():
     #     A check that cannot see the production line is not a check for it.
     import tempfile as _tf, shutil as _sh
     import fixture_db as _fx
-    import schema_v3 as _S
     _empty, _fdb = _tf.mkdtemp(), _fx.build()
     _keepdb, _keepvault = globals()["DB"], _S.VAULT
     try:
@@ -1213,18 +1218,19 @@ def _selftest():
         #       ⚠ `meta` is not optional in the fixture: `collect()` returns `_empty_status` unless
         #         both tables exist, and a first version without it reported `indexed=0`, which made
         #         every assertion below pass against a computation that never ran.  Paths are flat
-        #         and `schema_v3.VAULT` is rebound too, because `is_skipped` resolves against **its**
-        #         global —— with either wrong, nothing matches and `deleted` is simply everything.
-        import schema_v3 as _sv
+        #         `_S` **is** `schema_v3`, and `collect()` imports `VAULT` from it **inside the
+        #         function** —— so rebinding `_S.VAULT` moves both the glob root and the base
+        #         `is_skipped` resolves against.  There is no second module to keep in sync; an
+        #         earlier version of this fixture assigned through two aliases and read as if
+        #         there were.
         _bdir, _bvault = _tf.mkdtemp(), _tf.mkdtemp()
         _bdb = _lc.connect(_bdir)
         _bdb.create_table("documents", data=[
             {"doc_id": f"b{i}", "path": f"n{i}.md", "no_llm": False,
              "title": f"n{i}", "mtime": 1.0, "sha": "b" * 8} for i in range(4)])
         _bdb.create_table("meta", data=[{"key": "built_at", "value": "0"}])
-        _keepsv = _sv.VAULT
         try:
-            globals()["DB"], _S.VAULT, _sv.VAULT = _bdir, _bvault, _bvault
+            globals()["DB"], _S.VAULT = _bdir, _bvault
             for _n in ("n0.md", "n1.md"):
                 open(os.path.join(_bvault, _n), "w", encoding="utf-8").write("x" * 200 + "\n")
             _bd = collect()["documents"]
@@ -1239,7 +1245,6 @@ def _selftest():
             assert collect()["documents"]["vault_shrunk"] is True, \
                 "three of four missing did not read as a shrunken vault"
         finally:
-            _sv.VAULT = _keepsv
             _sh.rmtree(_bvault, ignore_errors=True)
             _sh.rmtree(_bdir, ignore_errors=True)
 
@@ -1263,9 +1268,8 @@ def _selftest():
             "---\ntitle: real\n---\n" + "본문 " * 40 + "\n")
         os.symlink(os.path.join(_uvault, "nothing-here.md"),
                    os.path.join(_uvault, "dangling.md"))
-        _keepsv2 = _sv.VAULT
         try:
-            globals()["DB"], _S.VAULT, _sv.VAULT = _udir, _uvault, _uvault
+            globals()["DB"], _S.VAULT = _udir, _uvault
             _ud = collect()["documents"]          # ① it must not raise at all
             #  ② and it must not read as a deletion —— that is the path that removes it
             assert not [x for x in _ud["deleted"]
@@ -1300,7 +1304,6 @@ def _selftest():
                 f"a document edited below the body floor was not reported deleted: {_fd['deleted']}"
             assert _fd["unreadable"] == [], "a short document was called unreadable"
         finally:
-            _sv.VAULT = _keepsv2
             _sh.rmtree(_uvault, ignore_errors=True)
             _sh.rmtree(_udir, ignore_errors=True)
 
