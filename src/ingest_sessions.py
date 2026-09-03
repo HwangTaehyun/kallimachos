@@ -46,7 +46,15 @@ SECRETS = [
     ("PRIVATE_KEY",   re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)")),
     # A block cut off without END.  Session logs frequently truncate tool output mid-stream,
     # leaving the header and part of the body.  The pattern above requires END and missed it (found by measurement).
-    ("JWT",           re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")),
+    #   ⚠ **The signature is optional, because session logs truncate.**  Requiring all three
+    #      segments at 10+ characters meant a JWT whose signature was cut short passed untouched
+    #      —— and that is the shape these logs routinely produce, by the same mid-stream truncation
+    #      the PRIVATE_KEY comment above records.  The signature is also the part that matters
+    #      least here: the **payload** is base64 of the claims (subject, email), so a JWT with no
+    #      valid signature at all is still the personal data.  Measured before widening: 0 new
+    #      hits across the 1,134-file bundle, `src/` and `docs/` (counts only, values not printed).
+    ("JWT",           re.compile(
+        r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}(?:\.[A-Za-z0-9_\-]*)?")),
 
     # ── Added by the adversarial review of 2026-08-18.  24 of 30 synthetic samples passed
     #    straight through the list above.  Below are the ones that could realistically appear in this vault.
@@ -379,6 +387,24 @@ def _selftest():
     #        a case only **it** excludes.  These carry a digit or a capital, so the other
     #        look-ahead lets them through and the length is the whole defence; without this,
     #        lowering the floor to 1 left the self-check green while `key: v2` became a secret.
+    #     A JWT whose signature was truncated mid-stream —— the shape these logs produce.  The
+    #     payload still carries the claims, so "no valid signature" is not "not personal data".
+    _h, _pl = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJzdWIiOiJzeW50aGV0aWMiLCJpYXQiOjE1MTZ9"
+    for _sig in ("SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", "SflKxwRJS", "SflKx", ""):
+        _j = f"{_h}.{_pl}.{_sig}" if _sig else f"{_h}.{_pl}"
+        _mj, _ = mask(_j)
+        assert _mj != _j, f"a JWT with a {len(_sig)}-character signature passed untouched"
+        assert not find_leaks(_mj), "a masked JWT still reads as a leak"
+
+    #     ⚠ …and the `eyJ` anchor is what keeps that from eating the corpus.  These documents are
+    #        full of `module.symbol` citations, and without the prefix any two ten-character
+    #        segments joined by a dot become a "secret" —— which at `openwiki_emit.py:377` means
+    #        refusing to publish the pages that cite the code they describe.
+    for _dotted in ("openwiki_emit.render_index", "schema_v3.indexable_count",
+                    "docker-compose.viewer.yml", "lr_summary_cache.jsonl"):
+        assert not find_leaks(_dotted), \
+            f"a dotted identifier read as a JWT ({_dotted!r}) —— the eyJ anchor is gone"
+
     for _short in ("key: v2", "pass: OK", "token: A1", "password: x9"):
         assert not find_leaks(_short), \
             f"a two-character value read as a secret ({_short!r}) —— the length floor is gone"
