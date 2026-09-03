@@ -248,6 +248,48 @@ Everything, unless you say otherwise. The only step that sends note content anyw
 - `KAL_NO_LLM=Private:work/Finance` blocks whole folders, matched as path components from the vault root.
 - The optional [hosted service](https://kallimachos.dev) exists for people who want the same graph on every device; the self-hosted pipeline is complete without it.
 
+### The relay — when the container needs an LLM
+
+On **macOS**, mounting `~/.claude` into a container brings the settings but **not the login**: the
+credentials live in the keychain. So `claude` cannot run inside the container, and the API blocks
+those steps with a **412 before they start** rather than failing chunk by chunk for half an hour.
+
+The relay is the way around it — a small HTTP server **on the host** that runs `claude -p` on the
+container's behalf and returns text.
+
+```bash
+just relay          # on the host.  It prints the two values below
+```
+
+```
+  claude relay → http://127.0.0.1:8791   at most 8 concurrent
+  KAL_RELAY_TOKEN=<generated>
+
+  Values for the container side (.env):
+    KAL_CLAUDE_RELAY=http://host.docker.internal:8791
+    KAL_RELAY_TOKEN=<the same value>
+```
+
+| | |
+|---|---|
+| `KAL_CLAUDE_RELAY` | where the container looks for the relay. Set it and LLM calls go to the host; leave it empty and `claude` is launched inside the container |
+| `KAL_RELAY_TOKEN` | the relay's only authentication. Generated on startup if you do not supply one — set it in `.env` first to keep it stable across restarts |
+
+**You do not need any of this** when the pipeline runs on the host (`just openwiki`, `just openwiki-kg`),
+which is how the reference corpus was built. On a **Linux** host the credentials are a file, the
+mount is enough, and there is no relay either.
+
+What the relay will not do:
+
+- It binds `127.0.0.1`. Opening it outward is an unauthenticated LLM execution channel for the
+  whole network.
+- It never touches the DB. It takes a prompt and returns text, which keeps the container the
+  single writer of LanceDB.
+- Tools are blocked. Running tools on someone else's machine is the opposite of this channel's
+  purpose.
+- It is **not** a Compose service, on purpose: putting it in the container would bring the
+  authentication problem it exists to solve.
+
 ## Docs
 
 | | |

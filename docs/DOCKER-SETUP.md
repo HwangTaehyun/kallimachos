@@ -66,6 +66,22 @@ single writer of LanceDB.
 | `KAL_CLAUDE_RELAY` | the URL `just relay` prints (usually `http://host.docker.internal:8791`) |
 | `KAL_RELAY_TOKEN` | the token it prints. Keep `.env` at `chmod 600` |
 
+**The token is generated if you do not supply one.** Verified: started with `KAL_RELAY_TOKEN`
+unset, an unauthenticated `POST /run` gets **401** — there is no window in which the relay serves
+without checking. `/health` stays open, because that is what the client uses to read
+`inflight_max`.
+
+Two ways to run it:
+
+| | |
+|---|---|
+| **generated** (default) | `just relay`, copy both printed lines into `.env`. ⚠ Restarting the relay makes a **new** token, and the container's old one then gets 401 |
+| **fixed** | put a value in `.env` first, then `KAL_RELAY_TOKEN="$(grep '^KAL_RELAY_TOKEN=' .env \| cut -d= -f2-)" just relay` — it survives restarts |
+
+The cancel path (`DELETE /job/<id>`) checks the same token, so nobody can kill someone else's run
+without it. The comparison is `hmac.compare_digest`, not `==`: a plain comparison leaks how many
+characters matched through its timing.
+
 On a Linux host the credentials are a file, and the mount is enough — no relay needed.
 
 ---
