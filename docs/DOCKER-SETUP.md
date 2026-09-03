@@ -196,6 +196,10 @@ the api container's only use of the mount — it mounted a whole vault to serve 
 | galaxy view · search results · Settings · Paths | **no** |
 | the pipeline steps (index · extract · distil · status) | **yes** — they read the Markdown |
 
+The api process no longer reads the vault at all —— the fallback that briefly looked there was
+removed on 2026-09-03. A missing graph is a **404 that says to re-export**, not a stale file
+served from a second location.
+
 Nothing in `kal-graph.json` justified living in the vault: it is built from LanceDB
 (`source: "lancedb"`) and its document references are **vault-relative** — 371 in
 `entities[].docs[]`, 208 in `relations[].docs[]`, none absolute. Only the Obsidian plugin needs a

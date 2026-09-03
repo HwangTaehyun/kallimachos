@@ -23,8 +23,12 @@ import (
 //	The header raises no error.  Delete it and the screen just goes quietly stale days later,
 //	so without a check the next person removes "a line that looks unnecessary".
 func TestGraphRevalidates(t *testing.T) {
-	vault := t.TempDir()
-	dir := filepath.Join(vault, ".obsidian", "plugins", "kal-galaxy")
+	//  The graph lives in KAL_HOME.  This test used to place it under
+	//  `<vault>/.obsidian/plugins/kal-galaxy/`, and kept passing through the fallback that existed
+	//  for one day; with the fallback gone it 404'd, which is the fallback's whole point being
+	//  made by the test suite itself.
+	home := t.TempDir()
+	dir := filepath.Join(home, "graph_export")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +42,7 @@ func TestGraphRevalidates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := &Server{vault: vault, vaultName: "demo"}
+	s := &Server{home: home, vaultName: "demo"}
 
 	//  ① the first request —— a body arrives, with the revalidation instruction attached
 	w := httptest.NewRecorder()
@@ -104,11 +108,12 @@ func TestGraphPrefersHomeOverVault(t *testing.T) {
 		t.Fatalf("KAL_HOME did not win: %d %q", code, body)
 	}
 
-	//  ② the vault still serves an installation that has not re-exported
+	//  ② **the vault is never read.**  The fallback was removed on 2026-09-03: a second place to
+	//     look is a second thing to keep true.  A graph sitting only in a vault must 404, so the
+	//     message tells the operator to re-export rather than serving something stale.
 	home2 := t.TempDir()
-	if code, body := get(&Server{home: home2, vault: vault, vaultName: "demo"}); code != 200 ||
-		!strings.Contains(body, `"vault"`) {
-		t.Fatalf("the fallback did not serve: %d %q", code, body)
+	if code, _ := get(&Server{home: home2, vault: vault, vaultName: "demo"}); code != 404 {
+		t.Fatalf("a graph in the vault was served: %d, want 404", code)
 	}
 
 	//  ③ neither —— a 404 that says what to do, not a 500
@@ -116,8 +121,8 @@ func TestGraphPrefersHomeOverVault(t *testing.T) {
 		t.Fatalf("with no graph anywhere the status was %d, want 404", code)
 	}
 
-	//  ④ **the vault is not needed at all** once KAL_HOME has the file —— this is the property the
-	//     change exists for: a viewer-only container does not have to mount a vault.
+	//  ④ **the vault is not needed at all** —— the property the change exists for: a viewer-only
+	//     container does not mount one, and nothing here reaches for it.
 	if code, body := get(&Server{home: home, vault: "/nonexistent-vault", vaultName: "demo"}); code != 200 ||
 		!strings.Contains(body, `"home"`) {
 		t.Fatalf("serving needed the vault after all: %d %q", code, body)

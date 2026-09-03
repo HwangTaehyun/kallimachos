@@ -460,13 +460,16 @@ func logging(h http.Handler) http.Handler {
 
 // The knowledge graph the galaxy view reads.  The file the pipeline's 'export the graph' made, served as it is.
 //
-// Where it is read from —— **KAL_HOME first, the vault only as a fallback.**  It used to be read
-// only from `<vault>/.obsidian/plugins/kal-galaxy/`, which was this handler's *only* use of the
-// vault mount: the api container mounted the whole vault to serve one 6MB file.  Nothing in the
-// file justifies that —— it is built from LanceDB and its document references are vault-relative
-// (measured 2026-09-02).  Only the Obsidian plugin needs a copy inside a vault, because a plugin
-// cannot open a file outside its own.  The vault arm stays so an installation that exported before
-// this change keeps working until its next export.
+// Read from **KAL_HOME, and nowhere else.**  It used to be read only from
+// `<vault>/.obsidian/plugins/kal-galaxy/`, which was this handler's *only* use of the vault mount:
+// the api container mounted a whole vault to serve one file.  Nothing in that file justified it ——
+// it is built from LanceDB and its document references are vault-relative (measured 2026-09-02).
+// Only the Obsidian plugin needs a copy inside a vault, because a plugin cannot open a file
+// outside its own, and `export_kal_graph.py` still writes that copy where a plugin can exist.
+//
+// A vault fallback lived here for one day.  It is gone: a second place to look is a second thing
+// to keep true, and the only installation it served is this one —— which has re-exported.
+// `just export` is the answer to a missing graph, and the 404 below says so.
 //
 // It is about 6MB, so resending it every time is wasteful.  ServeContent handles
 // countMarkdown counts .md files under root, stopping at `limit`.  Dot-directories are skipped,
@@ -508,11 +511,6 @@ func countMarkdown(root string, limit int) (int, error) {
 func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
 	p := filepath.Join(s.home, "graph_export", "kal-graph.json")
 	f, err := os.Open(p)
-	if err != nil {
-		//  The pre-2026-09-02 location.  Only reached when KAL_HOME has no copy yet.
-		p = filepath.Join(s.vault, ".obsidian", "plugins", "kal-galaxy", "kal-graph.json")
-		f, err = os.Open(p)
-	}
 	if err != nil {
 		fail(w, http.StatusNotFound,
 			"there is no graph yet — run 'export the graph' from the settings screen")
