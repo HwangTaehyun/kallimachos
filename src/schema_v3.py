@@ -521,6 +521,11 @@ def classify_origin(rel, raw):
 #     adversarial review 2026-09-03; the hole was in every consumer, because they share this one
 #     constant.  Leading whitespace is still refused —— an indented `no_llm` is a *nested* key, not
 #     the document's own, and treating it as a gate would block pages that merely mention it.
+#  How far into a **malformed** frontmatter the gate still looks.  Long enough for a real
+#  frontmatter (the largest in this corpus is under 3 KB), short enough that prose mentioning
+#  the key in a body does not trip it.
+FM_SCAN_CHARS = 4000
+
 NO_LLM_RE = re.compile(
     r"""^["']?no_llm["']?[ \t]*:[ \t]*["']?(?:true|yes|on)["']?[ \t]*(?:\#.*)?$""",
     re.M | re.I | re.X)
@@ -538,6 +543,16 @@ def doc_meta(raw):
     m = re.match(r"\A\ufeff?\s*---[ \t]*\r?\n(.*?)\r?\n(?:---|\.\.\.)[ \t]*\r?\n",
                  raw, flags=re.S)
     if not m:
+        #  ⚠ **A frontmatter that fails to parse must not mean "send it".**  The fence above is
+        #     strict, and five ordinary mistakes made it miss —— no closing fence, `----`, `--- x`,
+        #     an indented fence, no trailing newline —— each of which returned no_llm=False for a
+        #     document whose author had written `no_llm: true`.  The gate then read "not blocked"
+        #     and the note went to the LLM (reproduced 2026-09-04).
+        #     A parse failure is not evidence of consent.  So when the text *looks like* it was
+        #     trying to carry frontmatter, the head is scanned and the gate fails **closed**.
+        #     Only the head: a `no_llm` far down the body is prose about the key, not a mark.
+        if re.match(r"\A\ufeff?\s*---", raw) and NO_LLM_RE.search(raw[:FM_SCAN_CHARS]):
+            return "", "none", True, ""
         return "", "none", False, ""
     fm = m.group(1)
     no_llm = bool(NO_LLM_RE.search(fm))
@@ -1459,6 +1474,18 @@ def _selftest():
                "NO_LLM: TRUE", "no_llm:\ttrue"):
         assert doc_meta(f'---\ntitle: "a"\n{_q}\n---\nx\n')[2], f"{_q} left the gate open"
     #  ...and the other way: an indented (nested) key, or a mention inside a value, must not gate.
+    #  ⚠ A frontmatter that fails to parse must not read as consent.  Five ordinary mistakes
+    #     each returned no_llm=False for a document whose author wrote the mark (2026-09-04).
+    for _broken in ("---\nno_llm: true\nbody\n", "---\nno_llm: true\n----\nbody\n",
+                    "---\nno_llm: true\n--- x\nbody\n", " ---\nno_llm: true\n ---\nbody\n",
+                    "---\nno_llm: true"):
+        assert doc_meta(_broken)[2], f"a malformed frontmatter failed open: {_broken!r}"
+    #     …and the other way: prose about the key is not a mark, and a file with no
+    #     frontmatter attempt is untouched.  Without these the fix would block everything.
+    for _openfm in ("---\ntitle: a\n---\n본문에 no_llm: true 라고 씁니다\n",
+                    "no frontmatter\nno_llm: true\n",
+                    "---\nno_llm: false\n---\nbody\n"):
+        assert not doc_meta(_openfm)[2], f"prose about the key closed the gate: {_openfm!r}"
     for _n2 in ("  no_llm: true", 'description: "no_llm: true"', "x_no_llm: true"):
         assert not doc_meta(f'---\ntitle: "a"\n{_n2}\n---\nx\n')[2], f"{_n2} closed the gate"
     for _y in ("true", "true # private", "true   # 사적", "yes", "on", "TRUE"):

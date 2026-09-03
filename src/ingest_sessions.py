@@ -33,10 +33,19 @@ SECRETS = [
     ("SLACK_WEBHOOK", re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/]+")),
     ("BEARER",        re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{30,}")),
     # A complete PEM block.  Tried first so the body goes with it.
-    ("PRIVATE_KEY",   re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]{0,4000}?-----END [A-Z ]*PRIVATE KEY-----")),
+    #  ⚠ **One pattern, running to the END marker *or to the end of the text*.**  There used to be
+    #     two —— a bounded one requiring `-----END` within 4,000 characters, and a `_TRUNC` fallback
+    #     matching `BEGIN` plus 4,000 characters.  A key longer than that hit only the fallback,
+    #     which masked exactly 4,000 characters and **left the rest verbatim**: measured 2026-09-04,
+    #     a 5,342-character block left 1,281 characters of key material, and `find_leaks()` on the
+    #     result returned `{}` —— the publication check certified the leak as clean, and the
+    #     self-check asserting `not find_leaks(masked)` passed on it.
+    #     Running to `\Z` can redact more than the key when the END marker is missing.  That is the
+    #     right direction: a document carrying an unterminated private-key header is not one to
+    #     send, and the substitution count says how much went.
+    ("PRIVATE_KEY",   re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)")),
     # A block cut off without END.  Session logs frequently truncate tool output mid-stream,
     # leaving the header and part of the body.  The pattern above requires END and missed it (found by measurement).
-    ("PRIVATE_KEY_TRUNC", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]{0,4000}")),
     ("JWT",           re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")),
 
     # ── Added by the adversarial review of 2026-08-18.  24 of 30 synthetic samples passed
@@ -300,6 +309,20 @@ def _selftest():
         f"the masking removed only {sum(counts.values())} (at least {len(SYNTH)} expected)"
     assert not find_leaks(masked), \
         f"survived the masking: {list(find_leaks(masked))}"
+
+    #  ⚠ **A long key must not leave a tail behind.**  A bounded pattern masked the first 4,000
+    #     characters and left the rest verbatim —— measured 2026-09-04, a 5,342-character block
+    #     left 1,281 characters of key material and `find_leaks()` returned nothing, so the
+    #     publication check certified the leak.  The assertion above passed on it: the
+    #     substitution had removed the detector's own anchor.
+    _synth = "Zm9vYmFyYmF6cXV4" * 330          # synthetic base64, not a key
+    for _tail in ("\n-----END RSA PRIVATE KEY-----", ""):
+        _pem = "-----BEGIN RSA PRIVATE KEY-----\n" + _synth + _tail
+        _m, _n = mask(_pem)
+        _left = "".join(re.findall(r"[A-Za-z0-9+/=]{40,}", _m))
+        assert not _left, f"{len(_left)} characters of key material survived masking"
+        assert _n, "a private key block was not counted as masked"
+        assert not find_leaks(_m), "the scanner certified a masked key as clean"
     for _, sample in SYNTH:
         assert sample not in masked, "the original string survives verbatim"
     assert "[REDACTED:" in masked, "no substitution marker —— there is no way to see what was removed"

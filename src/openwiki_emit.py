@@ -132,7 +132,12 @@ def owned(d):
 def _fm_block(path):
     """The raw frontmatter block of a file, or ''.  Body text is never searched for ownership."""
     try:
-        raw = open(path, encoding="utf-8", errors="ignore").read(8000)
+        #  ⚠ **The whole file, not the first 8,000 characters.**  `doc_meta` scans the entire
+        #     frontmatter with no bound, so a long one (OKF `sources[]` lists reach this size) made
+        #     the two disagree: doc_meta said gated, `has_no_llm` said not, and the carry-forward at
+        #     the write site dropped a hand-set `no_llm: true` —— the exact regression the comment
+        #     there says was fixed.  Reproduced 2026-09-04 with a 9 KB frontmatter.
+        raw = open(path, encoding="utf-8", errors="ignore").read()
     except OSError:
         return ""
     m = re.match(r"\A\ufeff?\s*---[ \t]*\r?\n(.*?)\r?\n(?:---|\.\.\.)[ \t]*\r?\n", raw, re.S)
@@ -693,6 +698,19 @@ def _selftest():
         assert has_no_llm(page), "the no_llm gate was silently dropped by a re-emit"
         assert re.search(r"^no_llm: true$", open(page).read(), re.M), "no_llm was quoted or moved"
         ok.append("a hand-set no_llm: true survives a re-emit")
+
+        #  ⑩b `has_no_llm` and `doc_meta` must agree on a **long** frontmatter.  `_fm_block` read
+        #      only the first 8,000 characters while `doc_meta` scans the whole block, so a 9 KB
+        #      frontmatter (OKF `sources[]` lists reach this) split them: doc_meta said gated,
+        #      has_no_llm said not, and the carry-forward just above dropped the mark —— the exact
+        #      regression its own comment says was fixed.  (reproduced 2026-09-04)
+        import schema_v3 as _S3
+        _big = os.path.join(d, "bigfm.md")
+        open(_big, "w", encoding="utf-8").write(
+            "---\n" + "pad: y\n" * 1500 + "no_llm: true\n---\n본문\n")
+        assert _S3.doc_meta(open(_big, encoding="utf-8").read())[2] and has_no_llm(_big), \
+            "has_no_llm and doc_meta disagree on a long frontmatter"
+        ok.append("has_no_llm agrees with doc_meta past the old 8 KB read")
 
         #  ⑪ Nothing is published without the leak check —— this is the one write that leaves
         #     ~/.kal (0700) for a git repository.

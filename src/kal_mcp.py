@@ -39,7 +39,7 @@ from mcp.server.mcpserver import MCPServer
 
 import kal_search as K
 from entity_resolve import merge_key
-from schema_v3 import FM_KEEP as _FM_KEEP, llm_gate, REDACTED, NO_LLM_RE
+from schema_v3 import FM_KEEP as _FM_KEEP, llm_gate, REDACTED, NO_LLM_RE, doc_meta
 
 VAULT = vault_path.vault()
 
@@ -353,7 +353,13 @@ def refs_of(doc_ids):
             unresolved = True
             continue
         # The source note itself may be excluded from transmission.  A back door in the gate.
-        if NO_LLM_RE.search(t[:1500]):
+        #  ⚠ **`doc_meta`, not a bare regex over the head.**  This scanned `t[:1500]` with no
+        #     fence, so a note that merely *documents* the key —— in prose or inside a fenced code
+        #     block —— was silently dropped from `refs`, while every other consumer said it was
+        #     fine.  Measured 2026-09-04: a how-to page with `no_llm: true` in a yaml block was
+        #     blocked here and passed by `doc_meta`.  In this corpus the distilled session
+        #     documents *are* write-ups about this gate, so it fires often.
+        if doc_meta(t)[2]:
             continue
         ttl = re.search(r'^title:\s*"?([^"\n]+)', t, re.M)
         url = _URL_RE.search(t)
@@ -804,6 +810,19 @@ def _selftest():
     """
     # ── Name resolution ──
     assert resolve("")[0] is None, "an empty name must be a miss"
+
+    #  ⚠ **The refs gate reads the frontmatter, not the head of the file.**  It used to be
+    #     `NO_LLM_RE.search(t[:1500])` with no fence, so a note that merely *documents* the key
+    #     —— in prose or inside a fenced code block —— was silently dropped from `refs` while
+    #     every other consumer passed it.  In this corpus the distilled session documents are
+    #     write-ups about this very gate, so it fired often.  (reproduced 2026-09-04)
+    _marked = '---\ntitle: a\nno_llm: true\n---\n본문\n'
+    _talks  = '---\ntitle: how-to\n---\n```yaml\nno_llm: true\n```\n'
+    assert doc_meta(_marked)[2], "a marked note stopped being gated"
+    assert not doc_meta(_talks)[2], "a note documenting the key was gated"
+    import inspect as _insp
+    assert "NO_LLM_RE.search(t[" not in _insp.getsource(sys.modules[__name__]), \
+        "the refs path went back to scanning the head of the file instead of the frontmatter"
     row, _ = resolve("obsidian")
     assert row, "if obsidian is not found, name resolution is broken"
     assert resolve("claudecode")[0], "the merge_key path is broken (name_norm alone misses)"

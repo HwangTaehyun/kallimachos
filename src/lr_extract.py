@@ -16,6 +16,7 @@ Running it: there are no API credits, so calls go through the claude CLI (subscr
       If ANTHROPIC_API_KEY is set the CLI prefers it, so `env -u` strips it.
 """
 import vault_path
+import unicodedata
 import collections, hashlib, json, os, re, subprocess, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from entity_resolve import build_canon, name_stats, split_sense
@@ -308,8 +309,20 @@ def blocked_path(rel):
     predicate, deleting the body still passes (a failure this repository actually suffered).
     The table in README §"What stays on your machine" holds the same values as this self-check.
     """
-    parts = rel.replace(os.sep, "/").split("/")
-    return any(parts[:len(x.split("/"))] == x.split("/") for x in NO_LLM)
+    #  ⚠ **Both sides are normalised, because the filesystem is.**  APFS (and NTFS) are
+    #     case-**insensitive** and normalisation-**preserving**: `Private/` and `private/` are the
+    #     same directory, and a name typed as NFC and one stored as NFD render identically in `ls`.
+    #     A plain `==` therefore let the gate miss the very folder the user meant:
+    #       KAL_NO_LLM=private  ·  vault/Private/med.md   →  not blocked  (reproduced 2026-09-04)
+    #       KAL_NO_LLM=비공개(NFC) · vault/비공개(NFD)/a.md →  not blocked  (macOS stores NFD)
+    #     The second matters here specifically —— this vault's folder names are Korean.
+    #     Normalising is the safe direction for a transmission gate: it can only block more, and
+    #     the component anchoring above still stops `private` from matching `my-private-notes`.
+    def _norm(x):
+        return unicodedata.normalize("NFC", x).casefold()
+    parts = [_norm(c) for c in rel.replace(os.sep, "/").split("/")]
+    return any(parts[:len(x)] == x for x in
+               ([_norm(c) for c in b.split("/")] for b in NO_LLM))
 
 
 def collect():
@@ -1231,9 +1244,23 @@ def _selftest():
                   ("wiki/Finance/2026.md", True), ("Finance/2026.md", False)]
         _bad = [r for r, want in _table if blocked_path(r) != want]
         assert not _bad, f"NO_LLM matching disagrees with the README table: {_bad}"
+
+        #  ⚠ **The filesystem is case-insensitive and normalisation-preserving; the gate must match
+        #     it.**  `KAL_NO_LLM=private` against `Private/` returned False while `ls private/`
+        #     opened that very directory, and an NFC setting missed an NFD path —— which matters
+        #     here because this vault's folder names are Korean (reproduced 2026-09-04).
+        _nfc = unicodedata.normalize("NFC", "비공개")
+        _nfd = unicodedata.normalize("NFD", "비공개")
+        _g["NO_LLM"] = ("private", _nfc)
+        _fold = [("Private/med.md", True), ("PRIVATE/med.md", True), ("private/med.md", True),
+                 (_nfd + "/a.md", True), (_nfc + "/a.md", True),
+                 #  and still not over-matching —— a prefix is not a component
+                 ("my-private-notes/a.md", False), ("Private2/a.md", False)]
+        _bad2 = [r for r, want in _fold if blocked_path(r) != want]
+        assert not _bad2, f"case/unicode folding is wrong for: {_bad2}"
     finally:
         _g["NO_LLM"] = _n0
-    print("  ✅ NO_LLM path matching —— all 6 rows agree with the rule the README states")
+    print("  ✅ NO_LLM path matching —— 6 README rows · case-insensitive · NFC/NFD (both ways)")
     assert _k[:3] == ("a.md", 0, "HH"), f"the head of the key changed: {_k}"
     assert cache_key(_c) != (_c["doc"], _c["idx"], _c["h"]), "the key does not distinguish versions"
 
