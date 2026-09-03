@@ -23,6 +23,8 @@ import glob
 import hashlib
 import json
 import os
+import re
+import pathlib
 import sys
 import time
 
@@ -382,7 +384,13 @@ STEPS = [
      "desc": "Do the numbers in the docs match the DB, and do relative links resolve? Changes nothing.",
      "reads": "docs/**/*.md + LanceDB", "writes": "",   # writes nothing
      "cmd": ["verify_docs.py"],
-     "minutes": 1, "needs_llm": False, "writes_db": False},
+     #  ⚠ This one needs **the repository**, not just src/.  It walks `<repo>/**/*.md` and
+     #    resolves every relative link, and the api image ships only `src/` and the two yml
+     #    files —— so in a container it dies with "found no .md at all".  Shipping docs/ would
+     #    not fix it either: the links reach `plugin/` (263MB) and `web/`, which .dockerignore
+     #    excludes on purpose.  It is a host step.  (measured 2026-09-03 by running it through
+     #    /api/runs: run 20260903-164655 failed with ROOTS=['/app'].)
+     "minutes": 1, "needs_llm": False, "writes_db": False, "needs_repo": True},
 ]
 GROUPS = [
     {"id": "main", "title": "Full pipeline",
@@ -578,6 +586,23 @@ def _selftest():
     finishes, so **a missing table is normal**.  Raising that as an error is a false alarm
     every single run.  Telling the two apart is the point of this check.
     """
+    #  ── Every key in STEPS must exist in Go's `Step` struct ────────────────────────────────
+    #  Go re-serialises this list, so a key absent from the struct is **dropped without a word**.
+    #  That is not hypothetical: `writes_vault` went missing exactly this way and `promote` ——
+    #  which rewrites documents inside the vault —— ran with no confirmation (deep review
+    #  2026-08-28).  The struct's own comment records it.  Nothing checked the pairing until now.
+    _go = pathlib.Path(__file__).resolve().parent.parent / "api" / "main.go"
+    #  A selftest runs from the repository.  If main.go is gone, that is the finding, not a
+    #  reason to skip —— skipping is how a check becomes indistinguishable from a passing one.
+    assert _go.is_file(), f"api/main.go is not next to src/: {_go}"
+    _body = re.search(r"type Step struct \{(.*?)\n\}", _go.read_text(encoding="utf-8"), re.S)
+    assert _body, "the Step struct could not be read from api/main.go"
+    _tags = set(re.findall(r'json:"([a-z_]+)', _body.group(1)))
+    _used = {k for st in STEPS for k in st}
+    assert _used <= _tags, (
+        f"STEPS uses keys Go's Step struct does not carry, so Go drops them silently: "
+        f"{sorted(_used - _tags)}")
+
     import lancedb.db as _db
 
     class _Fake:

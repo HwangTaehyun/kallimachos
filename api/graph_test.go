@@ -279,3 +279,64 @@ func TestEnvOrTreatsEmptyAsUnset(t *testing.T) {
 		t.Fatalf("KAL_VAULT=\"\" no longer resolves to /vault: %q — viewer mode's messages change", got)
 	}
 }
+
+// `verify` walks the repository, and the api image carries only `src/`.
+//
+//	Run through the web UI in the shipped container it printed
+//	"❌ found no .md at all (has a path gone stale?): ['/app']" and the run went to `failed`
+//	(run 20260903-164655, measured 2026-09-03).  The guard inside verify_docs.py fired exactly
+//	as designed —— but the step could never have worked there, and the UI offered it anyway.
+//	Shipping docs/ does not fix it: the relative links inside reach `plugin/` (263MB) and
+//	`web/`, which .dockerignore excludes on purpose.
+//
+//	So it is refused up front, like an LLM step with no credentials.  The condition is evidence
+//	—— docs/ next to src/ —— rather than "am I in a container", because running the API from a
+//	source checkout is a real configuration that must keep working.
+func TestStartRunRefusesRepoStepWithoutRepo(t *testing.T) {
+	post := func(s *Server) (int, string) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/api/runs",
+			strings.NewReader(`{"step":"verify"}`))
+		r.Header.Set("Content-Type", "application/json")
+		s.startRun(w, r)
+		return w.Code, w.Body.String()
+	}
+	//  A vault with a real note, so nothing *else* refuses and this test measures its own guard.
+	vault := t.TempDir()
+	if err := os.WriteFile(filepath.Join(vault, "a.md"),
+		[]byte("---\ntitle: a\n---\n"+strings.Repeat("본문 ", 40)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mk := func(src string) *Server {
+		return &Server{
+			home: t.TempDir(), vault: vault, src: src,
+			steps: map[string]Step{"verify": {ID: "verify", NeedsRepo: true}},
+			subs:  map[string]map[chan string]struct{}{},
+		}
+	}
+
+	//  ① src/ with no docs/ beside it —— the container's shape
+	bare := filepath.Join(t.TempDir(), "src")
+	if err := os.MkdirAll(bare, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, body := post(mk(bare))
+	if code != 412 {
+		t.Fatalf("a repo step with no docs/ returned %d, want 412 (body %q)", code, body)
+	}
+	//  The message has to name the way out, or the person is stuck at a red run with no next move.
+	if !strings.Contains(body, "just verify") {
+		t.Errorf("the refusal does not say to run it on the host: %q", body)
+	}
+
+	//  ② a real checkout —— the guard must not fire, or it blocks the only place it works
+	repo := t.TempDir()
+	for _, d := range []string{"src", "docs"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if code, body := post(mk(filepath.Join(repo, "src"))); code == 412 {
+		t.Fatalf("a source checkout was refused: %q", body)
+	}
+}

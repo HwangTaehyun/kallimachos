@@ -60,6 +60,10 @@ type Step struct {
 	//    Python may send it, but absent from this struct Go drops it on re-serialisation.
 	//    That is exactly why `promote` ran with no confirmation (deep review 2026-08-28).
 	WritesVault bool `json:"writes_vault"`
+	//  Does it need the **repository**, not just src/.  `verify` walks `<repo>/**/*.md`; the
+	//  api image carries only src/ and the two yml files, so it can never work here.  Same
+	//  reason as WritesVault above: absent from this struct, Python's value is dropped.
+	NeedsRepo bool `json:"needs_repo"`
 }
 
 type Group struct {
@@ -815,6 +819,20 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 			fail(w, 412, "this step needs the claude CLI and it is unavailable — "+msg+
 				"  (macOS keychain credentials are not mounted into a container.  "+
 				"Run it on the host with `just "+step.ID+"`.)")
+			return
+		}
+	}
+
+	// A step that needs the repository is refused the same way, and for the same reason: it
+	// would otherwise fail on its own guard after the run record is already open.  The check is
+	// evidence (is docs/ next to src/), not "am I in a container" —— a source checkout run
+	// through the API is a real configuration and must keep working.
+	if step.NeedsRepo {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(s.src), "docs")); err != nil {
+			fail(w, 412, "this step needs the repository and only src/ is here — "+
+				"the container image carries no docs/ (and the links inside it reach plugin/ "+
+				"and web/, which the image excludes on purpose).  "+
+				"Run it on the host with `just "+step.ID+"`.")
 			return
 		}
 	}

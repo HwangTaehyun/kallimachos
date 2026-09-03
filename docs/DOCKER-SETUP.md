@@ -198,11 +198,19 @@ they start** rather than letting them fail chunk by chunk for half an hour:
 | Promote to vault | | | rewrites the **vault**, not the DB —— refused on a bundle |
 | **Rebuild knowledge DB** | | ✅ | **yes, on its own** |
 | **Incremental sync** | | ✅ | **yes, on its own** |
-| Verify docs | | | yes |
+| Verify docs | | | **no** —— it walks the repository, and the image carries only `src/` |
 
 > ⓘ `openwiki-enrich` calls an LLM too, but it is a **justfile recipe, not a step in
 > `src/status.py`** —— the 412 gate does not cover it, and the Settings screen does not
 > list it.  Run it on the host.
+
+> ⓘ **Verify docs** used to say "yes" in the table above and it was wrong.  Run through the web
+> UI in the shipped container it printed `❌ found no .md at all (has a path gone stale?):
+> ['/app']` and the run went to `failed` (run `20260903-164655`, 2026-09-03).  The image carries
+> `src/` and the two yml files, not `docs/` —— and shipping `docs/` would not help either,
+> because the relative links inside it reach `plugin/` (263MB) and `web/`, which
+> `.dockerignore` excludes on purpose.  It now refuses with a **412** like an LLM step without a
+> relay, so the answer arrives before the run starts.  Run it on the host: `just verify`.
 
 To make the LLM steps work from the container, add the two relay values — and start the relay on
 the **host**, because that is where the credentials are:
