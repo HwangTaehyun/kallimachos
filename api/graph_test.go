@@ -7,7 +7,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -416,18 +415,27 @@ func TestStartRunRefusesRepoStepWithoutRepo(t *testing.T) {
 	}
 }
 
-// Which steps the empty-vault guard covers, pinned against the real step list.
+// Every step is classified against the empty-vault guard, and a new one has to be classified too.
 //
-//	The guard was gated on `WritesDB` and **`extract` slipped through** —— it reads the vault and
-//	writes `~/.kal/lr_kg.json`, not the DB.  Clicked in a viewer-mode container it finished in
-//	seconds and left a 117-byte graph, 0 entities, over an eight-hour extraction (2026-09-04).
-//	The condition now derives from the step's own `reads`/`writes`, which covers a future step
-//	nobody remembers to flag —— but a derived condition can also stop matching if someone rewords
-//	`reads`, and that failure is silent.  So the resulting set is written down here.
+//	The first version of this pinned the **guarded set** —— it built a map of steps the condition
+//	already matched, then checked that map against {extract, index, sync}.  A step that never
+//	enters the map cannot change it, so both halves were blind to the case this exists for.
+//	Reproduced 2026-09-04 by injecting into status.py:
 //
-//	It loads the **real** STEPS through the same path the server does.  A table of fixtures would
-//	keep passing after status.py changed, which is the failure this pins.
-func TestVaultGuardCoversEveryVaultReader(t *testing.T) {
+//	    {"id": "summarise", "reads": "your notes **/*.md", "writes": "~/.kal/digest.json", …}
+//
+//	—— reads the vault, writes a file, completely ungated, `go test` green.  That is the
+//	`lr_kg.json` shape one wording away, and the reason `WritesDB` failed in the first place.
+//
+//	So the iteration is inverted: walk **every** step and demand an entry here.  Adding one to
+//	status.py fails this test until somebody decides, which is the property a typed field was
+//	supposed to buy —— without a field anyone has to remember to set.  It also keeps a reworded
+//	`reads` loud: the derived answer flips against a pinned expectation instead of quietly
+//	shrinking a set.
+//
+//	The table is a second place the step list lives, and that is the price.  It is paid in a test
+//	that fails by name the moment it drifts, rather than in a runtime hole nobody sees.
+func TestEveryStepIsClassifiedAgainstTheVaultGuard(t *testing.T) {
 	py := filepath.Join("..", ".venv", "bin", "python")
 	if _, err := os.Stat(py); err != nil {
 		t.Fatalf("the project venv is missing (%v) —— run `uv sync`", err)
@@ -437,34 +445,48 @@ func TestVaultGuardCoversEveryVaultReader(t *testing.T) {
 		t.Fatalf("could not load the real step list: %v", err)
 	}
 
-	guarded := map[string]bool{}
+	//  true  = builds from the vault, so an empty one would overwrite something with nothing.
+	//  false = does not read the vault at all, or writes nothing.  The reason matters more than
+	//          the value; a bare `false` is what lets the next person "fix" it.
+	want := map[string]bool{
+		"distill": false, //  reads ~/.claude/projects/**, not the vault
+		//  ⚠ `promote` **writes** the vault and does not read it, so a guard keyed on "reads the
+		//     vault" is the wrong shape for it.  It is the one step that rewrites the user's
+		//     notes, and it is guarded in Python where the deletion happens ——
+		//     `is_openwiki_bundle` + `vault_is_git` + `would_shrink`.  Do not pull it in here.
+		"promote":       false,
+		"extract":       true,  //  vault → ~/.kal/lr_kg.json.  The one that got through.
+		"index":         true,  //  vault → every table
+		"export":        false, //  reads LanceDB
+		"refresh_kg":    false, //  a combo —— it re-runs the steps above, which are each guarded
+		"apply_aliases": false, //  combo
+		"rebuild_all":   false, //  combo
+		"sync":          true,  //  vault → chunks · ix_* · stale_docs
+		"verify":        false, //  reads docs/ and the DB, writes nothing
+	}
 	for id, st := range s.steps {
-		if strings.Contains(st.Reads, "vault") && st.Writes != "" {
-			guarded[id] = true
+		exp, known := want[id]
+		if !known {
+			t.Errorf("step %q is not classified here —— decide whether the empty-vault guard "+
+				"covers it and add it to `want` with the reason (reads=%q writes=%q)",
+				id, st.Reads, st.Writes)
+			continue
+		}
+		//  ⚠ Ask the production function.  Re-deriving the expression here left mutations of the
+		//     handler's copy green (measured 2026-09-04) —— the test agreed with itself.
+		if got := buildsFromVault(st); got != exp {
+			t.Errorf("step %q: the guard %s it, but this table says %s (reads=%q writes=%q)",
+				id, map[bool]string{true: "covers", false: "does not cover"}[got],
+				map[bool]string{true: "it should", false: "it should not"}[exp],
+				st.Reads, st.Writes)
 		}
 	}
-	//  Every step that builds something out of the vault.  Add one to status.py and this fails
-	//  until you decide whether it belongs —— which is the point.
-	want := []string{"extract", "index", "sync"}
-	for _, id := range want {
-		if !guarded[id] {
-			t.Errorf("%q reads the vault and writes, but the guard does not cover it "+
-				"(reads=%q writes=%q)", id, s.steps[id].Reads, s.steps[id].Writes)
+	//  And the other way —— a name in the table that no longer exists is a stale expectation
+	//  that would quietly stop testing anything.
+	for id := range want {
+		if _, ok := s.steps[id]; !ok {
+			t.Errorf("`want` classifies %q, which status.py no longer declares", id)
 		}
-	}
-	if len(guarded) != len(want) {
-		got := make([]string, 0, len(guarded))
-		for id := range guarded {
-			got = append(got, id)
-		}
-		sort.Strings(got)
-		t.Errorf("the guard covers %v, expected exactly %v — if that is intended, change this test "+
-			"deliberately rather than widening it", got, want)
-	}
-	//  And it must not cover a step that only reads: `verify` touches docs and the DB, never the
-	//  vault, so gating it here would refuse the one place it works.
-	if guarded["verify"] {
-		t.Error("the guard covers `verify`, which does not read the vault")
 	}
 }
 
@@ -538,5 +560,31 @@ func TestVaultGuardTellsFailureFromEmptiness(t *testing.T) {
 	//  Both directions, or one message could serve both again without anything noticing.
 	if strings.Contains(body, "could not find out") {
 		t.Errorf("an empty vault was reported as a failure to answer: %q", body)
+	}
+}
+
+// `buildsFromVault` itself, including the half no real step distinguishes today.
+//
+//	The classification test above cannot separate the two clauses: every step whose `reads`
+//	names the vault also writes something, so dropping `&& step.Writes != ""` changes nothing
+//	and that mutation stayed green (2026-09-04).  The clause is not dead —— it is what keeps a
+//	read-only vault step from being refused for a database it would never touch —— so it is
+//	pinned here rather than deleted, against inputs the shipped list does not contain yet.
+func TestBuildsFromVault(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		reads, writes string
+		want          bool
+	}{
+		{"reads the vault and writes", "vault **/*.md", "~/.kal/lr_kg.json", true},
+		//  The clause the step list cannot exercise: a reader that produces nothing has nothing
+		//  to overwrite, so refusing it would be a false alarm on the one path it works.
+		{"reads the vault, writes nothing", "vault **/*.md", "", false},
+		{"writes but does not read the vault", "~/.kal/distilled/", "vault raw/…", false},
+		{"neither", "LanceDB", "", false},
+	} {
+		if got := buildsFromVault(Step{Reads: c.reads, Writes: c.writes}); got != c.want {
+			t.Errorf("%s: got %v, want %v (reads=%q writes=%q)", c.name, got, c.want, c.reads, c.writes)
+		}
 	}
 }

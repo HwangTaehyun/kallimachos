@@ -493,6 +493,23 @@ func logging(h http.Handler) http.Handler {
 //	runs).  It is paid once when a run starts, against steps that take 2s to 49min, so it is not
 //	worth splitting the rule into a lighter module —— and the alternative, a second copy of the
 //	rule in Go, already cost one emptied database.
+//
+// buildsFromVault answers whether an empty vault would make this step destroy something.
+//
+//	It exists as a function so the handler and `TestEveryStepIsClassifiedAgainstTheVaultGuard`
+//	ask the **same** question.  The test first re-derived the expression inline, and mutating the
+//	handler's copy left it green —— a test that restates the rule instead of calling it is the
+//	shape this repository keeps paying for, and it was reintroduced here within a day of the
+//	`WritesDB` hole it was written to close.
+//
+//	Derived from the step's own declaration rather than a flag: a flag is a thing someone has to
+//	remember to set, which is exactly how `extract` slipped through and overwrote an eight-hour
+//	graph.  The substring is loose —— `reads: "vaults"` would match —— and the classification test
+//	pins every step against an expectation so that looseness fails by name rather than silently.
+func buildsFromVault(step Step) bool {
+	return strings.Contains(step.Reads, "vault") && step.Writes != ""
+}
+
 func (s *Server) indexableCount(ctx context.Context, root string, limit int) (int, error) {
 	if root == "" {
 		return 0, nil
@@ -803,7 +820,7 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 	//	     declaration** rather than a flag someone has to remember: reads the vault, writes
 	//	     something.  `TestVaultGuardCoversEveryVaultReader` pins the resulting set, so
 	//	     rewording `reads` breaks a test instead of silently opening this hole again.
-	if strings.Contains(step.Reads, "vault") && step.Writes != "" {
+	if buildsFromVault(step) {
 		//  ⚠ Two branches, not one.  Failing closed is right; **asserting why** is not —— a Python
 		//     crash, a missing schema_v3, an import-time SystemExit and a genuinely empty vault
 		//     all reached the user as "this container was started without a vault", a cause the
