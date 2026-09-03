@@ -76,10 +76,33 @@ SECRETS = [
     #   "1Password:domain-key-acls" matches (3 measured false positives).  Requiring a digit or
     #   a capital on the value side serves the same purpose —— an identifier of lowercase and
     #   hyphens alone, like 'domain-key-acls', is not a secret.
+    #   ⚠ **The label list was narrower than the labels people write.**  Eight synthetic shapes
+    #      passed both `mask()` and `find_leaks()` untouched (adversarial review 2026-09-04):
+    #      bare `token:`, bare `key:`, `pw:`, `DB_PASS=`, `비밀번호:`, `Authorization: Basic …`,
+    #      `AccountKey=`, and a 32-hex key.  That matters more here than in an ordinary masker,
+    #      because at `openwiki_emit.py:377` `find_leaks` is the **only** control on the publish
+    #      path —— nothing masks there, it just refuses to write.
+    #      Added: the bare forms, `pw`/`pass`, `DB_*`-style suffixes, the Korean label (this
+    #      corpus is Korean), `Basic` auth and Azure's `AccountKey`.
+    #      Bare `key:` is in too, but only after **measuring** it: `key: value` is ubiquitous in
+    #      YAML and this corpus is *about* a configurable pipeline, so it was the one likely to
+    #      cry wolf.  Counted against the live bundle before adding —— **0 pages, 0 hits**, and 0
+    #      in `src/` and `docs/` as well (values never printed, counts only).  If that changes,
+    #      the 16-character-plus-digit-or-capital floor is the knob, not deletion.
+    #   ⚠ **Not added: the bare 32-hex shape.**  Any git object id, checksum or content hash
+    #      matches it, and a false positive here **blocks a publication** rather than merely
+    #      redacting a line.  Catching Datadog keys is not worth refusing to publish every page
+    #      that quotes a commit.  Recorded so the next person does not read the omission as an
+    #      oversight.
     ("GENERIC_SECRET",  re.compile(
         r"(?i)((?<![A-Za-z0-9])(?:api[_\-]?key|secret[_\-]?key|access[_\-]?token|"
-        r"auth[_\-]?token|client[_\-]?secret|password|passwd)\s*[=:]\s*[\"']?)"
+        r"auth[_\-]?token|client[_\-]?secret|password|passwd|"
+        r"(?:[a-z0-9]+[_\-])?(?:token|secret|passwd|password|pass|pwd|pw|key)|"
+        r"accountkey|비밀번호|암호)\s*[=:]\s*[\"']?)"
         r"(?=[A-Za-z0-9_\-/+=]{16,})(?=[^\s\"']*(?-i:[A-Z0-9]))[A-Za-z0-9_\-/+=]{16,}")),
+    #   `Authorization: Basic <b64>` —— a distinct shape, and the credential is the whole value.
+    ("BASIC_AUTH",      re.compile(
+        r"(?i)(authorization\s*:\s*basic\s+)[A-Za-z0-9+/=]{16,}")),
 ]
 
 #  ⚠ **This pipeline's own LLM calls are logged as sessions.**  Claude Code records every call
@@ -329,6 +352,36 @@ def _selftest():
 
     # ③ **can the verification fail** —— an unmasked original must always be caught
     assert find_leaks(blob), "an unmasked original comes back clean —— the verification is dead"
+
+    # ③b **The labels people actually write.**  The keyword list was narrower than the corpus:
+    #     eight synthetic shapes passed both `mask()` and `find_leaks()` untouched (adversarial
+    #     review 2026-09-04).  This matters more than an ordinary masker gap because at
+    #     `openwiki_emit.py:377` `find_leaks` is the **only** control on the publish path.
+    for _name, _raw in {
+        "bare token": "token: sk-synthetic-AAAABBBBCCCCDDDDEEEEFFFF1111",
+        "bare key":   "key: synthetic-AAAABBBBCCCCDDDDEEEEFFFF2222",
+        "pw":         "pw: synthetic-AAAABBBBCCCCDDDD3333",
+        "DB_PASS":    "DB_PASS=synthetic-AAAABBBBCCCCDDDD4444",
+        "Korean":     "비밀번호: synthetic-AAAABBBBCCCCDDDD5555",
+        "basic auth": "Authorization: Basic c3ludGhldGljOnBhc3N3b3JkMTIzNDU2Nzg5",
+        "AccountKey": "AccountKey=c3ludGhldGljAAAABBBBCCCCDDDDEEEEFFFF6666==",
+    }.items():
+        _m, _ = mask(_raw)
+        assert _m != _raw, f"a {_name} secret passed the masker untouched"
+        assert not find_leaks(_m), f"a masked {_name} secret still reads as a leak"
+    #     …and the shapes deliberately **not** covered stay uncovered, so the omission is a
+    #     decision on record rather than something that quietly drifts in later.  A bare 32-hex
+    #     value is any git object id or checksum, and a false positive here refuses a
+    #     publication rather than redacting a line.
+    assert not find_leaks("fixed in 0123456789abcdef0123456789abcdef"), \
+        "a bare 32-hex value is treated as a secret —— every page quoting a commit now blocks"
+    #     ⚠ The 16-character floor is the knob the comment on `GENERIC_SECRET` names, so it needs
+    #        a case only **it** excludes.  These carry a digit or a capital, so the other
+    #        look-ahead lets them through and the length is the whole defence; without this,
+    #        lowering the floor to 1 left the self-check green while `key: v2` became a secret.
+    for _short in ("key: v2", "pass: OK", "token: A1", "password: x9"):
+        assert not find_leaks(_short), \
+            f"a two-character value read as a secret ({_short!r}) —— the length floor is gone"
 
     # ④ does it avoid false positives on ordinary prose (crying wolf and nobody believes it)
     plain = ("In today's meeting we talked about something starting with sk-.  The acronym AKIA "

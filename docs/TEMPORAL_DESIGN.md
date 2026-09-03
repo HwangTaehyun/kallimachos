@@ -12,7 +12,7 @@ Every basis is a measurement from this repository.  Estimates are marked `assump
 
 ## 0. What the problem is (measured)
 
-`group_nodes()` ([`src/lr_extract.py:439`](../src/lr_extract.py)) collects fragments like this
+`group_nodes()` ([`src/lr_extract.py:444`](../src/lr_extract.py)) collects fragments like this
 ([`:336-343`](../src/lr_extract.py)):
 
 ```python
@@ -145,8 +145,8 @@ Lines affected: `260 · 276 · 283 · 286 · 353-357 · 492` (`v.pop("descriptio
 ### 2.3 Merging happens **twice**
 
 After `lr_extract.group_nodes()`, [`entity_resolve.py:197 build_canon()`](../src/entity_resolve.py)
-merges again —— called from [`schema_v3.py:991`](../src/schema_v3.py) (inside `build_graph()`),
-and folded by `merged[k]["docs"] |= set(e["docs"])` at [`schema_v3.py:991`](../src/schema_v3.py).
+merges again —— called from [`schema_v3.py:1040`](../src/schema_v3.py) (inside `build_graph()`),
+and folded by `merged[k]["docs"] |= set(e["docs"])` at [`schema_v3.py:1040`](../src/schema_v3.py).
 
 Timeline combination rules in the second merge:
 

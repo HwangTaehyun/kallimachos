@@ -292,7 +292,12 @@ try:
     _NO_LLM_RAW = str(_kcfg.values().get("no_llm_paths", "") or "")
 except Exception:
     _NO_LLM_RAW = os.environ.get("KAL_NO_LLM", "")
-NO_LLM = tuple(x.strip().strip("/") for x in _NO_LLM_RAW.split(":") if x.strip())
+from schema_v3 import _clean_pathspec   # ← above the use: NO_LLM is built at import time
+#  Same cleaner as `schema_v3.SKIP_EXTRA` —— the two settings are the same shape and used to
+#  share the same defect: `./Private`, `../Private`, `Private/*` and a pasted absolute path were
+#  all accepted, displayed back, and matched nothing.  For a **transmission** gate that is the
+#  worst kind of failure: the screen says the folder is excluded and it is not.
+NO_LLM = _clean_pathspec(_NO_LLM_RAW)
 
 # To turn it off for one document, put `no_llm: true` in its frontmatter.
 from schema_v3 import NO_LLM_RE as NO_LLM_MARK   # one place —— see schema_v3

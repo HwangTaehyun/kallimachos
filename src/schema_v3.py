@@ -15,6 +15,7 @@ Changes against v2:
   ⑧ flat column removed — path is the sole identifier
 """
 import vault_path
+import unicodedata
 import os, re, glob, json, math, zlib, time, hashlib, collections, sys, datetime, functools
 
 # The model weights are already on disk.  Without this, every process round-trips to
@@ -102,8 +103,45 @@ SKIP_ROOT = ("kg", "references")   # kg: export_graph --obsidian output, and ind
 #  Priority is the same as every other setting: environment > ~/.kal/config.json > default.
 #  `kal_config` owns that decision —— reading os.environ directly here would ignore what the
 #  settings screen changed, and the user would hit "I turned it off and it still goes out".
-SKIP_EXTRA = tuple(x.strip().strip("/") for x in
-                   str(_CFG.get("skip_extra", "")).split(":") if x.strip())
+def _clean_pathspec(raw):
+    """A `:`-separated folder list from a setting → components, ready to compare.
+
+    `.strip("/")` alone accepted several spellings that then **silently matched nothing** ——
+    accepted by the settings screen, displayed back, and never firing (adversarial review
+    2026-09-04):
+
+        ./Private   ../Private   Private/*   /Users/me/vault/Private
+
+    The last is the worst: an absolute path becomes `Users/me/vault/Private`, which is not a
+    vault-relative prefix of anything.  Someone who pastes the path Finder gave them gets a
+    setting that looks applied and is not.  Leading `./`, `../` and a trailing `/*` are dropped;
+    an absolute path is made vault-relative when it is inside the vault and **refused loudly**
+    when it is not, because silently ignoring it is the failure being fixed.
+    """
+    out = []
+    for x in str(raw).split(":"):
+        x = x.strip()
+        if not x:
+            continue
+        if x.endswith("/*"):
+            x = x[:-2]
+        while x.startswith(("./", "../")):
+            x = x.split("/", 1)[1] if "/" in x else ""
+        if x.startswith("/"):
+            rel = os.path.relpath(x, os.path.abspath(VAULT))
+            if rel.startswith(".."):
+                raise SystemExit(
+                    f"❌ this folder setting is an absolute path outside the vault, so it can "
+                    f"never match: {x!r}\n   VAULT={VAULT}\n"
+                    f"   Write it relative to the vault root, e.g. 'Private' or 'work/Finance'.")
+            x = rel
+        x = x.strip("/")
+        if x:
+            out.append(x)
+    return tuple(out)
+
+
+SKIP_EXTRA = _clean_pathspec(_CFG.get("skip_extra", ""))
 
 
 #  Markers that identify this repository.  A copy holding both of these files is ours.
@@ -186,9 +224,20 @@ def is_skipped(path):
         return True
     if top in _self_copies():             # this project itself, placed inside the vault
         return True
+    #  ⚠ **Both sides normalised, because the filesystem is.**  `lr_extract.blocked_path` was
+    #     fixed for this and its sibling ninety lines away was not —— APFS is case-**insensitive**
+    #     and normalisation-**preserving**, so `KAL_SKIP=journal` did not skip `Journal/`.  This
+    #     gate is also `lr_extract`'s **first** filter, so the miss reached transmission, not just
+    #     the local index: reproduced 2026-09-04, a canary in `Journal/` arrived in the outgoing
+    #     chunk set.  Korean folder names make the NFC/NFD half live here too.
+    #     Normalising can only skip more; the component anchoring below still stops `journal`
+    #     from matching `journalism/`.
+    def _norm(x):
+        return unicodedata.normalize("NFC", x).casefold()
+    nparts = [_norm(c) for c in parts]
     for extra in SKIP_EXTRA:              # user-specified —— matched as a path prefix
-        e = extra.split("/")
-        if parts[:len(e)] == e:
+        e = [_norm(c) for c in extra.split("/")]
+        if nparts[:len(e)] == e:
             return True
     return False
 
@@ -1776,6 +1825,40 @@ def _selftest():
             "---\ntitle: r\n---\n" + "본문 " * 40 + "\n")
         assert indexable_count(_td, with_unreadable=True) == (1, 1), \
             f"a readable document beside an unreadable one: {indexable_count(_td, with_unreadable=True)}"
+    # ── The two path gates must honour the same spellings ───────────────────────────────
+    #  `lr_extract.blocked_path` was normalised for case and NFC/NFD and its sibling ninety lines
+    #  away was not, so `KAL_SKIP=journal` did not skip `Journal/` —— and because `is_skipped` is
+    #  `lr_extract`'s **first** filter, the miss reached transmission, not just the local index.
+    #  Reproduced 2026-09-04 with a canary in the outgoing chunk set.
+    #  Driven through both real functions, because "the two disagreed" is the whole defect.
+    import lr_extract as _lx
+    _keep = (SKIP_EXTRA, _lx.NO_LLM, VAULT)
+    with _tf.TemporaryDirectory() as _sd:
+        globals()["VAULT"] = _sd
+        for _spelling in ("journal", "Journal", "./Journal", "Journal/*",
+                          os.path.join(_sd, "Journal")):
+            globals()["SKIP_EXTRA"] = _clean_pathspec(_spelling)
+            assert is_skipped(os.path.join(_sd, "Journal", "a.md")), \
+                f"KAL_SKIP={_spelling!r} did not skip Journal/ —— accepted and never fires"
+        #  NFD, because this vault's folder names are Korean and macOS stores them decomposed.
+        _nfd = unicodedata.normalize("NFD", "비공개")
+        globals()["SKIP_EXTRA"] = _clean_pathspec("비공개")
+        assert is_skipped(os.path.join(_sd, _nfd, "a.md")), "an NFD folder name was not skipped"
+        #  …and the anchoring still holds, or "normalise everything" would pass by blocking all.
+        globals()["SKIP_EXTRA"] = _clean_pathspec("journal")
+        assert not is_skipped(os.path.join(_sd, "journalism", "a.md")), \
+            "`journal` matched `journalism/` —— the component anchoring is gone"
+        assert not is_skipped(os.path.join(_sd, "notes", "journal.md")), \
+            "`journal` matched a file of that name below the root"
+        #  An absolute path outside the vault must be **refused**, not silently ignored.
+        try:
+            _clean_pathspec("/etc/passwd")
+            raise AssertionError("an absolute path outside the vault was accepted silently")
+        except SystemExit:
+            pass
+    globals()["SKIP_EXTRA"], _lx.NO_LLM, globals()["VAULT"] = _keep
+    print("  ✅ both path gates honour the same spellings (case · NFD · ./ · /* · absolute)")
+
     print("  ✅ present-but-unreadable counts as not indexable, and is counted separately")
 
     print("  ✅ a rebuild refuses to replace a populated DB with an empty vault (and --allow-shrink passes)")
