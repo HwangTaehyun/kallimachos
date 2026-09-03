@@ -584,8 +584,26 @@ def classify_origin(rel, raw):
 #  the key in a body does not trip it.
 FM_SCAN_CHARS = 4000
 
+#  ⚠ **A YAML tag or an anchor may sit between the colon and the value.**  The bundle's pages are
+#     written by a model through an external MCP tool (`openwiki_submit_page`), which hands it the
+#     *syntax* and not just the values —— so `no_llm: !!bool true` and `no_llm: &a true` are forms
+#     that can actually arrive here, unlike in `openwiki_enrich`, where the model supplies JSON
+#     values and this tool writes the YAML.  Both parse to `True` and both used to be missed, and
+#     the fail-closed scan does not help because it uses this same constant.
+#
+#     ⚠ **An alias (`no_llm: *a`) is deliberately not covered.**  Its value lives at the anchor,
+#        elsewhere in the document, and a regex cannot resolve it.  A pattern that matched `*a`
+#        would be guessing —— and half-covering aliases is worse than visibly not covering them,
+#        because it reads as handled.  Recorded rather than attempted.
+#     ⚠ `y` is **not** a boolean here.  An adversarial review listed it as a missed true value;
+#        measured, `yaml.safe_load("no_llm: y")` gives the **string** `'y'` (YAML 1.2 dropped the
+#        y/n forms and PyYAML follows it).  Blocking on it would be blocking on a value the parser
+#        does not read as consent.  (2026-09-04)
 NO_LLM_RE = re.compile(
-    r"""^["']?no_llm["']?[ \t]*:[ \t]*["']?(?:true|yes|on)["']?[ \t]*(?:\#.*)?$""",
+    r"""^["']?no_llm["']?[ \t]*:[ \t]*
+        (?:!(?:!|<)[^\s>]*>?[ \t]*)?      # an explicit tag —— !!bool, !!python/bool, !<tag>
+        (?:&[^\s]+[ \t]+)?                # an anchor definition, whose value follows on this line
+        ["']?(?:true|yes|on)["']?[ \t]*(?:\#.*)?$""",
     re.M | re.I | re.X)
 
 
@@ -1664,6 +1682,26 @@ def _selftest():
     #        `---` at column zero, so `FM_OPEN_RE`'s `\ufeff?` was never exercised in the
     #        dangerous direction —— dropping it, and even making the opener match nothing at
     #        all, left this whole self-check green (measured 2026-09-04).
+    #  ⚠ **A tag or an anchor may sit between the colon and the value.**  The bundle's pages
+    #     come from a model writing YAML through an external MCP tool, so it chooses the
+    #     syntax —— unlike `openwiki_enrich`, where the model supplies JSON values and this
+    #     project writes the YAML.  Both of these parse to True and both used to be missed.
+    for _y in ("no_llm: !!bool true", "no_llm: &a true", 'no_llm: !!bool "true"',
+               "no_llm:  !!bool  yes"):
+        assert doc_meta(f"---\ntitle: t\n{_y}\n---\nbody\n")[2], \
+            f"a YAML spelling that parses to True was missed: {_y!r}"
+    #     …and the ones that must stay open, or "block anything containing no_llm" would
+    #     satisfy the loop above.  `y` is here because it is **not** a boolean —— measured,
+    #     `yaml.safe_load('no_llm: y')` gives the string 'y'.  An alias is here because its
+    #     value lives at the anchor and a regex cannot resolve it: uncovered, on purpose.
+    #     The last two keep the tag pattern **narrow**: a greedy one would match `true` anywhere
+    #     on the line rather than as the value, which is over-blocking a page that merely talks
+    #     about the key —— the defect `kal_mcp.py:356` was already fixed for once.
+    for _n in ("no_llm: false", "no_llm: !!bool false", "no_llm: y", "no_llm: *a",
+               "no_llm: false  # it used to be true", "no_llm: not-true-any-more"):
+        assert not doc_meta(f"---\ntitle: t\n{_n}\n---\nbody\n")[2], \
+            f"a non-true value closed the gate: {_n!r}"
+
     for _broken in ("---\nno_llm: true\nbody\n", "---\nno_llm: true\n----\nbody\n",
                     "---\nno_llm: true\n--- x\nbody\n", " ---\nno_llm: true\n ---\nbody\n",
                     "---\nno_llm: true",

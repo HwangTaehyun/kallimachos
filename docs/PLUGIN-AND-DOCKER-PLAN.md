@@ -332,7 +332,7 @@ diverges silently. A startup gate goes in.
 | 1' | whether `${user_config.*}` substitutes inside `args` | — | ✅ **settled by measurement** (§5.1 table) |
 | 2 | cold start (including pull), measured | can only be measured once it is on a registry | open |
 | 3 | the `ghcr.io/hwangtaehyun/kal` repository does not exist | has to be created. `kal_mcp.py`'s guidance text **already names this image to users** | open |
-| 4 | the `no_llm` gate ships effectively disabled | 0 documents in the vault have `no_llm: true` → `llm_gate` always passes (`schema_v3.py:862`) | **§6 step 11** |
+| 4 | the `no_llm` gate ships effectively disabled | 0 documents in the vault have `no_llm: true` → `llm_gate` always passes (`schema_v3.py:880`) | **§6 step 11** |
 | 5 | `SKIP` is coupled to this machine's folder name | substring matching (`schema_v3.py:197` — `SKIP_ANY` is at `:85`). Cloning as `kal/` gets it indexed and sent | **§6 step 12** |
 | 6 | the `CLAUDE_DIR` mount is credentials on Linux | currently **dev-compose only** — `.mcp.json` does not mount it | **§6 step 13** |
 | 7 | stdout contamination from `docker run` itself | 0 lines in our environment. Other docker versions and platforms unverified | open |

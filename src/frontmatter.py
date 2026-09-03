@@ -36,12 +36,21 @@ despite a three-character body, because the frontmatter carried it over the 60-c
    so no migration was needed then.  The sentence is here for the next fence or `FM_KEEP` change,
    when it will not be.  (adversarial review 2026-09-04)
 
-⚠ So who is `\r?\n` for, given every file-read caller has already lost its `\r`?  **`openwiki_enrich`**
-   —— it matches against **LLM replies**, which are in-memory strings and can carry CRLF.  Written
-   down because a reader who checks only the file callers will correctly conclude it is dead weight
-   and simplify it out, and only that one caller will break.
+⚠ **Nothing needs `\r?\n` today, and it stays anyway.**  Every caller reads through
+   `open(..., encoding="utf-8")`, so universal newlines have already removed the `\r`.  This
+   paragraph used to name `openwiki_enrich` as the one that needed it, on the theory that it
+   matches against LLM replies —— **that is false**: its `body_of`/`insert_keys` take the file
+   text (`openwiki_enrich.py:258,277`), and the model's reply goes only to `parse_reply`, which
+   extracts JSON and never touches a fence.  (adversarial review 2026-09-04, verified)
+
+   It is kept as defence in depth —— a byte-mode reader or a network-sourced string would need
+   it and costs nothing to tolerate.  The honest reason is written here **because a comment that
+   names a caller which does not exist is not protection**: the next person checks that caller,
+   finds it does not do what the comment says, and now has grounds to delete the tolerance *and*
+   distrust the paragraph.  This repository has paid for that shape twice already.
 """
 import re
+
 
 #  The block itself, as one group.  This is the form eleven of the twelve sites want.
 FM_RE = re.compile(r"\A﻿?\s*---[ \t]*\r?\n(.*?)\r?\n(?:---|\.\.\.)[ \t]*\r?\n", re.S)

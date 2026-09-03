@@ -106,7 +106,11 @@ SECRETS = [
         r"(?i)((?<![A-Za-z0-9])(?:api[_\-]?key|secret[_\-]?key|access[_\-]?token|"
         r"auth[_\-]?token|client[_\-]?secret|password|passwd|"
         r"(?:[a-z0-9]+[_\-])?(?:token|secret|passwd|password|pass|pwd|pw|key)|"
-        r"accountkey|비밀번호|암호)\s*[=:]\s*[\"']?)"
+        #      `datadog:` / `dd-api:` in their bare forms —— `datadog_api_key:` was already caught
+        #      (it contains `api_key`, and the lookbehind lets `_api_key` through).  Measured by
+        #      the review across 3,742 session files: 3 hits, zero md5/sha collateral.  Added as a
+        #      **label**, not as a shape, which is what keeps the 3,068-match 32-hex rule out.
+        r"datadog|dd[_\-]?api|accountkey|비밀번호|암호)\s*[=:]\s*[\"']?)"
         r"(?=[A-Za-z0-9_\-/+=]{16,})(?=[^\s\"']*(?-i:[A-Z0-9]))[A-Za-z0-9_\-/+=]{16,}")),
     #   `Authorization: Basic <b64>` —— a distinct shape, and the credential is the whole value.
     ("BASIC_AUTH",      re.compile(
