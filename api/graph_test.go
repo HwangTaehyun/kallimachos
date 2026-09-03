@@ -415,27 +415,25 @@ func TestStartRunRefusesRepoStepWithoutRepo(t *testing.T) {
 	}
 }
 
-// Every step is classified against the empty-vault guard, and a new one has to be classified too.
+// Every step declares whether the empty-vault guard covers it, and the declaration is checked
+// against what the guard actually derives.
 //
-//	The first version of this pinned the **guarded set** —— it built a map of steps the condition
-//	already matched, then checked that map against {extract, index, sync}.  A step that never
-//	enters the map cannot change it, so both halves were blind to the case this exists for.
-//	Reproduced 2026-09-04 by injecting into status.py:
+//	Three versions of this, and the first two were wrong in instructive ways.
 //
-//	    {"id": "summarise", "reads": "your notes **/*.md", "writes": "~/.kal/digest.json", …}
+//	 ① It pinned the **guarded set** —— a map of steps the condition already matched, compared
+//	    against {extract, index, sync}.  A step that never enters the map cannot change it, so
+//	    injecting `{"id":"summarise","reads":"your notes **/*.md","writes":"~/.kal/digest.json"}`
+//	    left `go test` green: reads the vault, writes a file, completely ungated.
+//	 ② Inverted to walk every step, but against a `want` table **in this file** —— which works,
+//	    and is a second roster living where the person adding a step will never look.  This
+//	    repository has already paid for one of those (the CI check list that drifted 27 vs 18).
+//	 ③ The requirement moved into the data: every step declares `vault_derived` beside itself.
 //
-//	—— reads the vault, writes a file, completely ungated, `go test` green.  That is the
-//	`lr_kg.json` shape one wording away, and the reason `WritesDB` failed in the first place.
-//
-//	So the iteration is inverted: walk **every** step and demand an entry here.  Adding one to
-//	status.py fails this test until somebody decides, which is the property a typed field was
-//	supposed to buy —— without a field anyone has to remember to set.  It also keeps a reworded
-//	`reads` loud: the derived answer flips against a pinned expectation instead of quietly
-//	shrinking a set.
-//
-//	The table is a second place the step list lives, and that is the price.  It is paid in a test
-//	that fails by name the moment it drifts, rather than in a runtime hole nobody sees.
-func TestEveryStepIsClassifiedAgainstTheVaultGuard(t *testing.T) {
+//	This is not the `WritesDB` trap again, and the difference is the whole argument: `WritesDB`
+//	was **load-bearing at runtime**, so forgetting it failed silently, in production, eight hours
+//	deep.  `vault_derived` is load-bearing at **test time only** —— forgetting it fails on the next
+//	`go test`, in the file being edited, and the worst case is a red build.
+func TestEveryStepDeclaresWhetherTheVaultGuardCoversIt(t *testing.T) {
 	py := filepath.Join("..", ".venv", "bin", "python")
 	if _, err := os.Stat(py); err != nil {
 		t.Fatalf("the project venv is missing (%v) —— run `uv sync`", err)
@@ -444,57 +442,50 @@ func TestEveryStepIsClassifiedAgainstTheVaultGuard(t *testing.T) {
 	if err := s.loadSteps(); err != nil {
 		t.Fatalf("could not load the real step list: %v", err)
 	}
-
-	//  true  = builds from the vault, so an empty one would overwrite something with nothing.
-	//  false = does not read the vault at all, or writes nothing.  The reason matters more than
-	//          the value; a bare `false` is what lets the next person "fix" it.
-	want := map[string]bool{
-		"distill": false, //  reads ~/.claude/projects/**, not the vault
-		//  ⚠ `promote` **writes** the vault and does not read it, so a guard keyed on "reads the
-		//     vault" is the wrong shape for it.  It is the one step that rewrites the user's
-		//     notes, and it is guarded in Python where the deletion happens ——
-		//     `is_openwiki_bundle` + `vault_is_git` + `would_shrink`.  Do not pull it in here.
-		//
-		//     ⚠ The asymmetry is a **plan, not an oversight**: every vault-*reading* step is gated
-		//        in a Go HTTP handler, while the one vault-*writing* step is gated in Python beside
-		//        its writes.  After `lr_kg.json` and the `mode="overwrite"` finding, Python next to
-		//        the write is the place we settled on —— so `promote` is the one that is already
-		//        right, and the direction of travel is the reader guards following it there, leaving
-		//        Go with one advisory pre-flight allowed to be approximate.  Not done here: the
-		//        current guard is tested and works, and moving it is a change to make deliberately.
-		"promote":       false,
-		"extract":       true,  //  vault → ~/.kal/lr_kg.json.  The one that got through.
-		"index":         true,  //  vault → every table
-		"export":        false, //  reads LanceDB
-		"refresh_kg":    false, //  a combo —— it re-runs the steps above, which are each guarded
-		"apply_aliases": false, //  combo
-		"rebuild_all":   false, //  combo
-		"sync":          true,  //  vault → chunks · ix_* · stale_docs
-		"verify":        false, //  reads docs/ and the DB, writes nothing
+	if len(s.steps) == 0 {
+		t.Fatal("no steps loaded —— this test would pass by finding nothing to check")
 	}
+
 	for id, st := range s.steps {
-		exp, known := want[id]
-		if !known {
-			t.Errorf("step %q is not classified here —— decide whether the empty-vault guard "+
-				"covers it and add it to `want` with the reason (reads=%q writes=%q)",
-				id, st.Reads, st.Writes)
+		//  ① totality.  A nil pointer is a step whose author never answered the question.
+		if st.VaultDerived == nil {
+			t.Errorf("step %q does not declare `vault_derived` —— add it to status.py beside the "+
+				"step: true if an empty vault would make it overwrite something with nothing "+
+				"(reads=%q writes=%q)", id, st.Reads, st.Writes)
 			continue
 		}
-		//  ⚠ Ask the production function.  Re-deriving the expression here left mutations of the
-		//     handler's copy green (measured 2026-09-04) —— the test agreed with itself.
-		if got := buildsFromVault(st); got != exp {
-			t.Errorf("step %q: the guard %s it, but this table says %s (reads=%q writes=%q)",
-				id, map[bool]string{true: "covers", false: "does not cover"}[got],
-				map[bool]string{true: "it should", false: "it should not"}[exp],
-				st.Reads, st.Writes)
+		//  ② agreement.  Runtime uses `buildsFromVault`; this is the cross-check.  A reworded
+		//     `reads` flips the derived answer against the declared one and names both halves,
+		//     so the author sees which of the two they meant to change.
+		if got := buildsFromVault(st); got != *st.VaultDerived {
+			t.Errorf("step %q: declared vault_derived=%v but the guard derives %v from its own "+
+				"fields (reads=%q writes=%q) —— change whichever one is wrong, deliberately",
+				id, *st.VaultDerived, got, st.Reads, st.Writes)
 		}
 	}
-	//  And the other way —— a name in the table that no longer exists is a stale expectation
-	//  that would quietly stop testing anything.
-	for id := range want {
-		if _, ok := s.steps[id]; !ok {
-			t.Errorf("`want` classifies %q, which status.py no longer declares", id)
+
+	//  A sanity floor: the shipped list must still contain the three this guard exists for, or a
+	//  status.py that declared everything `false` would satisfy both checks above.
+	for _, id := range []string{"extract", "index", "sync"} {
+		st, ok := s.steps[id]
+		if !ok {
+			t.Errorf("status.py no longer declares %q", id)
+			continue
 		}
+		if st.VaultDerived == nil || !*st.VaultDerived {
+			t.Errorf("%q is declared outside the empty-vault guard —— it builds from the vault, "+
+				"and `extract` in this position is what overwrote an eight-hour graph", id)
+		}
+	}
+	//  ⚠ `promote` writes the vault and does not read it, so a guard keyed on "builds from the
+	//     vault" is the wrong shape for it.  It is guarded in Python beside its writes ——
+	//     `is_openwiki_bundle` + `vault_is_git` + `would_shrink`.  The Go/Python split is a plan,
+	//     not an oversight: after `lr_kg.json` and the `mode="overwrite"` finding, Python next to
+	//     the write is the place we settled on, so `promote` is the one already right and the
+	//     reader guards are what eventually follow it there.
+	if st, ok := s.steps["promote"]; ok && st.VaultDerived != nil && *st.VaultDerived {
+		t.Error("`promote` is declared inside the empty-vault guard —— it writes the vault, it " +
+			"does not build from it, and its guards live in Python")
 	}
 }
 

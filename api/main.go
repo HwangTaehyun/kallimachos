@@ -63,6 +63,17 @@ type Step struct {
 	//  api image carries only src/ and the two yml files, so it can never work here.  Same
 	//  reason as WritesVault above: absent from this struct, Python's value is dropped.
 	NeedsRepo bool `json:"needs_repo"`
+	//  Does an empty vault mean this step overwrites something with nothing —— **declared** by the
+	//  step, next to the step, and cross-checked against `buildsFromVault` by the test.  Runtime
+	//  never reads it.  Its job is to make adding a step force a decision in the file the author
+	//  already has open, instead of in a roster kept somewhere else.
+	//
+	//  ⚠ A **pointer**, so "unset" is distinguishable from `false`.  A plain bool zero-values to
+	//     false, which is itself a valid answer, and the totality check would then accept a
+	//     missing key silently —— the same shape as the `WritesDB` hole, one level down.  This is
+	//     the sibling of the hazard the comment above records: there, a field absent from the
+	//     struct; here, a field present but indistinguishable from its zero value.
+	VaultDerived *bool `json:"vault_derived"`
 }
 
 type Group struct {

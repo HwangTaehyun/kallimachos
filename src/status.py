@@ -320,7 +320,7 @@ STEPS = [
      "desc": "~/.claude conversation logs → brain-ingest documents. Credentials are masked.",
      "reads": "~/.claude/projects/**", "writes": "~/.kal/distilled/",
      "cmd": ["distill_sessions.py", "--workers", "8"],
-     "minutes": 20, "needs_llm": True, "writes_db": False},
+     "minutes": 20, "needs_llm": True, "writes_db": False, "vault_derived": False},
     {"id": "promote", "title": "Promote to vault", "group": "main", "order": 2,
      "desc": "Move the distilled documents into the vault and commit.",
      "reads": "~/.kal/distilled/", "writes": "vault raw/conversations/sessions/",
@@ -329,19 +329,19 @@ STEPS = [
      #     the vault was the one step that did not ask.  (deep review 2026-08-28)
      "writes_vault": True,
      "cmd": ["promote_distilled.py"],
-     "minutes": 1, "needs_llm": False, "writes_db": False},
+     "minutes": 1, "needs_llm": False, "writes_db": False, "vault_derived": False},
     {"id": "extract", "title": "Extract knowledge graph", "group": "main", "order": 3,
      "desc": "For every 2,400-char chunk, an LLM extracts entities and relations. Unchanged chunk hashes are not re-sent.",
      "reads": "vault **/*.md", "writes": "~/.kal/lr_kg.json",
      "cmd": ["lr_extract.py"],
-     "minutes": 30, "needs_llm": True, "writes_db": False},
+     "minutes": 30, "needs_llm": True, "writes_db": False, "vault_derived": True},
     {"id": "index", "title": "Rebuild knowledge DB", "group": "main", "order": 4,
      "desc": "Chunk the vault into {chunk_chars} chars, embed, then read lr_kg.json to merge and "
              "place entities. Old LanceDB versions are cleaned up at the end.",
      "reads": "vault **/*.md + ~/.kal/lr_kg.json",
      "writes": "documents · chunks · ix_* · lr_*",
      "cmd": ["schema_v3.py"],
-     "minutes": 3, "needs_llm": False, "writes_db": True},
+     "minutes": 3, "needs_llm": False, "writes_db": True, "vault_derived": True},
     {"id": "export", "title": "Export graph", "group": "main", "order": 5,
      "desc": "Louvain clustering + LLM labels \u2192 viewer artifacts. The plugin bundle is only "
              "rebuilt on the host (the container has no plugin/).",
@@ -349,7 +349,7 @@ STEPS = [
      # Run on the host with `just export`, export_all.sh also builds the plugin bundle.
      "reads": "LanceDB", "writes": "graphml · graph3d.html · kal-graph.json",
      "cmd": ["export_all.sh"],
-     "minutes": 2, "needs_llm": True, "writes_db": False},
+     "minutes": 2, "needs_llm": True, "writes_db": False, "vault_derived": False},
 
     # ── Bundles ───────────────────────────────────────────────────
     # Re-run the steps above in order.  runs is that list.
@@ -358,18 +358,18 @@ STEPS = [
              "chunks reach the LLM.",
      "runs": ["extract", "index", "export"],
      "cmd": ["refresh_kg.py"],
-     "minutes": 35, "needs_llm": True, "writes_db": True},
+     "minutes": 35, "needs_llm": True, "writes_db": True, "vault_derived": False},
     {"id": "apply_aliases", "title": "Apply aliases only (fast)", "group": "combo", "order": 0,
      "desc": "Apply aliases.yml to the graph. Skips extraction, so it is fast, but newly merged "
              "entities get stitched descriptions instead of an LLM re-summary.",
      "runs": ["index", "export"],
      "cmd": ["refresh_kg.py", "--aliases-only"],
-     "minutes": 5, "needs_llm": True, "writes_db": True},
+     "minutes": 5, "needs_llm": True, "writes_db": True, "vault_derived": False},
     {"id": "rebuild_all", "title": "Full rebuild", "group": "combo", "order": 0,
      "desc": "Everything from distill to export, including weight tuning and evaluation.",
      "runs": ["distill", "promote", "extract", "index", "export", "verify"],
      "cmd": ["rebuild_all.sh"],
-     "minutes": 60, "needs_llm": True, "writes_db": True},
+     "minutes": 60, "needs_llm": True, "writes_db": True, "vault_derived": False},
 
     # ── Partial refresh ───────────────────────────────────────────
     {"id": "sync", "title": "Incremental sync", "group": "partial", "order": 0,
@@ -377,7 +377,7 @@ STEPS = [
              "**Cannot fix the KG**: that needs an LLM, so it just marks stale_docs and moves on.",
      "reads": "vault **/*.md", "writes": "chunks · ix_* · stale_docs",
      "cmd": ["sync_v3.py"],
-     "minutes": 1, "needs_llm": False, "writes_db": True},
+     "minutes": 1, "needs_llm": False, "writes_db": True, "vault_derived": True},
 
     # ── Checks ────────────────────────────────────────────────────
     {"id": "verify", "title": "Verify docs", "group": "check", "order": 0,
@@ -390,7 +390,7 @@ STEPS = [
      #    not fix it either: the links reach `plugin/` (263MB) and `web/`, which .dockerignore
      #    excludes on purpose.  It is a host step.  (measured 2026-09-03 by running it through
      #    /api/runs: run 20260903-164655 failed with ROOTS=['/app'].)
-     "minutes": 1, "needs_llm": False, "writes_db": False, "needs_repo": True},
+     "minutes": 1, "needs_llm": False, "writes_db": False, "vault_derived": False, "needs_repo": True},
 ]
 GROUPS = [
     {"id": "main", "title": "Full pipeline",
@@ -1163,6 +1163,46 @@ def _selftest():
             assert _dd["vault_shrunk"] is True, \
                 "most of the documents missing did not read as a shrunken vault"
             _sh.rmtree(_part, ignore_errors=True)
+
+        #  ⚠ **Exactly at the line.**  The arm above samples one point (2 of 3 missing against a
+        #     boundary of 1.5), so `>` and `>=` agree there and swapping them survived the whole
+        #     self-check (measured 2026-09-04).  With three documents no integer can land on the
+        #     boundary at all, so this builds a **four**-row table: half missing is 2 against 2,
+        #     where `>` says "not shrunken" and `>=` says "shrunken" —— `sync` on one side, `vault`
+        #     on the other, so the operator is the entire answer.
+        #       ⚠ `meta` is not optional in the fixture: `collect()` returns `_empty_status` unless
+        #         both tables exist, and a first version without it reported `indexed=0`, which made
+        #         every assertion below pass against a computation that never ran.  Paths are flat
+        #         and `schema_v3.VAULT` is rebound too, because `is_skipped` resolves against **its**
+        #         global —— with either wrong, nothing matches and `deleted` is simply everything.
+        import schema_v3 as _sv
+        _bdir, _bvault = _tf.mkdtemp(), _tf.mkdtemp()
+        _bdb = _lc.connect(_bdir)
+        _bdb.create_table("documents", data=[
+            {"doc_id": f"b{i}", "path": f"n{i}.md", "no_llm": False,
+             "title": f"n{i}", "mtime": 1.0, "sha": "b" * 8} for i in range(4)])
+        _bdb.create_table("meta", data=[{"key": "built_at", "value": "0"}])
+        _keepsv = _sv.VAULT
+        try:
+            globals()["DB"], _S.VAULT, _sv.VAULT = _bdir, _bvault, _bvault
+            for _n in ("n0.md", "n1.md"):
+                open(os.path.join(_bvault, _n), "w", encoding="utf-8").write("x" * 200 + "\n")
+            _bd = collect()["documents"]
+            assert len(_bd["deleted"]) == 2, \
+                f"the fixture is not on the boundary —— deleted={len(_bd['deleted'])}, expected 2"
+            assert _bd["vault_shrunk"] is False, (
+                "half the documents missing read as a shrunken vault —— the comparison is `>` "
+                "(more than half), and `>=` would advise `vault` on an ordinary half-empty scan")
+            #  …and one past the line fires, or the assertion above is satisfied by a computation
+            #  that never returns True at all.
+            os.remove(os.path.join(_bvault, "n1.md"))
+            assert collect()["documents"]["vault_shrunk"] is True, \
+                "three of four missing did not read as a shrunken vault"
+        finally:
+            _sv.VAULT = _keepsv
+            _sh.rmtree(_bvault, ignore_errors=True)
+            _sh.rmtree(_bdir, ignore_errors=True)
+
         _sh.rmtree(_real, ignore_errors=True)
     finally:
         globals()["DB"], _S.VAULT = _keepdb, _keepvault
