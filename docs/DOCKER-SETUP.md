@@ -156,7 +156,10 @@ screen cannot open"* — the DB holds one vault and the UI reads another.
 
 ```bash
 just openwiki-adopt          # or: just vault <path>
-docker compose up -d         # ← recreates api with the new mount
+docker compose -f docker-compose.yml up -d   # ← recreates api with the new mount
+#  ⚠ Not a bare `docker compose up -d`: that auto-loads docker-compose.override.yml and silently
+#    turns a production stack into the vite dev server with src/ mounted (measured 2026-09-05).
+#    `just up-prod` is the same command with the vault check in front.
 ```
 
 Check it:

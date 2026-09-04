@@ -253,7 +253,9 @@ the original vault. Nothing errors. It shows up as *"search finds things the scr
 
 ```bash
 just openwiki-adopt
-docker compose up -d          # the container follows only when the mount is retaken
+docker compose -f docker-compose.yml up -d   # the container follows only when the mount is retaken
+#  ⚠ `-f docker-compose.yml` on purpose —— a bare `docker compose up -d` layers the dev override
+#    and replaces the production web with the vite dev server (see DOCKER-SETUP.md).
 ```
 
 Reversible: `just vault <the-original-vault>` and `docker compose up -d` again.
