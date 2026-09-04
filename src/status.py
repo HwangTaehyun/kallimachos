@@ -1007,6 +1007,37 @@ def _selftest():
             f"{os.path.basename(_f)}: assigned twice at module level, and the later one wins "
             f"silently —— " + ", ".join(f"`{n}` at :{a} then :{b}" for n, a, b in _dup))
 
+    # ⑧c **Does any self-check search its own module for a literal it writes inline.**
+    #    `assert "<text>" not in inspect.getsource(sys.modules[__name__])` can never pass: the
+    #    assert line **is** part of that source, so the literal always matches itself.  It is a
+    #    check that always fires, which is as useless as one that never does and worse —— the
+    #    first person to see the red learns to ignore it.
+    #      Measured 2026-09-04: `kal_mcp.py` carried exactly this from the commit that introduced
+    #      it and had never once passed.  Two days, unnoticed, because `mcp-test` runs in neither
+    #      CI (which calls `selftest-py`) nor anyone's routine —— only `just selftest` reaches it,
+    #      and the failure was therefore invisible rather than annoying.
+    #      The fix is to scope `getsource` to the **function** that could regress; the assertion
+    #      then sits outside the text it searches.
+    for _f in sorted(_glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), "*.py"))):
+        try:
+            _tree = _ast.parse(open(_f, encoding="utf-8").read())
+        except SyntaxError:
+            continue
+        for _node in _ast.walk(_tree):
+            if not isinstance(_node, _ast.Assert):
+                continue
+            _src = _ast.dump(_node)
+            #  `getsource(sys.modules[__name__])` —— the whole-module form —— together with a
+            #  string constant in the same assertion.  Scoping to a function does not match.
+            if "getsource" in _src and "sys" in _src and "modules" in _src and \
+                    any(isinstance(n, _ast.Constant) and isinstance(n.value, str) and n.value
+                        for n in _ast.walk(_node)):
+                raise AssertionError(
+                    f"{os.path.basename(_f)}:{_node.lineno}: this assertion searches its **own "
+                    f"module's** source for a literal written on that same line, so it matches "
+                    f"itself and can never pass.  Scope `getsource` to the function that could "
+                    f"regress instead.")
+
     # ⑨ **Are published ports bound to loopback only.**
     #    This app has no authentication (docs/ARCHITECTURE.md:628).  Loopback binding is the
     #    **only** thing standing between it and "anyone on the network can run the pipeline

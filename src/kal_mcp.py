@@ -820,9 +820,37 @@ def _selftest():
     _talks  = '---\ntitle: how-to\n---\n```yaml\nno_llm: true\n```\n'
     assert doc_meta(_marked)[2], "a marked note stopped being gated"
     assert not doc_meta(_talks)[2], "a note documenting the key was gated"
+    #  ⚠ **This assertion used to match itself, and had never once passed.**  It searched the
+    #     whole module for the literal `NO_LLM_RE.search(t[`, which appears both in the comment
+    #     above and in the assertion's own line —— so it fired from the commit that introduced it
+    #     (be31e57) until 2026-09-04.  Nothing noticed for two days because `mcp-test` runs in
+    #     neither CI (`.github/workflows/plugin.yml` runs `just selftest-py`) nor the routine
+    #     everyone was using; only `just selftest` reaches it.  A check that **always** fires is
+    #     as useless as one that never does, and worse: the first person to see the red learns to
+    #     ignore it.
+    #     Scoped to the functions that could actually regress —— the assertion and its comment
+    #     live in `_selftest`, so they are outside the text being searched.
     import inspect as _insp
-    assert "NO_LLM_RE.search(t[" not in _insp.getsource(sys.modules[__name__]), \
-        "the refs path went back to scanning the head of the file instead of the frontmatter"
+    for _fn in (_docs_index, refs_of):
+        assert "NO_LLM_RE.search(" not in _insp.getsource(_fn), \
+            f"{_fn.__name__} went back to scanning raw text instead of the frontmatter"
+    #  ⚠ …and "does it still consult the gate" has to be **behavioural**, not textual.  A first
+    #     version asserted the string `no_llm` was present in the source, which survives
+    #     `if False:` untouched —— the mutation stayed green.  Drive the function against a
+    #     document that carries the mark and check it is absent from the result.
+    _real_tbl = globals()["tbl"]
+    globals()["tbl"] = lambda _n: type("T", (), {"to_arrow": lambda self: type("A", (), {
+        "to_pylist": lambda self: [
+            {"doc_id": "open", "path": "a.md", "no_llm": False},
+            {"doc_id": "shut", "path": "b.md", "no_llm": True},
+        ]})()})()
+    try:
+        _idx = _docs_index()
+        assert "open" in _idx, "_docs_index dropped an ordinary document"
+        assert "shut" not in _idx, \
+            "_docs_index returned a no_llm document —— the gate is not applied any more"
+    finally:
+        globals()["tbl"] = _real_tbl
     row, _ = resolve("obsidian")
     assert row, "if obsidian is not found, name resolution is broken"
     assert resolve("claudecode")[0], "the merge_key path is broken (name_norm alone misses)"
