@@ -33,8 +33,15 @@ PY="${KAL_PYTHON:-python3}"
 KAL_HOME="${KAL_HOME:-$HOME/.kal}"
 KAL_PATH="${KAL_PATH:-$KAL_HOME/db}"
 #  ⚠ No default —— it does not quietly fall back to the author's path (2026-08-25).
-VAULT="${KAL_VAULT:-}"
-[ -n "$VAULT" ] || { echo "  ❌ Please set KAL_VAULT —— the folder holding your notes." >&2; exit 1; }
+#  ⚠ …but it must look **where `just vault` wrote**, not only at the environment.  Every Python
+#     entry point resolves through `vault_path.vault()` (environment → ~/.kal/config.json → .env);
+#     these two shell scripts were left out of that repair, whose own comment records it as
+#     "only `schema_v3` read the config and the other nine did not".  Result: `just index` worked
+#     from a clean shell and `just export` died telling the user to set a variable the settings
+#     screen had already stored.  Reproduced 2026-09-04.  Ask the same resolver rather than
+#     restating the precedence order in shell —— a third copy is how this drifted in the first place.
+VAULT="${KAL_VAULT:-$("$PY" "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/vault_path.py" 2>/dev/null || true)}"
+[ -n "$VAULT" ] || { echo "  ❌ Please set KAL_VAULT —— the folder holding your notes, or run \`just vault <path>\`." >&2; exit 1; }
 export KAL_HOME KAL_PATH
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SRC"

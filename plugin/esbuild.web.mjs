@@ -19,15 +19,32 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const HOME = os.homedir();
 /*  ⚠ **The default is not the author's path.**  A stranger running this build would point at a
     path that does not exist, fail to find the graph file, and get an empty viewer.  With no error.
     (2026-08-25 deep review —— the same default was in three compose files too) */
-const VAULT = process.env.KAL_VAULT || process.env.VAULT_DIR;
+/*  ⚠ …and it must look **where `just vault` wrote**, not only at the environment.  Every Python
+    entry point resolves through `vault_path.vault()` (environment → ~/.kal/config.json → .env),
+    and that repair's own comment says "only `schema_v3` read the config and the other nine did
+    not".  The shell scripts and this build were both left out of it, so `just export` step ③
+    died telling the user to set a variable the settings screen had already stored —— while step
+    ① in the same run had found the vault fine.  Reproduced 2026-09-04.
+    Asking the resolver rather than restating its precedence here: a fourth copy of that order,
+    in a third language, is exactly how this drifted. */
+let VAULT = process.env.KAL_VAULT || process.env.VAULT_DIR;
 if (!VAULT) {
-	console.error('  ❌ Set KAL_VAULT (or VAULT_DIR) —— the folder your notes are in.');
-	console.error('     e.g.  KAL_VAULT=~/notes node esbuild.web.mjs');
+	try {
+		const py = process.env.KAL_PYTHON || 'python3';
+		VAULT = execFileSync(py, [path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'vault_path.py')],
+		                     { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+	} catch { /* the resolver could not decide either —— the message below is the right one */ }
+}
+if (!VAULT) {
+	console.error('  ❌ Set KAL_VAULT (or VAULT_DIR) —— the folder your notes are in,');
+	console.error('     or run `just vault <path>`, which every other entry point already reads.');
 	process.exit(1);
 }
 
@@ -39,7 +56,13 @@ const argv = process.argv.slice(2);
 const ai = argv.indexOf('--assets');
 const ASSETS = ai >= 0 ? path.resolve(argv[ai + 1] ?? '../web/public/galaxy') : null;
 const rest = ai >= 0 ? argv.slice(0, ai) : argv;
-const GRAPH = rest[0] ?? path.join(VAULT, '.obsidian/plugins/kal-galaxy/kal-graph.json');
+/*  ⚠ **The canonical graph is `KAL_HOME/graph_export/`, not inside the vault.**  It moved there
+    so the viewer container needs no vault mount at all (`export_kal_graph.py`, and `api/main.go`
+    reads only that path).  This default was left pointing at the old copy under
+    `.obsidian/plugins/`, so `just export` step ③ died with ENOENT on a vault that has no
+    `.obsidian/` —— which is every openwiki bundle.  Reproduced 2026-09-04. */
+const KAL_HOME = process.env.KAL_HOME || path.join(HOME, '.kal');
+const GRAPH = rest[0] ?? path.join(KAL_HOME, 'graph_export', 'kal-graph.json');
 const OUT = rest[1] ?? path.resolve('../viewer/galaxy.html');
 
 /* A 'worker:' import prefix → bundled whole as IIFE text (for a Blob URL Worker).

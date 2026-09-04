@@ -27,13 +27,31 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${KAL_PYTHON:-python3}"
 KAL_HOME="${KAL_HOME:-$HOME/.kal}"
 #  ⚠ No default —— it does not quietly fall back to the author's path (2026-08-25).
-VAULT="${KAL_VAULT:-}"
-[ -n "$VAULT" ] || { echo "  ❌ Please set KAL_VAULT —— the folder holding your notes." >&2; exit 1; }
+#  ⚠ …but it must look **where `just vault` wrote**, not only at the environment.  Every Python
+#     entry point resolves through `vault_path.vault()` (environment → ~/.kal/config.json → .env);
+#     these two shell scripts were left out of that repair, whose own comment records it as
+#     "only `schema_v3` read the config and the other nine did not".  Result: `just index` worked
+#     from a clean shell and `just export` died telling the user to set a variable the settings
+#     screen had already stored.  Reproduced 2026-09-04.  Ask the same resolver rather than
+#     restating the precedence order in shell —— a third copy is how this drifted in the first place.
+VAULT="${KAL_VAULT:-$("$PY" "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/vault_path.py" 2>/dev/null || true)}"
+[ -n "$VAULT" ] || { echo "  ❌ Please set KAL_VAULT —— the folder holding your notes, or run \`just vault <path>\`." >&2; exit 1; }
 
 cd "$HERE"
 
-echo "① the Obsidian graph + graphml + graph3d.html"
-"$PY" export_graph.py --min-degree 2 --max-nodes 700 --obsidian "$VAULT/kg"
+#  ⚠ **`--obsidian` writes ~700 notes into the vault, and that is only wanted in an Obsidian
+#     vault.**  Against an openwiki bundle —— a published git repository —— it drops 3.5 MB of
+#     generated pages into something that goes out.  `schema_v3.SKIP_ROOT` keeps them out of the
+#     *index*; nothing kept them out of the *directory*, so deleting them once did not stop the
+#     next `just export` from putting them back (measured 2026-09-04: 700 files, untracked).
+#     Same test as the plugin install below: does this vault have an `.obsidian/`.
+if [ -d "$VAULT/.obsidian" ]; then
+    echo "① the Obsidian graph + graphml + graph3d.html"
+    "$PY" export_graph.py --min-degree 2 --max-nodes 700 --obsidian "$VAULT/kg"
+else
+    echo "① graphml + graph3d.html (no .obsidian/ — the vault-notes projection is skipped)"
+    "$PY" export_graph.py --min-degree 2 --max-nodes 700
+fi
 
 # Copied so the viewer opens from inside the repository too.
 #
@@ -62,11 +80,20 @@ if [ -d "$HERE/../plugin/node_modules" ]; then
     (
       cd "$HERE/../plugin" &&
       node esbuild.web.mjs &&
-      node esbuild.config.mjs production &&
-      mkdir -p "$VAULT/.obsidian/plugins/kal-galaxy" &&
-      cp dist/main.js dist/manifest.json dist/styles.css \
-         "$VAULT/.obsidian/plugins/kal-galaxy/"
+      node esbuild.config.mjs production
     )
+    #  ⚠ **Install into the vault only if it is an Obsidian vault.**  `mkdir -p` would otherwise
+    #     *create* `.obsidian/plugins/` —— and when KAL_VAULT points at an openwiki bundle (a
+    #     published git repository, not an Obsidian vault) that puts editor state into something
+    #     that goes out.  Measured 2026-09-04: the bundle has no `.obsidian/`, and it should not
+    #     acquire one as a side effect of exporting a graph.
+    if [ -d "$VAULT/.obsidian" ]; then
+        mkdir -p "$VAULT/.obsidian/plugins/kal-galaxy" &&
+        cp "$HERE/../plugin/dist/main.js" "$HERE/../plugin/dist/manifest.json" \
+           "$HERE/../plugin/dist/styles.css" "$VAULT/.obsidian/plugins/kal-galaxy/"
+    else
+        echo "   the vault has no .obsidian/ — plugin install skipped (it is not an Obsidian vault)"
+    fi
 else
     echo "③ no plugin/node_modules — skipping the bundle rebuild (normal in a container)"
 fi

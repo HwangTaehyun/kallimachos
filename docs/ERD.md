@@ -95,7 +95,7 @@ entity "**chunks**\n//9,329 rows//" as chunks {
   **vector : float32[384]**  ← the chunk embedding
 }
 
-entity "**lr_entities**\n//25,372 rows//" as entities {
+entity "**lr_entities**\n//25,476 rows//" as entities {
   * entity_id : int32 <<PK>>
   --
   name : string
@@ -112,7 +112,7 @@ entity "**lr_entities**\n//25,372 rows//" as entities {
   **vector : float32[384]**  ← the description embedding
 }
 
-entity "**lr_relations**\n//35,158 rows//" as relations {
+entity "**lr_relations**\n//35,318 rows//" as relations {
   * rel_id : int32 <<PK>>
   --
   * src_id : int32 <<FK>>

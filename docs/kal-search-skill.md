@@ -189,8 +189,8 @@ Read <abs_path>                                    # the whole document
 ```
    documents      1116    vault 98 + session 278
    chunks       9,329    500 chars · e5-small 384d · FTS ngram(2,3)
-   lr_entities  25,372    artifact 7,143 · method 4,175 · concept 3,822 · tool 2030 · failure 3545 …
-   lr_relations 35,158   undirected
+   lr_entities  25,476    artifact 7,152 · method 4,216 · concept 3,844 · tool 2032 · failure 3562 …
+   lr_relations 35,318   undirected
    ix_*                  raw BM25 inverted index (for debugging; not used by search)
 ```
 
