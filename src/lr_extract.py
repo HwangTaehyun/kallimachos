@@ -324,7 +324,7 @@ def blocked_path(rel):
     #     same directory, and a name typed as NFC and one stored as NFD render identically in `ls`.
     #     A plain `==` therefore let the gate miss the very folder the user meant:
     #       KAL_NO_LLM=private  ·  vault/Private/med.md   →  not blocked  (reproduced 2026-09-04)
-    #       KAL_NO_LLM=비공개(NFC) · vault/비공개(NFD)/a.md →  not blocked  (macOS stores NFD)
+    #       KAL_NO_LLM=`비공개`(NFC) · vault/`비공개`(NFD)/a.md →  not blocked  (macOS stores NFD)
     #     The second matters here specifically —— this vault's folder names are Korean.
     #     Normalising is the safe direction for a transmission gate: it can only block more, and
     #     the component anchoring above still stops `private` from matching `my-private-notes`.

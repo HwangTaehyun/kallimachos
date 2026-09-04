@@ -355,7 +355,9 @@ problem that requires reading the documents.**
 cover every case that actually arises, and it is more accurate than automatic inference.
 
 ```yaml
-# aliases.yml (not implemented)
+# aliases.yml —— shipped.  `entity_resolve.load_aliases()` reads it, and the file at the
+#   repository root carries the live rules.  Both spellings work: this inline form, and the
+#   block form the real file uses (`Taehyun Hwang:` followed by one variant per line).
 taehyun: [태현, Taehyun, 황태현]
 Jinwoo:  [진우]          # ← the user adds this only when they are the same person
 ```

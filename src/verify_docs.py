@@ -12,7 +12,7 @@ Why it is needed
 Usage:
   python verify_docs.py            # exit 1 on any mismatch
 """
-import os, re, sys, glob, argparse, subprocess, collections
+import os, re, sys, ast, glob, argparse, subprocess, collections
 import lancedb
 
 
@@ -274,7 +274,7 @@ def check(path, T):
             #     reading forward from `documents` picks up 1,577 —— chunks' number —— and
             #     reports it as documents' count being wrong.  Measured 2026-09-01: the moment
             #     TEMPORAL_DESIGN's harness table went from `97문서 / 1,577청크` to English, one
-            #     line produced 3 findings, all false.  Korean hid this because 문서/청크 are not
+            #     line produced 3 findings, all false.  Korean hid this because `문서`/`청크` are not
             #     the table names.  A checker that cries wolf gets switched off, so look ahead
             #     and drop the match when the number is the next word's.
             for m in re.finditer(rf"\b{tbl}\b(?![.\w])[^\n\d(]{{0,24}}?([\d,]{{3,}})", line):
@@ -570,6 +570,114 @@ def check_symbol_citations():
     return bad
 
 
+def check_english_prose():
+    """Korean in a comment, a docstring or documentation prose must be **quoted**.
+
+    This repository is public and its code, tests and documentation are English.  That was not
+    free: reaching it took about seventy commits, and because those commits' own messages were
+    Korean the whole history before 0.2.0 had to be collapsed into one to leave a log a reader
+    could read (`RELEASING.md`, "History is pushed whole").  Nothing checked the *result*, so the
+    same debt started accumulating again immediately —— on 2026-09-04 there were six Korean JSDoc
+    blocks in `settingsNav.ts` and a Korean maxim quoted in `schema_v3.py`, and no check could
+    see any of them.
+
+    The rule needs no threshold: **Korean is allowed as data, never as prose.**  A Korean search
+    term, folder name, entity or UI label is exactly what this pipeline exists for and belongs in
+    the comment discussing it —— inside backticks or quotes, the way any other literal is written.
+    What this forbids is Korean *sentences* explaining code.  Requiring the marking also fixed
+    three comments that had been naming UI labels as bare words.
+
+    → (list of problems).  An empty list means healthy.
+    """
+    import io as _io
+    import tokenize as _tok
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    han = re.compile(r"[가-힣]")
+    quoted = re.compile(r"`[^`]*`|\"[^\"]*\"|'[^']*'|«[^»]*»")
+    cmt = re.compile(r"//.*|/\*[\s\S]*?\*/|^\s*\*\s.*")
+    triple = ('"' * 3, "'" * 3)
+
+    def bare(text):
+        return bool(han.search(quoted.sub(" ", text)))
+
+    try:
+        names = subprocess.run(["git", "-C", repo, "ls-files"], capture_output=True,
+                               text=True, check=True).stdout.split()
+    except Exception as e:
+        return [f"cannot list the tracked files, so this check saw nothing: {e}"]
+    if not names:
+        return ["git ls-files returned nothing —— this check would pass vacuously"]
+
+    bad = []
+    for rel in names:
+        #  ⚠ The translation catalogue is the **product**: those strings are Korean because the
+        #     UI is bilingual.  Skipping the folder is not a loophole —— it holds string tables,
+        #     not explanation.
+        if "/i18n/" in rel:
+            continue
+        f = os.path.join(repo, rel)
+        try:
+            text = open(f, encoding="utf-8").read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if not han.search(text):
+            continue
+        if rel.endswith(".py"):
+            #  Comments come from the tokenizer; **docstrings from the AST**, because a docstring
+            #  is the first statement of a module, class or function —— not "any triple-quoted
+            #  string".  Treating every one of them as prose flagged `distill_sessions.PROMPT`
+            #  (an LLM prompt) and a `textwrap.dedent` test fixture, both of which are data by
+            #  construction.  (measured 2026-09-04)
+            try:
+                for t in _tok.generate_tokens(_io.StringIO(text).readline):
+                    if t.type == _tok.COMMENT and bare(t.string):
+                        bad.append(f"{rel}:{t.start[0]} —— unquoted Korean prose in a comment")
+            except (SyntaxError, _tok.TokenError, IndentationError):
+                pass
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:
+                tree = None
+            for node in ast.walk(tree) if tree else ():
+                if not isinstance(node, (ast.Module, ast.ClassDef,
+                                         ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                doc = ast.get_docstring(node, clean=False)
+                if not doc or not han.search(doc):
+                    continue
+                lines = doc.splitlines()
+                #  ⚠ An **indented block inside a docstring is an example, not prose.**
+                #     `load_aliases` documents the alias file's format, and that file writes its
+                #     Korean entries bare (`aliases.yml:26`) —— quoting them in the example to
+                #     satisfy this check would make the documentation disagree with the file it
+                #     documents, which is a worse defect than the one being prevented.
+                body = [l for l in lines[1:] if l.strip()]
+                base = min((len(l) - len(l.lstrip()) for l in body), default=0)
+                #  The docstring's own first line, not the definition's: a module has no
+                #  `lineno`, and a decorated function's `lineno` is the `def`, not the string.
+                start = node.body[0].lineno if getattr(node, "body", None) else 1
+                for off, ln in enumerate(lines):
+                    if off and (len(ln) - len(ln.lstrip())) >= base + 4:
+                        continue                        # an example block
+                    if bare(ln):
+                        bad.append(f"{rel}:~{start + off} —— unquoted Korean prose in the "
+                                   f"docstring of {getattr(node, 'name', '<module>')}")
+        elif rel.endswith((".go", ".ts", ".tsx", ".js", ".mjs")):
+            for i, line in enumerate(text.splitlines(), 1):
+                for m in cmt.finditer(line):
+                    if bare(m.group(0)):
+                        bad.append(f"{rel}:{i} —— unquoted Korean prose in a comment")
+        elif rel.endswith(".md"):
+            fence = False
+            for i, line in enumerate(text.splitlines(), 1):
+                if line.lstrip().startswith("```"):
+                    fence = not fence
+                    continue
+                if not fence and bare(line):
+                    bad.append(f"{rel}:{i} —— unquoted Korean prose in documentation")
+    return bad
+
+
 def _main_verify():
     #  ⚠ Without `global` this is **a local variable**, and the global check() reads stays an
     #     empty dict —— it would print "8 constants checked" while looking at 0.
@@ -600,7 +708,7 @@ def _main_verify():
         #  ⚠ Checks that are not about links also run here.  But every result was being
         #     counted as "N broken links" —— one folder-check failure was reported as "1 broken
         #     link" and sent people hunting for a link that did not exist (measured 2026-09-01).  Counted by kind now.
-        other = check_symbol_citations()
+        other = check_symbol_citations() + check_english_prose()
         for _m in other:
             print(f"❌ {_m}")
         bad = 0
@@ -612,10 +720,11 @@ def _main_verify():
                     print(f"❌ {p_}\n     L{ln}  broken link  {tgt}")
                     bad += 1
         if not bad and not other:
-            print("✅ every link resolves · symbol citations match reality too")
+            print("✅ every link resolves · symbol citations match reality too · "
+                  "no unquoted Korean prose")
         else:
             parts = ([f"{bad} broken link(s)"] if bad else []) + \
-                    ([f"{len(other)} mismatched symbol citation(s)"] if other else [])
+                    ([f"{len(other)} citation/prose problem(s)"] if other else [])
             print(" · ".join(parts))
         raise SystemExit(1 if (bad or other) else 0)
     T = truth()

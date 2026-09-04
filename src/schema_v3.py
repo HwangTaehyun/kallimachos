@@ -739,8 +739,8 @@ DB_SHRINK_RATIO = 0.67
 #  ② used to collapse into ③: the `OSError` was swallowed, the file left `seen`, `diff_vault`
 #  saw an indexed document with no file, and `sync` deleted its row, chunks and postings.  A
 #  dangling symlink —— which an Obsidian rename or a moved attachment leaves routinely —— is the
-#  ordinary trigger.  CLAUDE.md names the failure: 조용한 실패를 만들지 않는다.  Here the screen
-#  did not even say "0"; it said **deleted**.
+#  ordinary trigger.  The project's own rule names this failure —— do not build a silent one
+#  —— and here the screen did not even say "0": it said **deleted**.
 #
 #  ⚠ A **returned sentinel**, not a module-level accumulator.  A first fix used the
 #     `lr_extract.NO_LLM_SKIPPED` idiom and it is wrong here: two callers interleave on the same

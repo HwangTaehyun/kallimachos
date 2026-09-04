@@ -95,7 +95,7 @@ export function RunLog({ runId, runs, onCancel, onFinished }: {
 /** Colours only the lines that should catch the eye in a log.  Colour everything and nothing shows. */
 function lineClass(l: string): string {
   //  ⚠ These match **the pipeline's own output**, which went English —— the Korean words
-  //     (실패 · 경고 · 완료 · 통과) had stopped matching anything.  The symbols carried it, so
+  //     ('실패' · '경고' · '완료' · '통과') had stopped matching anything.  The symbols carried it, so
   //     nothing looked broken; a failure line simply lost its colour when the word was all it had.
   if (/(❌|failed|Error|Traceback|error:)/i.test(l)) return 'text-crit';
   if (/(⚠|warn)/i.test(l)) return 'text-warn';

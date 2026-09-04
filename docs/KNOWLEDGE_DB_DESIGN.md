@@ -458,4 +458,4 @@ Environment: lancedb 0.37.1 · sentence-transformers 5.7.0 · pyarrow · numpy 2
 - Otero, Parapar & Barreiro, *Towards Reliable Testing for Multiple IR System Comparisons*, ECIR 2025, https://arxiv.org/abs/2501.03930 — Wilcoxon+BH — published 2025, retrieved 2026-08-17
 - HKUDS, *LightRAG*, https://github.com/HKUDS/LightRAG — entity/relation extraction schema and the local/global paths — retrieved 2026-08-17
 - Microsoft, *GraphRAG*, https://github.com/microsoft/graphrag — read at commit 60668ba. Confirmed parquet storage + LanceDB vector store — retrieved 2026-08-17
-- moonzoo, *\[RAG\] Sparse Vector 방식 비교 (BM25 VS BM25+형태소 VS SPLADE VS BM42)* — the claim tested in §4 — published 2025-11-04, retrieved 2026-08-17
+- moonzoo, *"\[RAG\] Sparse Vector 방식 비교 (BM25 VS BM25+형태소 VS SPLADE VS BM42)"* — the claim tested in §4 — published 2025-11-04, retrieved 2026-08-17

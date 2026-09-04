@@ -43,8 +43,10 @@ This repository's history is pushed whole. Zero commits ever contained private d
 history gates in `check-publish` verify that on every push), and squashing would erase the
 contribution history along with it.
 
-**The exception, once, at 0.1.2 → 0.2.0.** Everything before that point was collapsed into a
-single commit and the three tags were re-cut onto it.
+**The exception, once, after 0.1.2.** Everything up to that point was collapsed into a single
+commit (`737e84a`) and the three tags were re-cut onto it.  That commit —— not a version number
+—— is the boundary this section is about; **0.2.0 has not been cut**, `plugin.json` still says
+`0.1.2`, and the 46 commits sitting on top of the collapsed root are what it will contain.
 
 The reason is that the history had stopped being readable by the people it is for. This is a
 public AGPL repository whose code, documentation, tests and comments are now English throughout,
@@ -56,12 +58,13 @@ commit they can. Nothing about the boundary changed: the two history gates still
 found zero commits carrying private documents.
 
 ⚠ **This cost real things, and they are worth naming so the next person does not reach for it
-casually.** Every `git blame` line before 0.2.0 now says one thing. The reasoning behind
+casually.** Every `git blame` line from before `737e84a` now says one thing. The reasoning behind
 individual decisions —— which is normally recoverable from a commit body —— survives only where it
 was also written into a comment or a document. And it was a force-push over published, tagged
 commits, so anyone who had cloned the repository had to reset rather than pull.
 
-**The rule from 0.2.0 on is the one above it: history is pushed whole.** Repeating this needs a
+**From the collapsed root on, the rule is the one above it: history is pushed whole** ——
+and it has been: every commit since has gone out as written. Repeating this needs a
 reason at least as strong, and it belongs in this section before it happens, not after.
 
 ## Not there yet

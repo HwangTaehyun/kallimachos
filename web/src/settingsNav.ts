@@ -115,7 +115,8 @@ const NAV_I18N: NavGroupRaw[] = [
 	},
 ];
 
-/** NAV_I18N 을 한 언어로 편다. ko 에 없는 값은 없다 —— 여기는 항목이 고정이라 en 으로 미리 채워 둔다. */
+/** Flattens NAV_I18N to one language.  No value is missing from `ko`: the item list is fixed,
+ *  so every entry carries both spellings and `en` is filled in ahead of time. */
 export function getNav(lang: Lang): NavGroup[] {
 	const pick = (s: Localized) => (lang === 'ko' ? s.ko : s.en);
 	return NAV_I18N.map((g) => ({
@@ -124,22 +125,23 @@ export function getNav(lang: Lang): NavGroup[] {
 	}));
 }
 
-/** 영어로 편 목차 —— 검색·조회의 기본값. 언어를 아는 곳(SettingsShell)은 getNav(lang) 을 쓴다. */
+/** The navigation flattened to English —— the default for search and lookup.  Anywhere that
+ *  knows the language (SettingsShell) calls `getNav(lang)` instead. */
 export const NAV: NavGroup[] = getNav('en');
 
 export const DEFAULT_ITEM = 'pipeline';
 
-/** id → 항목. 없으면 undefined (라우트가 낡았을 때). */
+/** id → item, or `undefined` when there is none (a route that has gone stale). */
 export function findItem(id: string, nav: NavGroup[] = NAV): NavItem | undefined {
 	for (const g of nav) for (const it of g.items) if (it.id === id) return it;
 	return undefined;
 }
 
 /**
- * 검색어로 목차를 거른다. 빈 문자열이면 전부.
+ * Filters the navigation by a search term.  An empty string returns everything.
  *
- * 항목이 하나도 없는 그룹은 **그룹째 사라진다** —— 제목만 남으면 "여기엔 없다"
- * 가 아니라 "여기 있는데 안 보인다" 로 읽힌다.
+ * A group left with no items **disappears whole**.  Leaving the heading behind reads as
+ * "it is here and hidden" rather than "it is not here", which is the opposite of the truth.
  */
 export function filterNav(q: string, nav: NavGroup[] = NAV): NavGroup[] {
 	const t = q.trim().toLowerCase();
