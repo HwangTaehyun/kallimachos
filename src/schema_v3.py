@@ -125,7 +125,16 @@ def _clean_pathspec(raw):
             continue
         if x.endswith("/*"):
             x = x[:-2]
-        while x.startswith(("./", "../")):
+        #  ⚠ `os.path.normpath` collapses **interior** traversal too.  A first version stripped
+        #     only a leading `./` or `../`, so `Notes/../Private` was accepted, displayed back,
+        #     and matched nothing —— the same silent no-op it was written to fix, one spelling
+        #     over.  normpath turns it into `Private`, which is what the user meant and what the
+        #     filesystem resolves it to.  (codex adversarial review 2026-09-04, finding #2)
+        #     It runs **before** the absolute-path branch, so `/vault/Notes/../Private` also
+        #     resolves rather than being compared as written.
+        if x:
+            x = os.path.normpath(x)
+        while x.startswith(("./", "../")) or x in (".", ".."):
             x = x.split("/", 1)[1] if "/" in x else ""
         if x.startswith("/"):
             rel = os.path.relpath(x, os.path.abspath(VAULT))

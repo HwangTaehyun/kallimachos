@@ -10,6 +10,15 @@ Every basis is a measurement from this repository.  Estimates are marked `assump
 
 ---
 
+> ## ⚠ This design shipped. Read the present tense below as "at the time of writing."
+>
+> `doc_date` and `date_src` exist in the `documents` schema today
+> ([`schema_v3.py:407-408`](../src/schema_v3.py)), so §2.1's "there is nowhere to put a date"
+> describes the state on 2026-08-20, not the state now.  The sentences are left standing rather
+> than rewritten: what makes a design document worth keeping is *why* the columns were added, and
+> editing the problem out of it leaves only the answer.  An adversarial review read §2.1 as a
+> current claim on 2026-09-04, which is what this banner is for.
+
 ## 0. What the problem is (measured)
 
 `group_nodes()` ([`src/lr_extract.py:449`](../src/lr_extract.py)) collects fragments like this
@@ -110,7 +119,8 @@ deliberate:
 
 ### 2.1 Start at the storage layer — there is nowhere to put a date today
 
-**The `documents` schema has zero date columns** ([`src/schema_v3.py:308-321`](../src/schema_v3.py)).
+**The `documents` schema had zero date columns** when this was written —— it has `doc_date`
+and `date_src` now ([`schema_v3.py:407-408`](../src/schema_v3.py)); see the banner at the top.
 `mtime` exists but differs from the frontmatter date in **355/374 (94.9%)** (median 6 days, max
 132 —— `wiki/overview.md` is fm 2026-04-09 vs mtime 2026-08-19).  It is not a substitute.
 
@@ -145,8 +155,8 @@ Lines affected: `260 · 276 · 283 · 286 · 353-357 · 492` (`v.pop("descriptio
 ### 2.3 Merging happens **twice**
 
 After `lr_extract.group_nodes()`, [`entity_resolve.py:197 build_canon()`](../src/entity_resolve.py)
-merges again —— called from [`schema_v3.py:1066`](../src/schema_v3.py) (inside `build_graph()`),
-and folded by `merged[k]["docs"] |= set(e["docs"])` at [`schema_v3.py:1066`](../src/schema_v3.py).
+merges again —— [`schema_v3.py:1075`](../src/schema_v3.py) `build_graph()` calls it at line 1104,
+and folded by `merged[k]["docs"] |= set(e["docs"])` at [`schema_v3.py:1123`](../src/schema_v3.py).
 
 Timeline combination rules in the second merge:
 

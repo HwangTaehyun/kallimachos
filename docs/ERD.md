@@ -40,7 +40,7 @@ build --> graph : name merge · type normalisation\nghost references removed
 build --> ix    : reproduces the BM25 statistics\n**not on the search path**
 
 note bottom of ix
-  The real BM25 is done by ②'s FTS index (kal_search.py:213).
+  The real BM25 is done by ②'s FTS index (kal_search.py:253).
   These three tables reproduce it separately so a person can
   press on "why is this document first".  2.1 million rows.
 end note

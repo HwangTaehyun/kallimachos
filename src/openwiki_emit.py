@@ -30,6 +30,26 @@ import os, re, sys, json, glob, shutil, hashlib, argparse, subprocess, datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from okf_convert import parse_fm, to_okf, build_link_index, EXT_OPENWIKI   # noqa: E402
 from schema_v3 import NO_LLM_RE   # the transmission gate lives in one place
+#  The same two path gates the indexer and the extractor use —— imported, never restated, so a
+#  document excluded at the source cannot become unexcluded by being published.
+import schema_v3                         # ← the module, so a rebound `VAULT` is seen (see below)
+from schema_v3 import is_skipped
+from lr_extract import blocked_path
+#  `schema_v3.VAULT` is read **through the module**, not bound by name: `status.py` rebinds it at
+#  runtime, and a by-name copy would then point at the wrong tree while every path silently looked
+#  "outside the vault" —— the carry-forward below would never fire and nothing would say so.
+#    ⓘ Honest about the coverage: self-check ⑫ runs a subprocess, where `KAL_VAULT` is already set
+#      before import, so it does **not** turn red if this is changed back.  It is defence against
+#      an in-process caller, and it costs one word.
+
+
+def _under(path, root):
+    """Is `path` inside `root` —— so a vault-relative exclusion is even meaningful for it."""
+    try:
+        return os.path.commonpath([os.path.realpath(path), os.path.realpath(root)]) \
+            == os.path.realpath(root)
+    except (ValueError, OSError):
+        return False
 from ingest_sessions import find_leaks                                     # noqa: E402
 from frontmatter import FM_RE
 
@@ -319,7 +339,7 @@ def main():
     unresolved = set()
 
     #  ── plan first, write later.  Nothing is removed before the whole run is known good ──
-    plan, skipped = [], 0
+    plan, skipped, carried_excl = [], 0, []
     for f in files:
         try:
             fm, _ = parse_fm(open(f, encoding="utf-8", errors="replace").read())
@@ -340,7 +360,35 @@ def main():
             skipped += 1
             continue
         text, title, desc = got
+
+        #  ⚠ **A path-based exclusion must follow the content into the bundle.**  `KAL_NO_LLM`
+        #     and `KAL_SKIP` are matched against the path **relative to the vault root**, so a
+        #     document excluded as `Private/secret.md` lands here as
+        #     `personal/sessions/claude/…/secret.md` —— a path the gate no longer matches.  The
+        #     user's "never send this" therefore survived exactly until it was published, and
+        #     nothing said so.  Reproduced 2026-09-04: a canary blocked by `blocked_path` at the
+        #     source came back a transmission candidate from the bundle.
+        #     The page is still written —— `--from` is an explicit instruction and refusing it
+        #     would be deciding for the user —— but the **mark travels with it**, which is what
+        #     `no_llm` means.  Same shape as the carry-forward below, from a different source.
+        #       ⚠ `KAL_SKIP` ("do not index") is honoured here as `no_llm` too, deliberately: it
+        #          is the safe direction, and the bundle's own paths are the user's to choose, so
+        #          this cannot re-derive a skip rule for them.  It does not stop the bundle page
+        #          being indexed; it stops it being transmitted.
+        _srel = os.path.relpath(f, schema_v3.VAULT) if _under(f, schema_v3.VAULT) else None
+        if _srel and (blocked_path(_srel) or is_skipped(f)) and not re.search(r"^no_llm:", text, re.M):
+            _l = text.split("\n")
+            _at = 2 if len(_l) > 2 and _l[1].startswith("type:") else 1
+            _l.insert(_at, "no_llm: true")
+            text = "\n".join(_l)
+            carried_excl.append(_srel)
+
         plan.append((rel, text, title, desc))
+
+    if carried_excl:
+        print(f"  ⓘ carried `no_llm: true` onto {len(carried_excl)} page(s) whose source is "
+              f"excluded by KAL_NO_LLM/KAL_SKIP (first: {carried_excl[0]}) —— the bundle path "
+              f"does not match those settings, so the mark travels with the content instead")
 
     #  ── the shrink guard, counting what we would actually replace ──
     touched_dirs = sorted({os.path.dirname(os.path.join(a.wiki, rel)) for rel, *_ in plan})
@@ -950,6 +998,41 @@ def _selftest():
         assert not os.path.exists(os.path.join(cl, "leak.md")), "it wrote before checking"
         os.remove(bad)
         ok.append("a secret in a page stops the publication before anything is written")
+
+        #  ⑫ A folder the user excluded from transmission stays excluded **after publication**.
+        #     `KAL_NO_LLM` and `KAL_SKIP` match a path relative to the vault root, and the bundle
+        #     re-roots every page under `personal/sessions/<agent>/…`, so the copy stops matching
+        #     and becomes a transmission candidate again.  Reproduced 2026-09-04 with a canary:
+        #     the published copy carried the body and no mark, and `doc_meta` called it sendable.
+        #       ⚠ **A subprocess, because `lr_extract.NO_LLM` is built at import time.**  Setting
+        #          `KAL_NO_LLM` in this process after the import changes nothing, so an in-process
+        #          version of this check would pass while testing nothing —— the failure this
+        #          repository keeps making.  Mutation-tested: dropping the carry-forward turns it red.
+        vault = os.path.join(d, "v")
+        os.makedirs(os.path.join(vault, "Private"))
+        for name, where in (("secret.md", "Private"), ("open.md", "")):
+            open(os.path.join(vault, where, name), "w").write(
+                f'---\ntitle: "{name[:-3]}"\ntype: conversation\ncaptured: 2026-09-02\n'
+                f'session_id: id-{name[:-3]}\nsession_agent: claude\n'
+                f'distilled_by: distill_sessions.py (LLM, needs review afterwards)\n'
+                f'doc_type: analysis\nwhy_captured: "왜"\n---\n본문입니다. ' + "채움 " * 40 + "\n")
+        w2 = os.path.join(d, "w2")
+        subprocess.run(["git", "init", "-q", w2], check=True)
+        subprocess.run(["git", "-C", w2, "config", "user.email", "t@t"], check=True)
+        subprocess.run(["git", "-C", w2, "config", "user.name", "t"], check=True)
+        r = subprocess.run(
+            [sys.executable, os.path.abspath(__file__), "--wiki", w2, "--from", vault, "--force"],
+            capture_output=True, text=True,
+            env={**os.environ, "KAL_VAULT": vault, "KAL_NO_LLM": "Private",
+                 "KAL_HOME": os.path.join(d, "home")})
+        assert r.returncode == 0, f"the excluded-source run failed:\n{r.stdout}{r.stderr}"
+        base = os.path.join(w2, "personal/sessions/claude")
+        got = open(os.path.join(base, "Private/secret.md"), encoding="utf-8").read()
+        assert NO_LLM_RE.search(got), "the excluded source was published without `no_llm`"
+        beside = open(os.path.join(base, "open.md"), encoding="utf-8").read()
+        assert not NO_LLM_RE.search(beside), "a page outside the excluded folder was marked too"
+        ok.append("a source excluded by KAL_NO_LLM is published carrying `no_llm: true`, "
+                  "and a page beside it is not")
 
     for line in ok:
         print(f"  ✅ {line}")

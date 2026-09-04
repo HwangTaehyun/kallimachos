@@ -46,10 +46,10 @@ entities that do not exist.
 
 | Location | What it does |
 |---|---|
-| [`lr_extract.py:154-162`](../src/lr_extract.py) | extraction — collecting per-chunk results into a whole document |
-| [`schema_v3.py:309-316`](../src/schema_v3.py) | graph build — building the canon dictionary across all document entities |
-| [`schema_v3.py:369`](../src/schema_v3.py) | the relation pair key, `tuple(sorted([ks, kt]))` |
-| [`schema_v3.py:384-385`](../src/schema_v3.py) | endpoint resolution, `name2id.get(v["s"])` |
+| [`lr_extract.py:495-498`](../src/lr_extract.py) | extraction — collecting per-chunk results into a whole document |
+| [`schema_v3.py:1104-1113`](../src/schema_v3.py) | graph build — building the canon dictionary across all document entities |
+| [`schema_v3.py:1164`](../src/schema_v3.py) | the relation pair key, `tuple(sorted([ks, kt]))` |
+| [`schema_v3.py:1186`](../src/schema_v3.py) | endpoint resolution, `name2id.get(v["s"])` |
 
 > ⚠ **Never change one side alone.** If the entity key and the relation endpoint key diverge,
 > relations point at entities that do not exist. HIGH-1 in the 2026-08-17 review was exactly that

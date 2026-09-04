@@ -477,6 +477,18 @@ def check_symbol_citations():
     #  Leaving the latter out missed `scan_vault()` at `README.md:236` (2026-08-25).
     sym = re.compile(r"`([A-Za-z_][A-Za-z_0-9]*(?:\(\))?)`"
                      r"|:\d+(?:-\d+)?\s+([A-Za-z_][A-Za-z_0-9]*\(\))")
+    #  A backticked **fragment** carrying code punctuation —— `f(x)`, `a[b]`, `x.y(z)`.  Evidence
+    #  for the citations `sym` cannot judge; the block that uses it says why.
+    #     Backticks are optional: inside a fenced block the repository writes the citation as
+    #     `schema_v3.py:450 does drop_table("stale_docs")`, with no backticks anywhere, and
+    #     requiring them missed exactly that line.  Ordinary prose that happens to look like a
+    #     call is filtered by the "occurs in the cited file" precondition below, not by punctuation.
+    fragre = re.compile(r"`?\b([A-Za-z_][A-Za-z_0-9]*(?:\.[A-Za-z_][A-Za-z_0-9]*)*\s*[(\[][^`\n]{3,}?[)\]])`?")
+    #     ⚠ …and a fragment that starts with **another module's name** is a mention by contrast,
+    #        not a claim about the cited line.  `entity_resolve.py:197` cited beside the sentence
+    #        "after `lr_extract.group_nodes()`, …" is correct; going red on it is the crying-wolf
+    #        the block below warns about, and it did fire on that exact line (2026-09-04).
+    modules = {os.path.basename(f)[:-3] for f in glob.glob(os.path.join(repo, "src", "*.py"))}
     bad = []
     for md in sorted(glob.glob(os.path.join(repo, "*.md"))
                      + glob.glob(os.path.join(repo, "docs", "*.md"))):
@@ -490,11 +502,17 @@ def check_symbol_citations():
                 bad.append(f"{os.path.basename(md)}: `{fname}:{ln}-{m.group(3)}` "
                            f"—— the start of the range is greater than its end")
                 continue
-            near = text[max(0, m.start() - 60): m.end() + 60]
+            #  ⚠ **Clipped at the line the citation sits on.**  ±60 characters crosses into the
+            #     next table row and the next sentence, and both directions produced wolves on
+            #     2026-09-04: row 4's citation was judged against row 3's code fragment, and a
+            #     sentence that *correctly* said "inside `build_graph()`, defined at :1075" was
+            #     read as a claim about the line it cited.  A citation and the thing it names sit
+            #     on one line in every case this repository writes.
+            _ls = text.rfind("\n", 0, m.start()) + 1
+            _le = text.find("\n", m.end())
+            near = text[_ls: _le if _le != -1 else len(text)]
             names = [(a or b).rstrip("()") for a, b in sym.findall(near)
                      if (a or b).rstrip("()") != fname.replace(".py", "")]
-            if not names:
-                continue                    # no symbol named —— nothing to check against
             lines = open(src, encoding="utf-8").read().splitlines()
             #  ⚠ For a range citation, **the whole range** is read.  Reading only the start
             #     line ±4 missed `NO_LLM` at 294 inside `289-297` (2026-08-25).
@@ -513,6 +531,31 @@ def check_symbol_citations():
             #        contrast** ("this is `SKIP`, not no_llm").
             #     Only names with a definition (`def X` · `X = `) count.  (2026-08-25)
             whole = "\n".join(lines)
+            #  ⚠ **A code *fragment* beside the citation is evidence too, and the rule above
+            #     cannot use it.**  `_defined()` accepts only a name the cited file *defines*, so
+            #     a citation whose neighbour is a call or a subscript —— `drop_table("stale_docs")`
+            #     · `tuple(sorted([ks, kt]))` · `name2id.get(v["s"])` —— names nothing definable,
+            #     hits the `if not names: continue` above, and is skipped **silently**.  An
+            #     adversarial review on 2026-09-04 found seven stale citations of exactly that
+            #     shape while this function was printing "symbol citations match reality too".
+            #     The wolf-avoidance of the block above is kept by a different means: the fragment
+            #     must **occur in the cited file at all**.  If it does not, the document is
+            #     paraphrasing, or naming another file's code by contrast —— the case the
+            #     `SKIP`/`no_llm` measurement found, and there is nothing to judge.  If it does
+            #     occur, then "not within the window" is staleness, not a guess.
+            for fm in fragre.finditer(near):
+                frag = " ".join(fm.group(1).split())
+                head = frag.split(".")[0].split("(")[0].split("[")[0].strip()
+                if "." in frag.split("(")[0] and head in modules and head != fname[:-3]:
+                    continue          # another module named by contrast —— not this line's claim
+                if frag not in " ".join(whole.split()):
+                    continue          # not this file's code —— nothing to check against
+                if frag not in " ".join(window.split()):
+                    bad.append(f"{os.path.basename(md)}: `{fname}:{ln}` does not contain "
+                               f"`{frag[:44]}` —— it is elsewhere in the file")
+
+            if not names:
+                continue        # no bare symbol —— the fragment rule above was the whole check
             def _defined(n):
                 return re.search(
                     rf"^\s*(?:def|class)\s+{re.escape(n)}\b|^\s*{re.escape(n)}\s*(?::[^=]*)?=",
@@ -523,6 +566,7 @@ def check_symbol_citations():
             if not any(re.search(rf"\b{re.escape(n)}\b", window) for n in names):
                 bad.append(f"{os.path.basename(md)}: `{fname}:{ln}` has no "
                            f"{names[:2]} nearby")
+
     return bad
 
 

@@ -320,8 +320,8 @@ judgement.
 **Version rule**: semver. `plugin.json`'s `version` == the image tag == the git tag.
 `plugin.json` says `0.1.0` today while there is **no git tag at all**.
 
-**Upgrade and removal**: `meta.schema_version` is written by `schema_v3.py:875` but read only by
-`status.py:203` and the web display — **nobody enforces it.** Attaching a new image to an old DB
+**Upgrade and removal**: `meta.schema_version` is written by `schema_v3.py:1321` but read only by
+`status.py:293` and the web display — **nobody enforces it.** Attaching a new image to an old DB
 diverges silently. A startup gate goes in.
 
 ## 7. Remaining debt
@@ -332,8 +332,8 @@ diverges silently. A startup gate goes in.
 | 1' | whether `${user_config.*}` substitutes inside `args` | — | ✅ **settled by measurement** (§5.1 table) |
 | 2 | cold start (including pull), measured | can only be measured once it is on a registry | open |
 | 3 | the `ghcr.io/hwangtaehyun/kal` repository does not exist | has to be created. `kal_mcp.py`'s guidance text **already names this image to users** | open |
-| 4 | the `no_llm` gate ships effectively disabled | 0 documents in the vault have `no_llm: true` → `llm_gate` always passes (`schema_v3.py:888`) | **§6 step 11** |
-| 5 | `SKIP` is coupled to this machine's folder name | substring matching (`schema_v3.py:197` — `SKIP_ANY` is at `:85`). Cloning as `kal/` gets it indexed and sent | **§6 step 12** |
+| 4 | the `no_llm` gate ships effectively disabled | 0 documents in the vault have `no_llm: true` → `llm_gate` always passes (`schema_v3.py:897`) | **§6 step 11** |
+| 5 | `SKIP` is coupled to this machine's folder name | substring matching (`schema_v3.py:205` — `SKIP_ANY` is at `:87`). Cloning as `kal/` gets it indexed and sent | **§6 step 12** |
 | 6 | the `CLAUDE_DIR` mount is credentials on Linux | currently **dev-compose only** — `.mcp.json` does not mount it | **§6 step 13** |
 | 7 | stdout contamination from `docker run` itself | 0 lines in our environment. Other docker versions and platforms unverified | open |
 | 8 | `required` prompt behaviour when loaded via `--plugin-dir` | in headless `-p` it **silently does not start the server** (measured). Interactive unverified | open |

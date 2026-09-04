@@ -104,15 +104,30 @@ SECRETS = [
     #      oversight.
     ("GENERIC_SECRET",  re.compile(
         r"(?i)((?<![A-Za-z0-9])(?:api[_\-]?key|secret[_\-]?key|access[_\-]?token|"
-        r"auth[_\-]?token|client[_\-]?secret|password|passwd|"
+        r"auth[_\-]?token|refresh[_\-]?token|client[_\-]?secret|credentials?|password|passwd|"
         r"(?:[a-z0-9]+[_\-])?(?:token|secret|passwd|password|pass|pwd|pw|key)|"
         #      `datadog:` / `dd-api:` in their bare forms —— `datadog_api_key:` was already caught
         #      (it contains `api_key`, and the lookbehind lets `_api_key` through).  Measured by
         #      the review across 3,742 session files: 3 hits, zero md5/sha collateral.  Added as a
         #      **label**, not as a shape, which is what keeps the 3,068-match 32-hex rule out.
-        r"datadog|dd[_\-]?api|accountkey|비밀번호|암호)\s*[=:]\s*[\"']?)"
+        #      ⚠ **A closing quote may sit between the key and the separator.**  Every one of these
+    #         labels was written for `key = value`, and JSON —— which is what a session log is
+    #         full of —— writes `"api_key": "…"`.  The quote is not in `\s`, so the pattern
+    #         stopped at the key name and **matched nothing**: measured 2026-09-04, four shapes
+    #         including `{"api_key": …}` and `{"password": …}` passed `mask()` untouched and
+    #         `find_leaks()` called them clean.  `["']?` is the whole fix.
+    r"datadog|dd[_\-]?api|accountkey|비밀번호|암호)[\"']?\s*[=:]\s*[\"']?)"
         r"(?=[A-Za-z0-9_\-/+=]{16,})(?=[^\s\"']*(?-i:[A-Z0-9]))[A-Za-z0-9_\-/+=]{16,}")),
     #   `Authorization: Basic <b64>` —— a distinct shape, and the credential is the whole value.
+    #   A cookie header is a credential wholesale —— the session id in it *is* the login.  Neither
+    #   the label list above (the key is the cookie's own name, unknowable in advance) nor
+    #   `BASIC_AUTH` reaches it.  Measured 2026-09-04 across the vault (1,078 files), ~/.kal
+    #   (1,635) and this repository: 0 hits, so it costs nothing to carry.
+    ("COOKIE",          re.compile(r"(?i)((?:set-)?cookie\s*:\s*)[A-Za-z0-9_\-]+=[^\s;\"']{8,}")),
+    #   `https://user:password@host` —— the same shape `DB_URI` already covers for `postgres://`
+    #   and friends, which is the tell that leaving http(s) out was an oversight rather than a
+    #   decision.  Anchored on `://` and a `@`, so an ordinary URL cannot match.
+    ("URL_USERINFO",    re.compile(r"\bhttps?://[^\s:/@]+:[^\s@/]{6,}@")),
     ("BASIC_AUTH",      re.compile(
         r"(?i)(authorization\s*:\s*basic\s+)[A-Za-z0-9+/=]{16,}")),
 ]
@@ -408,6 +423,27 @@ def _selftest():
                     "docker-compose.viewer.yml", "lr_summary_cache.jsonl"):
         assert not find_leaks(_dotted), \
             f"a dotted identifier read as a JWT ({_dotted!r}) —— the eyJ anchor is gone"
+
+    #  ⚠ **Four shapes an adversarial review found passing through both `mask()` and
+    #     `find_leaks()` on 2026-09-04**, plus the JSON spelling that made the first two
+    #     invisible (a closing quote sits between the key and the `:`).  Each is asserted masked
+    #     *and* clean afterwards —— asserting only the first passes on a pattern that redacts one
+    #     character and leaves the rest, which is the shape the PRIVATE_KEY note above records.
+    for _shape in (
+            '{"refreshToken": "1//0eXaBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcdef"}',
+            'credentials = "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"',
+            "Cookie: sessionid=8f2a91c4de77b03e5a16cc9d4402ab71; csrftoken=xyz",
+            "https://admin:hunter2SuperSecret@internal.example.com/api/v1/things",
+            '{"api_key": "sk_live_ABCDEFGHIJ0123456789"}'):
+        _m, _ = mask(_shape)
+        assert _m != _shape, f"a credential shape passed untouched: {_shape[:28]}…"
+        assert not find_leaks(_m), f"masking left a leak behind: {list(find_leaks(_m))}"
+    #     …and the other direction, because those five widen the net: prose using the same words
+    #     must stay clean, or the check cries wolf and the next person deletes it.
+    for _ok in ("credentials: see 1Password", "the refresh token expires in an hour",
+                "Cookie 를 굽는 법", "https://github.com/HwangTaehyun/kallimachos",
+                "set-cookie 헤더가 무엇인지", "the api_key parameter is documented below"):
+        assert not find_leaks(_ok), f"ordinary prose read as a secret: {_ok!r}"
 
     for _short in ("key: v2", "pass: OK", "token: A1", "password: x9"):
         assert not find_leaks(_short), \

@@ -3,6 +3,9 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -149,6 +152,41 @@ func TestAllowedHost(t *testing.T) {
 	} {
 		if got := allowedHost(c.host, c.domain); got != c.want {
 			t.Errorf("%s: allowedHost(%q, %q) = %v, want %v", c.name, c.host, c.domain, got, c.want)
+		}
+	}
+}
+
+// TestNamedTestsExist —— a comment that names a test as its guarantor must name one that exists.
+//
+//	Comments in this package cite tests by name ("`Test<Name>` pins this" —— written with angle
+//	brackets right here so this very sentence is not read as a citation), and those names are how a
+//	later reader decides a clause is safe to trust.  Three of them named tests that had been
+//	renamed away, so the sentence "it has a named guarantor rather than being trusted" was itself
+//	untrue —— found by an adversarial review on 2026-09-04, after a rename left the prose behind.
+//	Renaming a test now breaks this instead of quietly turning a comment into fiction.
+func TestNamedTestsExist(t *testing.T) {
+	have := map[string]bool{}
+	srcs, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var all []byte
+	for _, f := range srcs {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, b...)
+	}
+	for _, m := range regexp.MustCompile(`(?m)^func (Test[A-Za-z0-9_]+)\(`).FindAllSubmatch(all, -1) {
+		have[string(m[1])] = true
+	}
+	if len(have) == 0 {
+		t.Fatal("no test functions found at all —— this check would pass vacuously")
+	}
+	for _, m := range regexp.MustCompile("`(Test[A-Za-z0-9_]+)`").FindAllSubmatch(all, -1) {
+		if name := string(m[1]); !have[name] {
+			t.Errorf("a comment names `%s` as its guarantor, but no such test exists", name)
 		}
 	}
 }

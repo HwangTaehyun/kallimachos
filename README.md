@@ -23,7 +23,7 @@
 
 ![Galaxy view of the author's real vault: 7,974 entities as star clusters, one colour per topic, with the topic list on the left](.github/assets/galaxy-topics.jpg)
 
-<p align="center"><em>The author's actual vault, rendered by the viewer on 2026-09-01: 7,974 entities, one colour per topic. The same vault now yields 24,527, of which 14,311 fall into the 20 topics and 10,216 into none — clustering names the dense parts of a graph, it does not partition it.  Topics are found by community detection and named from their top entities. The <a href="#try-it-on-the-demo-vault">demo vault</a> in this repo reproduces a smaller graph end-to-end.</em></p>
+<p align="center"><em>The author's actual vault, rendered by the viewer on 2026-09-01: 7,974 entities, one colour per topic. The same vault yielded 24,640 on 2026-09-04, of which 15,763 fall into the 20 topics and 8,877 into none — clustering names the dense parts of a graph, it does not partition it.  Topics are found by community detection and named from their top entities. The <a href="#try-it-on-the-demo-vault">demo vault</a> in this repo reproduces a smaller graph end-to-end.</em></p>
 
 ## What is this, really?
 
@@ -236,8 +236,9 @@ document explaining what replaced it and why. On the reference corpus that is 42
 Conversion never invents metadata, so a migrated vault page keeps only the keys its author wrote
 (measured before enrichment: 17% had `doc_type`, against 100% of the distilled ones;
 `openwiki-enrich` has since brought those 96 migrated pages to 100%, and the bundle as a whole to
-1,114 of 1,118 — the four without one are the bundle's own `README.md`, `SPEC.md` and the two
-vendored files under `references/`, which are scaffolding rather than content). `openwiki-enrich` fills the
+1,115 of 1,118 on 2026-09-04 — the three without one are the bundle's own `README.md` and the two
+vendored files under `references/` (`README.md`, `okf-SPEC-v0.2.md`), which are scaffolding
+rather than content). `openwiki-enrich` fills the
 rest with an LLM and stamps `filled_by:` on the page, so what a model proposed stays visible and
 correctable.
 
@@ -308,7 +309,10 @@ What the relay will not do:
 
 ## What it is not
 
-- **Not a notes app.** Your Markdown stays yours, wherever it already lives. Kallimachos only reads it.
+- **Not a notes app.** Your Markdown stays yours, wherever it already lives. Indexing, search and
+  the graph only ever read it. One step writes: `promote` moves the distilled session documents
+  into the vault and commits them, which is the whole point of that step — `status.py`'s
+  `writes_vault` flag marks it, and the web UI asks before running it.
 - **Not cloud-required.** The pipeline, search, MCP and galaxy view are complete on one machine, offline after setup.
 - **Not magic.** Extraction quality depends on your notes; the eval harness and its blind spots are documented, not hidden.
 

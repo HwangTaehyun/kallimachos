@@ -507,7 +507,7 @@ func logging(h http.Handler) http.Handler {
 //
 // buildsFromVault answers whether an empty vault would make this step destroy something.
 //
-//	It exists as a function so the handler and `TestEveryStepIsClassifiedAgainstTheVaultGuard`
+//	It exists as a function so the handler and `TestEveryStepDeclaresWhetherTheVaultGuardCoversIt`
 //	ask the **same** question.  The test first re-derived the expression inline, and mutating the
 //	handler's copy left it green —— a test that restates the rule instead of calling it is the
 //	shape this repository keeps paying for, and it was reintroduced here within a day of the
@@ -525,7 +525,7 @@ func logging(h http.Handler) http.Handler {
 //
 //	⚠ `Writes != ""` reads a free-text field as a predicate, and "blank means it writes nothing"
 //	  is convention (`verify` declares `"writes": ""  # writes nothing`), not type.  It is safe
-//	  **because** `TestEveryStepIsClassifiedAgainstTheVaultGuard` compares this answer against a
+//	  **because** `TestEveryStepDeclaresWhetherTheVaultGuardCoversIt` compares this answer against a
 //	  written-down expectation for every step: a step that left `writes` blank for cosmetic
 //	  reasons used to slip through silently, and now disagrees with the table by name.  The clause
 //	  has a named guarantor rather than being trusted.
@@ -875,7 +875,8 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 	//	     0 relations —— over the output of an eight-hour extraction.  (destroyed and recovered
 	//	     from `lr_cache.jsonl`, 2026-09-04.)  So the condition comes from the step's **own
 	//	     declaration** rather than a flag someone has to remember: reads the vault, writes
-	//	     something.  `TestVaultGuardCoversEveryVaultReader` pins the resulting set, so
+	//	     something.  `TestBuildsFromVault` pins the resulting set —— it drives the production
+	//	     predicate over a written-down truth table rather than restating it —— so
 	//	     rewording `reads` breaks a test instead of silently opening this hole again.
 	if s.buildsFromVaultDeep(step, nil) {
 		//  ⚠ Two branches, not one.  Failing closed is right; **asserting why** is not —— a Python
