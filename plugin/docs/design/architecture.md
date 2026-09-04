@@ -1,5 +1,14 @@
 # Architecture Design: "Vault Galaxy" — Cinematic 3D Graph Plugin for Obsidian
 
+> **Inherited, unedited, from upstream.**  This is one of [galaxy-view](https://github.com/Longwind1984/galaxy-view)'s pre-implementation design
+> documents by Rick, written for that project on that author's machine and published by them
+> at `docs/design/` in that repository.  It describes the plugin **before** it existed and
+> before this fork —— the absolute paths in it (`/Users/rick/…`) were build instructions there,
+> not prose, and the vault figures are that author's, not this project's.  It is kept as
+> written rather than rewritten: the reasoning is the value, and diverging from upstream's own
+> published copy would gain nothing.  For what this fork actually ships, read
+> [`../../README.md`](../../README.md) and [`../../WORKLOG.md`](../../WORKLOG.md).
+
 Proposed plugin id: `vault-galaxy` (no "obsidian" substring, per store rules; final name is Rick's call — the id is referenced in exactly 3 places: `manifest.json`, the esbuild output path, and the repo folder name `/Users/rick/Claude_Code/Vault_Galaxy/`, so renaming before M1 is a 5-minute change).
 
 ---

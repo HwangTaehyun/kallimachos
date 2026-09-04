@@ -1,4 +1,14 @@
 # 3D Graph Plugin — Risk, Sequencing & Verification Plan
+
+> **Inherited, unedited, from upstream.**  This is one of [galaxy-view](https://github.com/Longwind1984/galaxy-view)'s pre-implementation design
+> documents by Rick, written for that project on that author's machine and published by them
+> at `docs/design/` in that repository.  It describes the plugin **before** it existed and
+> before this fork —— the absolute paths in it (`/Users/rick/…`) were build instructions there,
+> not prose, and the vault figures are that author's, not this project's.  It is kept as
+> written rather than rewritten: the reasoning is the value, and diverging from upstream's own
+> published copy would gain nothing.  For what this fork actually ships, read
+> [`../../README.md`](../../README.md) and [`../../WORKLOG.md`](../../WORKLOG.md).
+
 (Perspective: the skeptic who watched 4 predecessor plugins die on the same wall)
 
 ## 0. New measured facts (from Rick's actual vault, 2026-06-12)

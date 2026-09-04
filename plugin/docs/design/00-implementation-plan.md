@@ -1,5 +1,14 @@
 # Galaxy View — a cinematic 3D graph plugin for Obsidian · the implementation plan
 
+> **Inherited, unedited, from upstream.**  This is one of [galaxy-view](https://github.com/Longwind1984/galaxy-view)'s pre-implementation design
+> documents by Rick, written for that project on that author's machine and published by them
+> at `docs/design/` in that repository.  It describes the plugin **before** it existed and
+> before this fork —— the absolute paths in it (`/Users/rick/…`) were build instructions there,
+> not prose, and the vault figures are that author's, not this project's.  It is kept as
+> written rather than rewritten: the reasoning is the value, and diverging from upstream's own
+> published copy would gain nothing.  For what this fork actually ships, read
+> [`../../README.md`](../../README.md) and [`../../WORKLOG.md`](../../WORKLOG.md).
+
 ## Context (background and goal)
 
 The measured size of Rick's vault "Rick's Second Brain": **3,225 notes, about 19,500 deduplicated effective edges** (note: the current 2D graph has "show unresolved links" on, so it really renders about 9,773 nodes / 27,800 edges).  At that size the built-in 2D Graph View is neither impressive nor much use for discovering patterns.

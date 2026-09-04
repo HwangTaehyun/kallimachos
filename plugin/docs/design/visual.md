@@ -1,5 +1,14 @@
 # Visual & Rendering Pipeline Spec — "Stunning" 3D Graph for Obsidian
 
+> **Inherited, unedited, from upstream.**  This is one of [galaxy-view](https://github.com/Longwind1984/galaxy-view)'s pre-implementation design
+> documents by Rick, written for that project on that author's machine and published by them
+> at `docs/design/` in that repository.  It describes the plugin **before** it existed and
+> before this fork —— the absolute paths in it (`/Users/rick/…`) were build instructions there,
+> not prose, and the vault figures are that author's, not this project's.  It is kept as
+> written rather than rewritten: the reasoning is the value, and diverging from upstream's own
+> published copy would gain nothing.  For what this fork actually ships, read
+> [`../../README.md`](../../README.md) and [`../../WORKLOG.md`](../../WORKLOG.md).
+
 Perspective: visual design + render pipeline. Every value below is a concrete starting point an implementer can type in without taste of their own; values marked **[tune@gate]** are expected to be adjusted at Rick's preview gate.
 
 Ground truth pulled from the live vault (the folder names below are Rick's real ones and stay as they are —— the colour-group mapping is keyed on those exact strings):
