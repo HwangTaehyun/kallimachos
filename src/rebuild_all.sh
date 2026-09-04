@@ -87,8 +87,18 @@ echo
 $PY ablate_params.py --json
 
 step "6/6  export the graph — the 3D viewer · graphml · json · Obsidian"
-$PY export_graph.py --min-degree 2 --max-nodes 700 \
-    --obsidian "$VAULT/kg"
+#  ⚠ **`--obsidian` writes ~700 notes into the vault, and only an Obsidian vault wants them.**
+#     Against an openwiki bundle —— a published git repository —— it drops 3.5 MB of generated
+#     pages into something that goes out.  `export_all.sh` was given this guard on 2026-09-04 and
+#     **this file was not**, so the two scripts answered the same question differently for a day.
+#     (codex adversarial review 2026-09-04, finding #2 —— reproduced with KAL_PYTHON=/usr/bin/true)
+if [ -d "$VAULT/.obsidian" ]; then
+  $PY export_graph.py --min-degree 2 --max-nodes 700 \
+      --obsidian "$VAULT/kg"
+else
+  echo "   no .obsidian/ — the vault-notes projection is skipped (not an Obsidian vault)"
+  $PY export_graph.py --min-degree 2 --max-nodes 700
+fi
 # viewer/ is a host convenience, not a pipeline artifact.  It is not mounted in the container,
 # so set -e killed the whole thing here (export_all.sh already guards it for the same reason).
 if [ -f "$KAL_HOME/graph_export/graph3d.html" ] && [ -d "$SRC/../viewer" ]; then
@@ -107,11 +117,17 @@ if [ -d "$SRC/../plugin/node_modules" ]; then
 (
   cd "$SRC/../plugin" &&
   node esbuild.web.mjs &&
-  node esbuild.config.mjs production &&
-  mkdir -p "$VAULT/.obsidian/plugins/kal-galaxy" &&
-  cp dist/main.js dist/manifest.json dist/styles.css \
-     "$VAULT/.obsidian/plugins/kal-galaxy/"
+  node esbuild.config.mjs production
 )
+#  ⚠ Install into the vault only if it **is** an Obsidian vault —— `mkdir -p` would otherwise
+#     create `.obsidian/plugins/` inside a bundle that gets published.  Same gate as above.
+if [ -d "$VAULT/.obsidian" ]; then
+  mkdir -p "$VAULT/.obsidian/plugins/kal-galaxy" &&
+  cp "$SRC/../plugin/dist/main.js" "$SRC/../plugin/dist/manifest.json" \
+     "$SRC/../plugin/dist/styles.css" "$VAULT/.obsidian/plugins/kal-galaxy/"
+else
+  echo "   the vault has no .obsidian/ — plugin install skipped"
+fi
 else
   echo "   no plugin/node_modules — skipping the bundle rebuild (normal in a container)"
 fi

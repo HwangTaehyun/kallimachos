@@ -33,6 +33,11 @@ KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
 # Where the vault lives.  Mounted at /vault inside the container (see docker-compose).
 VAULT = vault_path.vault()
 OUT = os.path.join(KAL_HOME, "lr_kg.json")
+#  How far the entity count may fall in one run before the write refuses.  Extraction is not
+#  incremental —— a run either sees the vault or it does not —— so anything approaching a halving
+#  means the input is wrong, not that the notes changed.  `schema_v3.DB_SHRINK_RATIO` guards the
+#  database the same way and for the same reason.
+KG_SHRINK_RATIO = 0.67
 CACHE = os.path.join(KAL_HOME, "lr_cache.jsonl")   # for resuming — appends the raw response per chunk
 SUM_CACHE = os.path.join(KAL_HOME, "lr_summary_cache.jsonl")   # entity profile summary cache
 
@@ -1088,6 +1093,34 @@ def _main_extract():
         v.pop("frags", None)
         v.pop("hist", None)
     fail = sum(1 for r in results if r.get("failed"))
+
+    #  ⚠ **Do not replace a populated graph with a much smaller one.**  This single `json.dump`
+    #     is the only writer of `lr_kg.json`, and it had no guard in any language —— so an empty
+    #     or mis-set vault produced `0 entities · 0 relations · 0s` and overwrote the output of an
+    #     eight-hour extraction.  That is not hypothetical: it happened on 2026-09-04, through the
+    #     web UI, and recovery was only possible because `lr_cache.jsonl` survived.
+    #
+    #     The Go handler's empty-vault refusal does not cover this.  It gates `extract`, but the
+    #     **combo** steps (`refresh_kg`, `apply_aliases`, `rebuild_all`) run their own command and
+    #     never pass through it, and `just extract` on the host never touches Go at all.  Same
+    #     lesson as `schema_v3`'s shrink guard: the check belongs where the write happens.
+    #     (codex adversarial review 2026-09-04, finding #1)
+    _prior = 0
+    if os.path.exists(OUT):
+        try:
+            _prior = len(json.load(open(OUT, encoding="utf-8")).get("entities") or [])
+        except Exception as e:
+            #  Not knowing is not permission —— the same rule as the DB guard.
+            raise SystemExit(f"❌ cannot read the existing {OUT} to compare, so refusing to "
+                             f"overwrite it: {e}\n   Move it aside if it is corrupt.")
+    if _prior and len(ents) < _prior * KG_SHRINK_RATIO and "--allow-shrink" not in sys.argv:
+        raise SystemExit(
+            f"❌ this run produced {len(ents):,} entities but {OUT} holds {_prior:,} —— "
+            f"writing it would throw away {_prior - len(ents):,}.\n"
+            f"   VAULT={VAULT}  ({len(cs):,} chunk(s) this run)\n"
+            f"   If the vault really shrank, pass --allow-shrink.  If it looks empty, check "
+            f"KAL_VAULT before anything else —— that is what this has always been.")
+
     json.dump({"entities": ents, "relationships": rels,
                "chunks": len(cs), "failed": fail,
                # The vault state this extraction saw.  schema_v3 checks it against its own scan.
@@ -1265,6 +1298,35 @@ def _selftest():
         assert not _bad2, f"case/unicode folding is wrong for: {_bad2}"
     finally:
         _g["NO_LLM"] = _n0
+    # ── The graph write must refuse to shrink drastically ───────────────────────────────
+    #  This is the write that was destroyed on 2026-09-04: an empty vault produced
+    #  `0 entities · 0 relations · 0s` and replaced an eight-hour extraction.  Driven as a
+    #  **subprocess against the real entry point**, because the failure was that no caller in any
+    #  language checked —— testing the comparison in isolation would agree with itself.
+    import subprocess as _sp, tempfile as _tf3, json as _j3
+    with _tf3.TemporaryDirectory() as _d3:
+        _home, _empty = os.path.join(_d3, "home"), os.path.join(_d3, "empty")
+        os.makedirs(_home); os.makedirs(_empty)
+        _out = os.path.join(_home, "lr_kg.json")
+        _j3.dump({"entities": [{"name": f"e{i}"} for i in range(100)],
+                  "relationships": [], "chunks": 0, "failed": 0,
+                  "doc_hashes": {}, "extracted_at": 0}, open(_out, "w"))
+        _env = {**os.environ, "KAL_VAULT": _empty, "KAL_HOME": _home}
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _r = _sp.run([sys.executable, os.path.join(_here, "lr_extract.py")],
+                     env=_env, capture_output=True, text=True)
+        assert _r.returncode != 0, "an empty vault overwrote a populated graph"
+        assert "throw away" in _r.stdout + _r.stderr, \
+            f"the refusal does not say what would be lost: {(_r.stdout + _r.stderr)[-300:]}"
+        assert len(_j3.load(open(_out))["entities"]) == 100, \
+            "the guard fired but the file was written anyway"
+        #  …and the escape hatch works, or the guard becomes something people delete.
+        _r2 = _sp.run([sys.executable, os.path.join(_here, "lr_extract.py"), "--allow-shrink"],
+                      env=_env, capture_output=True, text=True)
+        assert len(_j3.load(open(_out))["entities"]) == 0, \
+            f"--allow-shrink did not get past the guard: {(_r2.stdout + _r2.stderr)[-200:]}"
+    print("  ✅ the graph write refuses to replace a populated lr_kg.json (and --allow-shrink passes)")
+
     print("  ✅ NO_LLM path matching —— 6 README rows · case-insensitive · NFC/NFD (both ways)")
     assert _k[:3] == ("a.md", 0, "HH"), f"the head of the key changed: {_k}"
     assert cache_key(_c) != (_c["doc"], _c["idx"], _c["h"]), "the key does not distinguish versions"

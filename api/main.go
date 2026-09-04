@@ -533,6 +533,40 @@ func buildsFromVault(step Step) bool {
 	return strings.Contains(step.Reads, "vault") && step.Writes != ""
 }
 
+// buildsFromVaultDeep is `buildsFromVault` followed through a combo's `runs`.
+//
+//	⚠ A combo does **not** re-dispatch its children through `startRun` —— `Runs` is a display
+//	  field, and `refresh_kg` / `apply_aliases` / `rebuild_all` each execute one command of their
+//	  own.  So the children's guards never fire, while the combo's own `reads`/`writes` are empty
+//	  —— `buildsFromVault` answered false for all three.  Clicking "Refresh stale KG" in a
+//	  viewer-mode container therefore reached `lr_extract` against an empty vault, which is the
+//	  exact route that overwrote an eight-hour graph on 2026-09-04.
+//
+//	  Today an LLM guard happens to stop those three first.  That is luck, not cover: it is gone
+//	  the moment a relay is running, which is the documented setup, and gone on Linux where no
+//	  relay is needed at all.  (codex adversarial review 2026-09-04, finding #1)
+//
+//	  `seen` is not defensive dressing —— `runs` is free-text data from status.py, and a cycle
+//	  there would hang an HTTP handler rather than fail a test.
+func (s *Server) buildsFromVaultDeep(step Step, seen map[string]bool) bool {
+	if buildsFromVault(step) {
+		return true
+	}
+	if seen == nil {
+		seen = map[string]bool{}
+	}
+	if seen[step.ID] {
+		return false
+	}
+	seen[step.ID] = true
+	for _, id := range step.Runs {
+		if child, ok := s.steps[id]; ok && s.buildsFromVaultDeep(child, seen) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) indexableCount(ctx context.Context, root string, limit int) (int, error) {
 	if root == "" {
 		return 0, nil
@@ -843,7 +877,7 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 	//	     declaration** rather than a flag someone has to remember: reads the vault, writes
 	//	     something.  `TestVaultGuardCoversEveryVaultReader` pins the resulting set, so
 	//	     rewording `reads` breaks a test instead of silently opening this hole again.
-	if buildsFromVault(step) {
+	if s.buildsFromVaultDeep(step, nil) {
 		//  ⚠ Two branches, not one.  Failing closed is right; **asserting why** is not —— a Python
 		//     crash, a missing schema_v3, an import-time SystemExit and a genuinely empty vault
 		//     all reached the user as "this container was started without a vault", a cause the

@@ -364,7 +364,14 @@ selftest-py:
     @#     nothing to do", and an empty temporary vault is exactly that state.  Using the
     @#     author's vault would make this check run on that machine alone (2026-08-25).
     @T=$(mktemp -d) && KAL_VAULT="$T" KAL_DIR="$T" {{py}} {{src}}/promote_distilled.py --dry-run >/dev/null && rm -rf "$T" && echo "  ✅ promote --dry-run exits 0"
-    @bash -n {{src}}/rebuild_all.sh && echo "  ✅ rebuild_all.sh syntax"
+    @bash -n {{src}}/rebuild_all.sh && bash -n {{src}}/export_all.sh && echo "  ✅ rebuild_all.sh · export_all.sh syntax"
+    @#  ⚠ Syntax was the **only** thing checked here, and the two scripts drifted: `export_all.sh`
+    @#     learned not to write `kg/` and `.obsidian/` into a vault that is not an Obsidian vault,
+    @#     and `rebuild_all.sh` did not —— for a day, `bash -n` green the whole time.  They answer
+    @#     the same question, so they are compared answering it.  KAL_PYTHON=/usr/bin/true makes
+    @#     the run write nothing; only the branch taken is observed.
+    @#     (codex adversarial review 2026-09-04)
+    @{{py}} {{src}}/check_vault_writes.py
     @#  ⚠ Neither .gitignore nor .dockerignore supports an end-of-line comment —— the whole
     @#     line becomes one pattern and matches nothing.  Both files say so in their own
     @#     headers, and .dockerignore:22 was that shape anyway.  Measured 2026-09-01 with

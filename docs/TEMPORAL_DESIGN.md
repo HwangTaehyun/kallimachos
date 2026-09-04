@@ -12,7 +12,7 @@ Every basis is a measurement from this repository.  Estimates are marked `assump
 
 ## 0. What the problem is (measured)
 
-`group_nodes()` ([`src/lr_extract.py:444`](../src/lr_extract.py)) collects fragments like this
+`group_nodes()` ([`src/lr_extract.py:449`](../src/lr_extract.py)) collects fragments like this
 ([`:336-343`](../src/lr_extract.py)):
 
 ```python

@@ -454,10 +454,14 @@ func TestEveryStepDeclaresWhetherTheVaultGuardCoversIt(t *testing.T) {
 				"(reads=%q writes=%q)", id, st.Reads, st.Writes)
 			continue
 		}
-		//  ② agreement.  Runtime uses `buildsFromVault`; this is the cross-check.  A reworded
-		//     `reads` flips the derived answer against the declared one and names both halves,
-		//     so the author sees which of the two they meant to change.
-		if got := buildsFromVault(st); got != *st.VaultDerived {
+		//  ② agreement.  Ask **the function the handler calls** —— the deep one, which follows a
+		//     combo's `runs`.  A reworded `reads` flips the derived answer against the declared
+		//     one and names both halves, so the author sees which they meant to change.
+		//     ⚠ This asked the shallow `buildsFromVault` at first.  When the handler moved to
+		//        `buildsFromVaultDeep`, the test kept agreeing with the shallow answer: the three
+		//        combos stayed declared `false` while the runtime began refusing them, and nothing
+		//        went red.  The same shape as re-deriving the expression inline, one level up.
+		if got := s.buildsFromVaultDeep(st, nil); got != *st.VaultDerived {
 			t.Errorf("step %q: declared vault_derived=%v but the guard derives %v from its own "+
 				"fields (reads=%q writes=%q) —— change whichever one is wrong, deliberately",
 				id, *st.VaultDerived, got, st.Reads, st.Writes)

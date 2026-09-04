@@ -383,18 +383,18 @@ STEPS = [
              "chunks reach the LLM.",
      "runs": ["extract", "index", "export"],
      "cmd": ["refresh_kg.py"],
-     "minutes": 35, "needs_llm": True, "writes_db": True, "vault_derived": False},
+     "minutes": 35, "needs_llm": True, "writes_db": True, "vault_derived": True},
     {"id": "apply_aliases", "title": "Apply aliases only (fast)", "group": "combo", "order": 0,
      "desc": "Apply aliases.yml to the graph. Skips extraction, so it is fast, but newly merged "
              "entities get stitched descriptions instead of an LLM re-summary.",
      "runs": ["index", "export"],
      "cmd": ["refresh_kg.py", "--aliases-only"],
-     "minutes": 5, "needs_llm": True, "writes_db": True, "vault_derived": False},
+     "minutes": 5, "needs_llm": True, "writes_db": True, "vault_derived": True},
     {"id": "rebuild_all", "title": "Full rebuild", "group": "combo", "order": 0,
      "desc": "Everything from distill to export, including weight tuning and evaluation.",
      "runs": ["distill", "promote", "extract", "index", "export", "verify"],
      "cmd": ["rebuild_all.sh"],
-     "minutes": 60, "needs_llm": True, "writes_db": True, "vault_derived": False},
+     "minutes": 60, "needs_llm": True, "writes_db": True, "vault_derived": True},
 
     # ── Partial refresh ───────────────────────────────────────────
     {"id": "sync", "title": "Incremental sync", "group": "partial", "order": 0,
@@ -403,6 +403,14 @@ STEPS = [
      "reads": "vault **/*.md", "writes": "chunks · ix_* · stale_docs",
      "cmd": ["sync_v3.py"],
      "minutes": 1, "needs_llm": False, "writes_db": True, "vault_derived": True},
+
+    #  ⚠ The three combos above are `vault_derived: True` even though their own `reads`/`writes`
+    #     are empty.  A combo does **not** re-dispatch its children through the API —— it runs one
+    #     command of its own —— so the children's guards never fire and the combo inherits their
+    #     hazard.  `api/main.go`'s `buildsFromVaultDeep` follows `runs` for exactly this, and the
+    #     classification test compares against **that** function.  Declaring them False is what let
+    #     "Refresh stale KG" reach `lr_extract` on an empty vault.
+    #     (codex adversarial review 2026-09-04)
 
     # ── Checks ────────────────────────────────────────────────────
     {"id": "verify", "title": "Verify docs", "group": "check", "order": 0,
