@@ -155,8 +155,8 @@ Lines affected: `260 · 276 · 283 · 286 · 353-357 · 492` (`v.pop("descriptio
 ### 2.3 Merging happens **twice**
 
 After `lr_extract.group_nodes()`, [`entity_resolve.py:197 build_canon()`](../src/entity_resolve.py)
-merges again —— [`schema_v3.py:1088`](../src/schema_v3.py) `build_graph()` calls it at line 1104,
-and folded by `merged[k]["docs"] |= set(e["docs"])` at [`schema_v3.py:1136`](../src/schema_v3.py).
+merges again —— [`schema_v3.py:1093`](../src/schema_v3.py) `build_graph()` calls it at line 1104,
+and folded by `merged[k]["docs"] |= set(e["docs"])` at [`schema_v3.py:1141`](../src/schema_v3.py).
 
 Timeline combination rules in the second merge:
 
