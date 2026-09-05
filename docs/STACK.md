@@ -227,9 +227,11 @@ Rather than running for 30 minutes and failing on every chunk, the API checks **
 and blocks with 412. The UI disables that button and shows the host command instead.
 
 ```
-   works in the container      promote to vault · rebuild index · incremental sync · verify docs
-   run on the host             distil sessions · extract KG · refresh stale KG ·
+   works in the container      promote to vault · rebuild index · incremental sync
+   run on the host             distil sessions · extract KG · refresh stale KG · verify docs ·
                                export graph · full rebuild        →  just <stage>
+   (verify docs needs the LLM relay like the others —— the container answers 412 for it;
+    see DOCKER-SETUP §5b.  This table once listed it under the container.)
 ```
 
 Check:  `GET /api/llm` · `GET /api/llm?fresh=1` (to re-ask after logging in)
@@ -298,9 +300,10 @@ fix, real-data candidates went from 29 to 30 pairs, and the added one is exactly
 - **There is still no authentication.** Loopback binding is the only thing holding that premise
   up. Attaching a domain with `just up-tls` requires putting basic auth or forward-auth in
   **first**. The same condition applies to reverting the ports to `0.0.0.0`.
-- **`/var/run/docker.sock` is mounted `:ro` into proxy and acme** (`tls` profile). Read-only
-  blocks container creation and exec, but if the proxy is breached, other containers' environment
-  variables and labels are visible. Weigh that before exposing 80/443.
+- **`/var/run/docker.sock` is mounted `:ro` into proxy and acme** (`tls` profile). `:ro` makes only
+  the **socket file** read-only —— the Docker API calls travelling over it are untouched, so either
+  container effectively holds host root (docker-compose.yml says the same beside the mount). A
+  socket-proxy in front is the only real reduction. Weigh that before exposing 80/443.
 
 ---
 

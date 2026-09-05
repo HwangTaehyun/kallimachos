@@ -147,7 +147,7 @@ The vault path lives in **three** places, and they are updated by three differen
 ```
    ~/.kal/config.json     CLI · MCP          ─┐
    .env  VAULT_DIR        compose            ─┴─  just vault <path>   (writes both)
-   the running container's mount             ───  docker compose up -d
+   the running container's mount             ───  docker compose -f docker-compose.yml up -d
 ```
 
 `just vault` (and `just openwiki-adopt`, which calls it) writes the first two. **The container keeps
@@ -329,13 +329,13 @@ Two different gates, both read from `.env`:
 | Symptom | Cause | Fix |
 |---|---|---|
 | `VAULT_DIR is not set` on `up` | no `.env`, or the key is missing | `just env`, then `just vault <path>` |
-| container starts, cannot write `~/.kal` | `UID`/`GID` do not match the host | `echo "UID=$(id -u)" >> .env`, same for `GID`, `docker compose up -d` |
+| container starts, cannot write `~/.kal` | `UID`/`GID` do not match the host | `echo "UID=$(id -u)" >> .env`, same for `GID`, `just up-prod` |
 | every document shows as **deleted** | `KAL_VAULT` not reaching the process | it is set in compose; a script bypassing it is the bug ([§4](#4-paths-are-different-inside)) |
-| search finds documents the screen cannot open | the mount is older than `VAULT_DIR` | `docker compose up -d` ([§5](#5-changing-the-vault--the-step-people-miss)) |
+| search finds documents the screen cannot open | the mount is older than `VAULT_DIR` | `just up-prod` ([§5](#5-changing-the-vault--the-step-people-miss)) |
 | LLM steps return **412** | no relay, or the wrong token | `just relay` on the host, copy both values into `.env` |
 | indexing works but extraction does not | that is by design —— indexing needs no LLM, extraction does | see [§5b](#5b-what-actually-builds-the-knowledge-db) |
 | `api` never becomes healthy | the health check is `GET /api/health` | `just logs api` — it is usually a mount permission |
-| the page loads but the API 403s behind a domain | `DOMAIN` is not in the Host allowlist | set `DOMAIN` in `.env`, `docker compose up -d` |
+| the page loads but the API 403s behind a domain | `DOMAIN` is not in the Host allowlist | set `DOMAIN` in `.env`, `just up-prod` |
 | a `~` in `.env` | the shell does not expand it there | write the path absolute |
 
 ---

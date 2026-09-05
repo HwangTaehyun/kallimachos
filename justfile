@@ -572,7 +572,13 @@ mcp-test:
     @#     Removing the default exposed it (2026-08-25).  It is stated explicitly through `_vault`.
     @KAL_VAULT="$(just _vault)" {{py}} {{src}}/kal_mcp.py --selftest
 
-#  Upload to the cloud —— **the index (db/) only**, never the source text.  The token and address come from the
+#  Upload to the cloud —— **the index (db/)**.  ⚠ That is not "never the source text": `chunks.lance` holds
+#  every indexed note's body in 500-character pieces (that is what search returns), `documents.lance` carries
+#  the absolute host path and `meta.lance` the vault path.  Whatever `no_llm`/`KAL_NO_LLM` excludes is gated at
+#  **serve** time by the remote MCP, not at upload —— the tar is the whole directory (deep-review 2026-09-05,
+#  sync lens; 0 gated documents in the author's index that day, so no data left that should not have).
+#  A cloud export that drops gated rows and strips host paths before the tar is the open item.
+#  The token and address come from the
 #  app's MCP screen (app.kallimachos.dev).  The server swaps the tar into the user's folder wholesale (so an
 #  interruption leaves the old graph alive), so re-running the same command whenever the index changes is enough.
 push:

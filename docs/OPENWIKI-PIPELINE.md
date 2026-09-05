@@ -258,7 +258,7 @@ docker compose -f docker-compose.yml up -d   # the container follows only when t
 #    and replaces the production web with the vite dev server (see DOCKER-SETUP.md).
 ```
 
-Reversible: `just vault <the-original-vault>` and `docker compose up -d` again.
+Reversible: `just vault <the-original-vault>` and `just up-prod` again.
 
 The galaxy graph is written to `~/.kal/graph_export/kal-graph.json`, not into the bundle.
 A copy goes into a vault only when that vault has a `.obsidian/` —— a bundle is not an
@@ -274,7 +274,8 @@ The mount, the `.env` value and `~/.kal/config.json` are three separate things �
 
 `~/.kal/config.json` (CLI · MCP) · `.env` `VAULT_DIR` (container) · the running container's mount.
 Change one and the others keep their old value **with no error at all** — the screen and the DB
-simply disagree. `just vault` writes the first two; `docker compose up -d` fixes the third.
+simply disagree. `just vault` writes the first two; `just up-prod` (never a bare `docker compose up -d` —— that
+layers the dev override) fixes the third.
 
 ### Adopting arms a self-migration
 

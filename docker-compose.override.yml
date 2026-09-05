@@ -6,8 +6,8 @@
 #   api  → src/ is mounted, so editing Python takes effect on the next run
 #
 #          ⚠ **Not for the step catalog.**  Go reads `STEPS`/`GROUPS` out of status.py once
-#            at boot (api/main.go:213, into `s.steps`) and `GET /api/steps` serves that copy
-#            (api/main.go:516).  Everything the api shells out to per request —— status, and
+#            at boot (`s.steps` in api/main.go) and the `/api/steps` handler serves that copy ——
+#            cited by symbol, because the line numbers written here twice went stale.  Everything the api shells out to per request —— status, and
 #            a step it actually runs —— does pick up an edit immediately; a new step, a
 #            renamed label or a changed group does not, until the api container restarts.
 #            Nothing errors: the screen just keeps showing the old catalog.

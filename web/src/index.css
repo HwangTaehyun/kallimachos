@@ -37,15 +37,28 @@
   --color-accent: oklch(0.80 0.13 72);
 
   /* The type scale —— 6 steps.  No size outside this is used */
-  --text-2xs: 0.6875rem;  /* 11px  meta · chips */
+  /*  Default line-heights per text size.  cloud/web set these on 2026-08-29 while kal/web kept
+      leaning on `leading-*` utilities; tests/tokens.test.ts (here, cloud/web, www) requires one
+      block, and it had been red on both consumers for a week.  kal/web is the source of truth,
+      so the five values live here and the others copy (deep-review 2026-09-05). */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1.45;  /* 11px  meta · chips */
 
-  --text-xs:  0.75rem;    /* 12px  supporting text */
+  --text-xs:  0.75rem;
 
-  --text-sm:  0.8125rem;  /* 13px  body */
+  --text-xs--line-height: 1.5;    /* 12px  supporting text */
 
-  --text-md:  0.9375rem;  /* 15px  item titles */
+  --text-sm:  0.8125rem;
 
-  --text-lg:  1.125rem;   /* 18px  section titles */
+  --text-sm--line-height: 1.65;  /* 13px  body */
+
+  --text-md:  0.9375rem;
+
+  --text-md--line-height: 1.45;  /* 15px  item titles */
+
+  --text-lg:  1.125rem;
+
+  --text-lg--line-height: 1.35;   /* 18px  section titles */
 
   --text-xl:  1.5rem;     /* 24px  numbers */
   --text-xl--line-height: 1.15;
