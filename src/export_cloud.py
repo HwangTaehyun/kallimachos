@@ -6,8 +6,9 @@ copy has no business holding (deep-review 2026-09-05, sync lens D3):
 
   · `documents.abs_path` —— the absolute path on the host (`/Users/<you>/…`) for every note.
   · `meta.vault_path`   —— the vault's location on the host.
-  · every row derived from a `no_llm` document —— the 500-character body pieces in `chunks`, and
-    the BM25 rows keyed by those chunks (`ix_doclen`, `ix_postings`).  Locally these stay (the
+  · every row derived from a gated document —— gated by the frontmatter flag `no_llm` **or** by a
+    `KAL_NO_LLM` path (both are resolved into `documents.no_llm` at index time since 2026-09-05;
+    the path rule is applied here again for indexes built before that).  Locally these stay (the
     note is searchable on your own machine); remotely the MCP already refuses to return them,
     but "gated at serve time" still meant the text left the machine.
 
@@ -19,10 +20,10 @@ What the export does, table by table:
               **which** doc_ids are gated from this table, and the entity/relation `doc_ids` lists
               still point at them.  Drop the row and the serve-time gate goes blind.
   chunks      rows whose `doc_id` is gated are dropped.
-  ix_doclen · ix_postings   rows whose `chunk_id` belonged to a gated document are dropped.
-  ix_terms    left as-is —— `df`/`idf` still count the dropped chunks.  That is a ranking detail
-              (a slightly wrong idf for a few terms), not text; documented here rather than fixed
-              because a recount would mean re-running the whole BM25 build.
+  ix_terms · ix_postings · ix_doclen   **not exported at all.**  Search uses lancedb's FTS index on
+              `chunks.text`; the only readers of these hand-rolled BM25 tables are the ablation and
+              manual-index scripts.  Leaving them out drops ~106 MB per push and keeps the
+              3-gram vocabulary of gated text (`ix_terms.term`) on the machine.
   lr_entities · lr_relations   left as-is —— their `description`/`events` may summarise gated
               text, and the serve-time gate (`llm_gate`) filters them by `doc_ids`.  Removing them
               here would need the same rule in two places.
