@@ -68,7 +68,7 @@ Things to check in `.env`:
 | `UID` / `GID` | must match the host to be able to **write** to the mounted `~/.kal` |
 | `KAL_DIR` · `VAULT_DIR` · `CLAUDE_DIR` | absolute host paths (`~` is not expanded) |
 | `DOMAIN` | `nginx-proxy` routes on this value |
-| `KAL_NO_LLM` | paths extraction must **not** send off the machine (colon-separated) |
+| `KAL_NO_LLM` | colon-separated paths gated **everywhere**: indexed as `no_llm` (since 2026-09-05), hidden by the local and remote MCP, stubbed by `just push` —— not only kept from extraction |
 
 ### Paths differ inside the container
 

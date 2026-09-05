@@ -107,6 +107,10 @@ globally) tells the agent when to reach for the tools:
 ```markdown
 ## Knowledge lookup
 
+Argument names are exact: `kal_search` takes `query` and `top` (how many hits; default 20). The MCP SDK
+**ignores unknown arguments without an error**, so a call with `limit: 3` is answered with the default 20 hits and
+nothing says why (measured 2026-09-06). Check the count you get back once.
+
 For questions about my notes, try `kal_search` first. The answer carries its sources (`docs`),
 so cite them directly. Use `kal_doc` when you need the original text.
 ```

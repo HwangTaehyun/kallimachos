@@ -138,6 +138,8 @@ def export(src, dst):
         elif name == "meta":
             t = t.filter(pc.invert(pc.equal(t.column("key"), "vault_path")))
         elif "doc_id" in t.column_names:
+            #  Covers `stale_docs` too (doc_id + the vault path): a gated note's path must not travel.  A separate
+            #  path rule was tried and could not fire —— this one already removes the row (R4, sync lens; mutation).
             t = _drop_rows(t, "doc_id", gated)
         elif "chunk_id" in t.column_names:
             t = _drop_rows(t, "chunk_id", gated_chunks)
@@ -188,7 +190,11 @@ def _selftest():
         "char_start": pa.array([0], pa.int32()), "text": ["TAX BODY"], "origin": ["vault"], "vector": pa.array([[0.1] * 4], vec)}))
     os.environ["KAL_NO_LLM"] = "Finance"
     import lr_extract
-    lr_extract.NO_LLM = [x for x in os.environ["KAL_NO_LLM"].split(":") if x] if hasattr(lr_extract, "NO_LLM") else None
+    #  The same cleaner the real setting goes through (schema_v3._clean_pathspec) —— a raw list bypassed it (R4, sync lens).
+    import schema_v3 as _S
+    lr_extract.NO_LLM = _S._clean_pathspec(os.environ["KAL_NO_LLM"])
+    db.create_table("stale_docs", data=pa.table({"doc_id": pa.array([3, 1], pa.int32()), "path": ["Finance/tax.md", "ok.md"],
+                                                  "reason": ["modified", "added"], "marked_at": pa.array([1, 1], pa.int64())}))
     r = export(src, dst)
     out = lancedb.connect(dst)
     d = {row["doc_id"]: row for row in out.open_table("documents").to_arrow().to_pylist()}
@@ -203,6 +209,7 @@ def _selftest():
     assert [c["chunk_id"] for c in chunks] == [10000], f"gated chunks must be gone: {chunks}"
     assert "SECRET" not in " ".join(c["text"] for c in chunks) and "TAX" not in " ".join(c["text"] for c in chunks)
     assert "vault_path" not in {m["key"] for m in out.open_table("meta").to_arrow().to_pylist()}, "meta.vault_path must not be exported"
+    assert [r["path"] for r in out.open_table("stale_docs").to_arrow().to_pylist()] == ["ok.md"], "a gated note's stale_docs row (its vault path) must not be exported"
     names = {getattr(i, "name", str(i)) for i in out.open_table("chunks").list_indices()}
     assert any("text" in n for n in names), f"the FTS index on chunks.text must be rebuilt on the copy: {names}"
     #  …and the copy must answer a lexical query the way the original does —— `kal_search.bm25` now raises when the

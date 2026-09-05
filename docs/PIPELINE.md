@@ -849,7 +849,7 @@ Three things to know:
    ① it accumulates     a row is added on every sync run
    ② duplicates appear  editing the same document twice makes two rows
                         → count **distinct doc_id**, not rows
-   ③ a rebuild empties it   schema_v3.py:1443 does drop_table("stale_docs")
+   ③ a rebuild empties it   schema_v3.py:1449 does drop_table("stale_docs")
                         because doc_ids and the KG are both remade, making old marks false alarms
 ```
 

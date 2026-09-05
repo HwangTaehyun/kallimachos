@@ -64,6 +64,12 @@ def _mtime(p):
     return int(os.path.getmtime(p)) if os.path.exists(p) else 0
 
 
+def _gate_stale(no_llm_paths, gate_era):
+    """KAL_NO_LLM paths are configured but the index has no meta `gate` row (built before 2026-09-05):
+    every reader that trusts documents.no_llm serves those notes.  Nothing configured → never stale."""
+    return bool(no_llm_paths) and gate_era != "row"
+
+
 def _push_state(home=None, db=None):
     """What `just push` last recorded, and whether the index has moved since.
 
@@ -74,12 +80,20 @@ def _push_state(home=None, db=None):
     home = home or KAL_HOME
     db = db or DB
     p = os.path.join(home, "push.json")
+    url_now = (os.environ.get("KAL_CLOUD_URL") or "").rstrip("/")
     if not os.path.isfile(p):
-        return None
+        #  Never pushed.  Silent unless the shell says where pushes go (KAL_CLOUD_URL) —— then "nothing
+        #  was ever pushed there" is worth a line (deep-review 2026-09-06 R4, completeness + sync lenses).
+        return {"never": True, "url": url_now} if url_now else None
     try:
         rec = json.load(open(p))
     except (OSError, ValueError) as e:
         return {"error": f"push.json unreadable: {e}"}
+    #  A second URL overwrites the single record: without this the screen said "as new as the index" for a
+    #  server that received nothing.  Only the record's URL is compared —— the server's side (revoke, delete,
+    #  rollback after a 500) is invisible from here; the label says so.
+    rec["url_mismatch"] = bool(url_now and rec.get("url") and url_now != str(rec["url"]).rstrip("/"))
+    rec["url_now"] = url_now
     files = glob.glob(os.path.join(db, "**", "*"), recursive=True)
     now_mtime = int(max((os.path.getmtime(f) for f in files if os.path.isfile(f)), default=0))
     rec["stale"] = now_mtime > int(rec.get("db_mtime", 0) or 0)
@@ -144,6 +158,7 @@ def _empty_status(tables):
     """
     from schema_v3 import VAULT          # the same source collect() uses
     return {
+        "gate_stale": False,            # no index yet → nothing to serve
         "empty": True,
         "db": {
             "path": DB, "tables": {t: 0 for t in tables}, "disk_bytes": _dirsize(DB),
@@ -182,6 +197,7 @@ def collect():
     meta = {r["key"]: r["value"] for r in
             db.open_table("meta").search().limit(99).to_list()}
     built_at = int(meta.get("built_at", 0) or 0)
+    gate_era = meta.get("gate")
 
     docs = db.open_table("documents").search().limit(999999).to_list()
     by_path = {d["path"]: d for d in docs}
@@ -316,6 +332,8 @@ def collect():
     stale_artifacts = [k for k, v in artifacts.items() if v and built_at and v < built_at]
 
     return {
+        #  KAL_NO_LLM paths are configured but the index predates the row gate (no meta `gate` row) —— readers serve them.
+        "gate_stale": _gate_stale(_CFGV.get("no_llm_paths"), gate_era),
         "db": {
             "path": DB,
             "tables": counts,
@@ -1433,6 +1451,13 @@ def _selftest():
     _t = tempfile.mkdtemp(); _dbd = os.path.join(_t, "db"); os.makedirs(_dbd)
     open(os.path.join(_dbd, "x.lance"), "w").write("x"); os.utime(os.path.join(_dbd, "x.lance"), (1000, 1000))
     assert _push_state(home=_t, db=_dbd) is None, "no push.json must read as 'never pushed', not an error"
+    os.environ["KAL_CLOUD_URL"] = "https://a.example"
+    assert _push_state(home=_t, db=_dbd) == {"never": True, "url": "https://a.example"}, "with KAL_CLOUD_URL set, never-pushed must be said"
+    json.dump({"url": "https://b.example/", "at": 1, "files": 1, "bytes": 1, "db_mtime": 1000}, open(os.path.join(_t, "push.json"), "w"))
+    assert _push_state(home=_t, db=_dbd)["url_mismatch"] is True, "a push recorded for another URL must be flagged"
+    os.environ["KAL_CLOUD_URL"] = "https://b.example"
+    assert _push_state(home=_t, db=_dbd)["url_mismatch"] is False, "a trailing slash must not count as a different URL"
+    del os.environ["KAL_CLOUD_URL"]
     json.dump({"url": "u", "at": 1, "files": 1, "bytes": 1, "db_mtime": 1000}, open(os.path.join(_t, "push.json"), "w"))
     assert _push_state(home=_t, db=_dbd)["stale"] is False, "index untouched since the push must not be stale"
     os.utime(os.path.join(_dbd, "x.lance"), (2000, 2000))
@@ -1444,7 +1469,12 @@ def _selftest():
     open(os.path.join(_t, "push.json"), "w").write("{not json")
     assert "error" in _push_state(home=_t, db=_dbd), "a corrupt push.json must be reported, not swallowed"
     shutil.rmtree(_t)
-    print("  ✅ status self-check —— push record: absent · current · behind · corrupt each read as itself")
+    print("  ✅ status self-check —— push record: absent · never(URL set) · other URL · current · behind · corrupt each read as itself")
+    #  gate era: paths configured + no meta `gate` row → stale; row present → not; nothing configured → never stale.
+    assert _gate_stale("Private", None) is True, "paths configured + no gate row → stale"
+    assert _gate_stale("Private", "row") is False, "paths configured + row gate → fine"
+    assert _gate_stale("", None) is False and _gate_stale(None, None) is False, "nothing configured → never stale"
+    print("  ✅ status self-check —— gate era: an index without meta.gate is flagged only when KAL_NO_LLM paths are configured")
 
 
 def main():
@@ -1527,15 +1557,23 @@ def main():
         print(f"\n  cloud")
         if ps.get("error"):
             print(f"    ⚠ {ps['error']}")
+        elif ps.get("never"):
+            print(f"    never pushed to {ps['url']} —— just push")
         else:
             print(f"    last push     {_ago(ps.get('at', 0))} → {ps.get('url', '?')}"
                   f"  ({ps.get('files') or '?'} files · {(ps.get('bytes') or 0)/1e6:.0f}MB)")
-            if ps.get("rebuilt"):
+            if ps.get("url_mismatch"):
+                print(f"    ⚠ that push went to {ps.get('url')} but KAL_CLOUD_URL is now {ps.get('url_now')} —— this server has nothing.  just push")
+            elif ps.get("rebuilt"):
                 print(f"    ⚠ the index was rebuilt after that push —— the cloud copy is behind.  just push")
             elif ps.get("stale"):
                 print(f"    ⚠ the index changed after that push —— the cloud copy is behind.  just push")
             else:
-                print(f"    ✅ the cloud copy is as new as the index")
+                print(f"    ✅ the cloud copy is as new as the index  (local record —— a delete or revoke on the server is not visible here)")
+    #  Gate era (schema_v3 meta `gate`): an index built before 2026-09-05 carries no_llm=False for KAL_NO_LLM paths, and
+    #  every reader that trusts the row serves them.  Say so when paths are configured (R4, sync lens).
+    if st.get("gate_stale"):
+        print(f"\n  ⚠ this index predates the path gate: KAL_NO_LLM folders are not marked no_llm in it —— run  just sync  (any sync heals it)")
 
     print_recommend(st["recommend"])
     print()

@@ -1337,6 +1337,12 @@ def _main_index():
             ("relations_directed", "false (canonical sorted src/tgt)"),
             ("entity_types_canonical", "|".join(sorted(CANON_TYPES)) + "|other"),
             ("vault_path", VAULT), ("schema_version", "3"),
+            #  Gate era.  "row" = KAL_NO_LLM paths are resolved into documents.no_llm at index time
+            #  (2026-09-05).  An index without this row predates that: its path-gated notes carry
+            #  no_llm=False and every reader that trusts the row —— the stdio plugin, Docker, the
+            #  export —— serves them.  `just status` warns; any `just sync` heals (diff_vault treats a
+            #  gate flip as a modification).  (deep-review 2026-09-06 R4, sync lens)
+            ("gate", "row"),
             ("built_at", int(time.time())), ("n_documents", len(docs)),
         ]]
 
