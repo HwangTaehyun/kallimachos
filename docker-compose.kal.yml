@@ -8,6 +8,11 @@
 # MCP is stdio, so compose does not start it —— Claude runs `docker run -i` itself.
 # The definitive copy is `.mcp.json` at the repository root (hardening flags included).
 
+#  ⚠ Without `name:` the project is named after the folder (`kal`) —— the same name the hosted
+#     product's compose declares, so on one machine its `up --remove-orphans` would take this
+#     stack's containers for orphans and remove them (deep-review 2026-09-05, consistency lens).
+name: kal-steps
+
 services:
   kal:
     build: .

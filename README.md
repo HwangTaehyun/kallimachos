@@ -131,7 +131,7 @@ just search "that auth decision"
 docker compose -f docker-compose.kal.yml build
 docker compose -f docker-compose.kal.yml run --rm kal src/schema_v3.py     # index
 docker compose -f docker-compose.kal.yml run --rm kal src/kal_mcp.py --selftest
-just up                      # local web UI → http://localhost:5173
+just up                      # local web UI → http://127.0.0.1:5173
 ```
 
 The embedding model is baked into the image — no network needed at runtime.

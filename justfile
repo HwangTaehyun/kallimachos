@@ -669,7 +669,7 @@ up:
     @{{py}} {{src}}/vault_path.py --check "$(grep -m1 '^VAULT_DIR=' .env | cut -d= -f2-)" \
       || (echo "     Set it with  just vault <notes folder>." && exit 1)
     docker compose up --build -d
-    @echo "  → http://localhost:$(grep -E '^WEB_PORT=' .env | cut -d= -f2 || echo 5173)"
+    @echo "  → http://127.0.0.1:$(grep -E '^WEB_PORT=' .env | cut -d= -f2 || echo 5173)"   # the bind is 127.0.0.1 —— `localhost` may resolve to ::1 and be refused
 
 # The production stack (a static build.  -f is explicit so the override is left out)
 #  ⚠ **The same guard** as `up`.  It was missing only here, so calling it without `.env`
