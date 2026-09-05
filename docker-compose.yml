@@ -120,8 +120,8 @@ services:
   proxy:
     <<: *common
     #  Pinned to the current minor; both images publish breaking changes only in the changelog, so bump on
-    #  purpose and read it (1.7 → 1.11 / 2.6 → 2.8 on 2026-09-05; the LETSENCRYPT_* variables are still honoured
-    #  by acme-companion 2.8 alongside their ACME_* aliases).
+    #  purpose and read it (1.7 → 1.11 / 2.6 → 2.8 on 2026-09-05).  acme-companion 2.8 names the variables
+    #  ACME_HOST / ACME_EMAIL; LETSENCRYPT_* are kept only as backward-compatible fallbacks.
     image: nginxproxy/nginx-proxy:1.11-alpine
     profiles: ["proxy", "tls"]
     ports:
