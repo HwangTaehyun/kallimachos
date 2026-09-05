@@ -249,7 +249,7 @@ setup:
     echo "  Next:"
     echo "    just init       ← pick a folder and get to a searchable state (TUI)"
     echo "    just status     the current state and the step to run next"
-    echo "    just up         the web UI (docker · http://localhost:5173)"
+    echo "    just up         the web UI (docker · http://127.0.0.1:5173)"
     echo "    just selftest   every self-check attached to the code"
     echo "    just verify     whether the documented numbers match the real DB"
 
@@ -593,22 +593,33 @@ push:
     DB="${KAL_PATH:-${KAL_HOME:-$HOME/.kal}/db}"
     [ -d "$DB" ] || { echo "no index: $DB —— run an index once first (just run index)"; exit 1; }
     EXP=$(mktemp -d); trap 'rm -rf "$EXP"' EXIT
+    #  The index's newest mtime is taken **before** the export and the upload —— a lance commit that lands while the
+    #  tar streams must read as "behind" afterwards, not as pushed (deep-review 2026-09-05 R3, sync lens).
+    DB_MTIME=$(find "$DB" -type f -exec stat -f %m {} + 2>/dev/null | sort -n | tail -1)
+    [ -n "$DB_MTIME" ] || DB_MTIME=$(find "$DB" -type f -exec stat -c %Y {} + | sort -n | tail -1)
     {{py}} {{src}}/export_cloud.py "$DB" "$EXP/db"
     echo "uploading: export of $DB ($(du -sh "$EXP/db" | cut -f1)) → $URL"
-    resp=$(tar -C "$EXP/db" -czf - . | curl -sS --fail-with-body -X POST "$URL/api/graph" \
-        -H "Authorization: Bearer $KAL_CLOUD_TOKEN" -H "Content-Type: application/gzip" --data-binary @-)
+    #  ⚠ `set -e` + `--fail-with-body`: on a non-2xx the assignment fails and the body —— the server's explanation
+    #     (402 plan · 413 too big · 500 "reverted, push again") —— would never be printed.  Show it, then fail.
+    #     The token travels in a header read from a file descriptor, not in argv (visible in `ps`/`/proc/*/cmdline`
+    #     for the whole upload).
+    if ! resp=$(tar -C "$EXP/db" -czf - . | curl -sS --fail-with-body -X POST "$URL/api/graph" \
+        -H @<(printf 'Authorization: Bearer %s' "$KAL_CLOUD_TOKEN") -H "Content-Type: application/gzip" --data-binary @-); then
+        echo "push failed: ${resp:-(no body)}" >&2
+        exit 1
+    fi
     echo "$resp"
     #  Record what was pushed —— `just status` compares the index against this and says when the cloud copy is
     #  behind.  Without it "in sync" was only true at the instant of the push and nothing could tell you
     #  otherwise (deep-review 2026-09-05, sync lens D6).  The token is **not** written; the URL is.
-    KAL_PUSH_URL="$URL" KAL_PUSH_RESP="$resp" {{py}} - <<'PYEOF'
-    import json, os, time, glob
-    db = os.environ.get("KAL_PATH") or os.path.join(os.environ.get("KAL_HOME", os.path.expanduser("~/.kal")), "db")
+    KAL_PUSH_URL="$URL" KAL_PUSH_RESP="$resp" KAL_PUSH_DB="$DB" KAL_PUSH_DB_MTIME="$DB_MTIME" {{py}} - <<'PYEOF'
+    import json, os, time
     home = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
     resp = json.loads(os.environ["KAL_PUSH_RESP"])
-    files = glob.glob(os.path.join(db, "**", "*"), recursive=True)
+    #  `db` and `stamp` give the record an identity: `just status` says "recorded for a different index" when the
+    #  path differs, and `stamp` is the server's name for the tree it holds (compared remotely in a later version).
     rec = {"url": os.environ["KAL_PUSH_URL"], "at": int(time.time()), "files": resp.get("files"), "bytes": resp.get("bytes"),
-           "db_mtime": int(max((os.path.getmtime(f) for f in files if os.path.isfile(f)), default=0))}
+           "stamp": resp.get("stamp"), "db": os.path.abspath(os.environ["KAL_PUSH_DB"]), "db_mtime": int(os.environ["KAL_PUSH_DB_MTIME"] or 0)}
     with open(os.path.join(home, "push.json"), "w") as f:
         json.dump(rec, f)
     os.chmod(os.path.join(home, "push.json"), 0o600)

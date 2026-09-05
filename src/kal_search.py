@@ -251,13 +251,14 @@ class KAL:
         return self.c2d[cid]
 
     def bm25(self, q, k=120, where=None):
-        try:
-            s = self.C.search(q, query_type="fts").limit(k)
-            if where:
-                s = s.where(where)
-            rows = s.to_list()
-        except Exception:
-            return {}
+        #  ⚠ No `except: return {}` here.  A copy of the index without its FTS index (or a table that will not
+        #     open) used to come back as "no lexical hits" and the caller went on with vectors only —— plausible
+        #     results with most of the ranking weight silently gone, invisible to hit counts.  The remote MCP is
+        #     exactly where that copy lives (deep-review 2026-09-05 R3, sync lens).  Let it fail loudly.
+        s = self.C.search(q, query_type="fts").limit(k)
+        if where:
+            s = s.where(where)
+        rows = s.to_list()
         out = {}
         for r in rows:
             d = r["doc_id"]

@@ -851,6 +851,13 @@ def scan_vault(with_unreadable=False):
         origin = classify_origin(rel, raw)
         m = re.search(r"^doc_type:\s*(\S+)", raw[:1200], re.M)
         ddate, dsrc, no_llm, dupd = doc_meta(raw)
+        #  ⚠ **Both gates land in the row.**  `doc_meta` reads the frontmatter flag; the path gate
+        #     (`KAL_NO_LLM=Private:work/Finance`) lived only in `lr_extract.blocked_path`, so extraction
+        #     honoured it and nothing else did —— the local stdio MCP, the cloud export and the remote
+        #     child all read `documents.no_llm`, and a path-gated note was served to the model in full
+        #     (deep-review 2026-09-05 R3, security lens BLOCKER).  Resolving it here, at index time, gives
+        #     every reader one gate.  An index built before this needs a rebuild or sync to pick it up.
+        no_llm = no_llm or _blocked_by_path(rel)
         out[did] = {"doc_id": did, "path": rel, "abs_path": f,
                     "title": title or os.path.basename(rel)[:-3],
                     "folder": os.path.dirname(rel) or ".",
@@ -862,6 +869,12 @@ def scan_vault(with_unreadable=False):
                     "doc_updated": dupd,
                     "_body": body}
     return (out, unreadable) if with_unreadable else out
+
+
+def _blocked_by_path(rel):
+    """`lr_extract.blocked_path`, imported late —— lr_extract imports this module at load time."""
+    from lr_extract import blocked_path
+    return bool(blocked_path(rel))
 
 
 def diff_vault(new, db):
@@ -1916,6 +1929,19 @@ def _selftest():
             pass
     globals()["SKIP_EXTRA"], _lx.NO_LLM, globals()["VAULT"] = _keep
     print("  ✅ both path gates honour the same spellings (case · NFD · ./ · /* · absolute)")
+    # ── The path gate must reach the row —— every reader keys on documents.no_llm ────────────
+    with _tf.TemporaryDirectory() as _sd:
+        os.makedirs(os.path.join(_sd, "Private"))
+        for _name in ("open.md", os.path.join("Private", "secret.md")):
+            open(os.path.join(_sd, _name), "w", encoding="utf-8").write("---\ntitle: t\n---\n" + "body " * 40 + "\n")
+        globals()["VAULT"] = _sd
+        globals()["SKIP_EXTRA"] = _clean_pathspec("")
+        _lx.NO_LLM = _clean_pathspec("Private")
+        _rows = {r["path"]: r for r in scan_vault().values()}
+        assert _rows["Private/secret.md"]["no_llm"] is True, "a KAL_NO_LLM path must index as no_llm=True —— or MCP serves it"
+        assert _rows["open.md"]["no_llm"] is False, "an open document must not be gated by the path rule"
+    globals()["SKIP_EXTRA"], _lx.NO_LLM, globals()["VAULT"] = _keep
+    print("  ✅ KAL_NO_LLM reaches documents.no_llm at index time (the one gate every reader uses)")
 
     print("  ✅ present-but-unreadable counts as not indexable, and is counted separately")
 

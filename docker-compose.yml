@@ -102,8 +102,9 @@ services:
       # nginx-proxy routes on this value.  With no domain, attach directly through the ports below.
       VIRTUAL_HOST: "${DOMAIN:-kallimachos.local}"
       VIRTUAL_PORT: "80"
-      LETSENCRYPT_HOST: "${TLS_DOMAIN:-}"
-      LETSENCRYPT_EMAIL: "${TLS_EMAIL:-}"
+      #  acme-companion 2.8 documents the ACME_* names; LETSENCRYPT_* still work but only as a compatibility alias.
+      ACME_HOST: "${TLS_DOMAIN:-}"
+      ACME_EMAIL: "${TLS_EMAIL:-}"
     ports:
       # ⚠ Loopback, always.  There is no authentication (docs/STACK.md §7), so
       #   opening 0.0.0.0 lets anyone on the same network run the pipeline,

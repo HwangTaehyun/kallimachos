@@ -55,8 +55,19 @@ GATED_KEEP = ("doc_id", "no_llm")
 
 
 def _gated_ids(docs):
+    """doc_ids that must not leave, and the row mask —— two gates, both applied here.
+
+    `documents.no_llm` is the frontmatter flag.  The **path** gate (`KAL_NO_LLM=Private:work/Finance`)
+    lives only in `lr_extract.blocked_path` —— extraction honours it, but nothing marked those rows
+    in the table, so a path-gated note went up in full (deep-review 2026-09-05 R3, sync lens).  The
+    cloud child has no config, so the path gate has to be resolved here, on the machine that has it.
+    """
+    from lr_extract import blocked_path
     flag = pc.fill_null(docs.column("no_llm"), False) if "no_llm" in docs.column_names \
         else pa.array([False] * docs.num_rows)
+    by_path = pa.array([bool(pth) and blocked_path(pth) for pth in docs.column("path").to_pylist()])
+    flag = pc.or_(flag, by_path)
+    #  The stub keeps `no_llm=True` for path-gated rows too —— that is what the serve-time gate reads.
     return set(pc.filter(docs.column("doc_id"), flag).to_pylist()), flag
 
 
@@ -67,6 +78,8 @@ def _scrub_documents(docs, flag):
         col = docs.column(name)
         if name == "abs_path":
             cols[name] = pa.array([""] * docs.num_rows, type=col.type)
+        elif name == "no_llm":
+            cols[name] = pc.or_(pc.fill_null(col, False), flag)      # path-gated rows become no_llm=True stubs
         elif name in GATED_BLANK:
             cols[name] = pc.if_else(flag, pa.scalar("", type=col.type), col)
         elif name in GATED_ZERO:
@@ -111,6 +124,12 @@ def export(src, dst):
     ddb = lancedb.connect(dst)
     report = []
     for name in names:
+        #  ⚠ ix_* (the hand-rolled BM25 tables) are **not exported**: kal_search queries lancedb's FTS index, and the only
+        #     readers of ix_* are the ablation/manual scripts.  Leaving them out drops ~106 MB per push and the
+        #     vocabulary of gated text that `ix_terms.term` would otherwise carry (R3, sync lens).
+        if name.startswith("ix_"):
+            report.append((name, sdb.open_table(name).count_rows(), 0, ["skipped"]))
+            continue
         t = sdb.open_table(name).to_arrow()
         before = t.num_rows
         if name == "documents":
@@ -157,23 +176,39 @@ def _selftest():
                                                  "df": pa.array([2], pa.int64()), "idf": pa.array([0.5], pa.float32())}))
     db.create_table("meta", data=pa.table({"key": ["vault_path", "schema_version", "built_at"],
                                              "value": ["/home/u/v", "3", "1"]}))
+    #  A third document is gated by **path** only (KAL_NO_LLM), not by frontmatter —— it must come out a stub too.
+    db.open_table("documents").add(pa.table({
+        "doc_id": pa.array([3], pa.int64()), "path": ["Finance/tax.md"], "abs_path": ["/home/u/v/Finance/tax.md"], "title": ["TAX"],
+        "folder": ["Finance"], "size": pa.array([5], pa.int64()), "mtime": pa.array([3], pa.int64()), "content_hash": ["h3"],
+        "indexed_at": pa.array([3], pa.int64()), "origin": ["vault"], "doc_type": [""], "doc_date": [""], "date_src": ["none"],
+        "no_llm": [False], "doc_updated": [""]}))
+    db.open_table("chunks").add(pa.table({
+        "chunk_id": pa.array([30000], pa.int64()), "doc_id": pa.array([3], pa.int64()), "seq": pa.array([0], pa.int32()),
+        "char_start": pa.array([0], pa.int32()), "text": ["TAX BODY"], "origin": ["vault"], "vector": pa.array([[0.1] * 4], vec)}))
+    os.environ["KAL_NO_LLM"] = "Finance"
+    import lr_extract
+    lr_extract.NO_LLM = [x for x in os.environ["KAL_NO_LLM"].split(":") if x] if hasattr(lr_extract, "NO_LLM") else None
     r = export(src, dst)
     out = lancedb.connect(dst)
     d = {row["doc_id"]: row for row in out.open_table("documents").to_arrow().to_pylist()}
-    assert set(d) == {1, 2}, "the gated row must stay (the serve-time gate learns doc_ids from it)"
+    assert set(d) == {1, 2, 3}, "the gated rows must stay (the serve-time gate learns doc_ids from them)"
+    assert d[3]["no_llm"] is True and d[3]["path"] == "" and d[3]["title"] == "", f"path-gated row must be a stub: {d[3]}"
+    assert not {n for n in out.list_tables().tables if n.startswith("ix_")}, "ix_* must not be exported"
     assert d[2]["no_llm"] is True and d[2]["path"] == "" and d[2]["title"] == "" and d[2]["size"] == 0 \
         and d[2]["doc_date"] == "" and d[2]["folder"] == "", f"gated row not scrubbed: {d[2]}"
     assert d[1]["abs_path"] == "" and d[2]["abs_path"] == "", "abs_path must be blank for every row"
     assert d[1]["path"] == "ok.md" and d[1]["title"] == "ok", "a normal row must be untouched"
     chunks = out.open_table("chunks").to_arrow().to_pylist()
     assert [c["chunk_id"] for c in chunks] == [10000], f"gated chunks must be gone: {chunks}"
-    assert "SECRET" not in " ".join(c["text"] for c in chunks)
-    assert [r_["chunk_id"] for r_ in out.open_table("ix_doclen").to_arrow().to_pylist()] == [10000], "ix_doclen keyed by gated chunks must be gone"
-    assert out.open_table("ix_terms").count_rows() == 1, "ix_terms is copied as-is (documented)"
+    assert "SECRET" not in " ".join(c["text"] for c in chunks) and "TAX" not in " ".join(c["text"] for c in chunks)
     assert "vault_path" not in {m["key"] for m in out.open_table("meta").to_arrow().to_pylist()}, "meta.vault_path must not be exported"
     names = {getattr(i, "name", str(i)) for i in out.open_table("chunks").list_indices()}
     assert any("text" in n for n in names), f"the FTS index on chunks.text must be rebuilt on the copy: {names}"
-    assert r["gated_documents"] == 1 and r["gated_chunks"] == 2, r
+    #  …and the copy must answer a lexical query the way the original does —— `kal_search.bm25` now raises when the
+    #  FTS index is missing instead of returning {} (R3, sync lens); this pins that the export never trips it.
+    hits = out.open_table("chunks").search("public", query_type="fts").limit(5).to_list()
+    assert [h["chunk_id"] for h in hits] == [10000], f"fts on the copy must find the open chunk only: {hits}"
+    assert r["gated_documents"] == 2 and r["gated_chunks"] == 3, r
     #  The blank/zero sets must cover the live documents schema —— a new text column would leak otherwise.
     #  ⚠ The first version of this check read `S.S["documents"]` —— an attribute that does not exist —— behind a
     #     `hasattr` guard, so `live` was always empty and the assertion could never fire (a guard that has never

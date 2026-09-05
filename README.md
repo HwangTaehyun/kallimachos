@@ -252,7 +252,7 @@ Everything, unless you say otherwise. Two steps can send note content off your m
 - **`just push`** uploads an export of the index (`~/.kal/db`) to the cloud you point it at. The export holds every *non-gated* note's body in 500-character pieces (what search returns), the entities and relations, and the search tables —— it is not "just the graph". It does **not** hold your documents' absolute paths or the vault path (`src/export_cloud.py` blanks and drops them). Nothing is pushed unless you run it, and `just status` tells you when the cloud copy is behind.
 
 - `no_llm: true` in a note's frontmatter keeps that note out of extraction entirely (still indexed and searchable locally). If you `just push`, that note goes up as a stub —— its id and the flag, no path, title, or text —— so the remote MCP can keep filtering anything derived from it; its body pieces and search rows stay on your machine.
-- `KAL_NO_LLM=Private:work/Finance` blocks whole folders, matched as path components from the vault root.
+- `KAL_NO_LLM=Private:work/Finance` blocks whole folders, matched as path components from the vault root. Since 2026-09-05 the path rule is resolved **at index time** into the same `no_llm` mark the frontmatter sets, so the local MCP, `just push` and the remote MCP all honour it —— before that only extraction did (an index built earlier needs `just run index` or a sync to pick it up).
 - The optional [hosted service](https://kallimachos.dev) exists for people who want the same graph on every device; the self-hosted pipeline is complete without it.
 
 ### The relay — when the container needs an LLM

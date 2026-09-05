@@ -12,6 +12,8 @@ What is inspected (all measured, nothing guessed)
   ③ stale_docs                                    → documents whose KG is stale
   ④ doc_hashes in lr_kg.json vs the vault now     → has extraction fallen behind
   ⑤ artifact (graph_export · galaxy.html) mtime vs meta.built_at → has the export fallen behind
+  ⑥ push.json (what `just push` last uploaded) vs the index's newest mtime → is the cloud copy behind
+     (printed under "cloud"; JSON key `push` —— one thing, named after the file that holds it)
 
 Usage:
     python status.py            a table for people
@@ -81,6 +83,10 @@ def _push_state(home=None, db=None):
     files = glob.glob(os.path.join(db, "**", "*"), recursive=True)
     now_mtime = int(max((os.path.getmtime(f) for f in files if os.path.isfile(f)), default=0))
     rec["stale"] = now_mtime > int(rec.get("db_mtime", 0) or 0)
+    #  A record written for another index (KAL_PATH changed, another machine's ~/.kal copied over) says nothing
+    #  about this one —— report that instead of a green tick (deep-review 2026-09-05 R3, sync lens).
+    rec_db = rec.get("db")
+    rec["other_index"] = bool(rec_db) and os.path.abspath(rec_db) != os.path.abspath(db)
     return rec
 
 
@@ -1423,6 +1429,8 @@ def _selftest():
     assert _push_state(home=_t, db=_dbd)["stale"] is False, "index untouched since the push must not be stale"
     os.utime(os.path.join(_dbd, "x.lance"), (2000, 2000))
     assert _push_state(home=_t, db=_dbd)["stale"] is True, "index written after the push must be stale"
+    json.dump({"url": "u", "at": 1, "files": 1, "bytes": 1, "db_mtime": 9999, "db": "/somewhere/else/db"}, open(os.path.join(_t, "push.json"), "w"))
+    assert _push_state(home=_t, db=_dbd)["other_index"] is True, "a record for another index must say so, not read as current"
     open(os.path.join(_t, "push.json"), "w").write("{not json")
     assert "error" in _push_state(home=_t, db=_dbd), "a corrupt push.json must be reported, not swallowed"
     shutil.rmtree(_t)
@@ -1512,7 +1520,9 @@ def main():
         else:
             print(f"    last push     {_ago(ps.get('at', 0))} → {ps.get('url', '?')}"
                   f"  ({ps.get('files') or '?'} files · {(ps.get('bytes') or 0)/1e6:.0f}MB)")
-            if ps.get("stale"):
+            if ps.get("other_index"):
+                print(f"    ⚠ that record is for a different index ({ps.get('db')}) —— nothing is known about this one.  just push")
+            elif ps.get("stale"):
                 print(f"    ⚠ the index changed after that push —— the cloud copy is behind.  just push")
             else:
                 print(f"    ✅ the cloud copy is as new as the index")

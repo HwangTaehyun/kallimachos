@@ -227,9 +227,9 @@ Rather than running for 30 minutes and failing on every chunk, the API checks **
 and blocks with 412. The UI disables that button and shows the host command instead.
 
 ```
-   works in the container      promote to vault · rebuild index · incremental sync
-   run on the host             distil sessions · extract KG · refresh stale KG · verify docs ·
-                               export graph · full rebuild        →  just <stage>
+   works in the container      promote to vault · Rebuild knowledge DB · incremental sync
+   run on the host             Distill sessions · Extract knowledge graph · refresh stale KG · verify docs ·
+                               export graph · full rebuild        →  just <stage>   (names as `just status` prints them)
    (verify docs needs the LLM relay like the others —— the container answers 412 for it;
     see DOCKER-SETUP §5b.  This table once listed it under the container.)
 ```

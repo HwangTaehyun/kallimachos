@@ -227,6 +227,13 @@ KAL_RELAY_TOKEN=<what it printed>
 
 > ⚠ On macOS, mounting `~/.claude` read-only brings the settings but **not the login** — the
 > credentials are in the keychain. On a Linux host they are a file and the mount is enough.
+>
+> The trade-off, stated: that directory holds every Claude Code transcript, `mcp.json` and hooks
+> (several GB on a busy machine), and the container it is mounted into has no authentication of
+> its own — the loopback bind is the only guard. On macOS the mount buys nothing (412 by design)
+> and only widens what a compromised pipeline dependency could read. Point `CLAUDE_DIR` at an
+> empty directory to opt out; the LLM steps then run through the relay on the host instead
+> (§5b). Making the mount opt-in by default is an open decision (deep-review 2026-09-05).
 
 > ⚠ Running a step on the **host** while `KAL_CLAUDE_RELAY` is set in the environment sends its
 > calls to a relay meant for the container. `KAL_CLAUDE_RELAY` belongs in `.env` for compose;
@@ -315,7 +322,9 @@ Two different gates, both read from `.env`:
 | | Scope | Effect |
 |---|---|---|
 | `no_llm: true` in a note's frontmatter | one document | indexed and searchable locally, never sent to extraction; `just push` sends only a stub (id + flag —— no path, title, or text) so the remote MCP keeps filtering derived text (README §"What stays on your machine") |
-| `KAL_NO_LLM=Private:work/Finance` | path fragments, colon-separated | same, for whole paths |
+| `KAL_NO_LLM=Private:work/Finance` | path fragments, colon-separated | same, for whole paths —— resolved into `documents.no_llm` at index time (rebuild or sync an older index to apply it) |
+
+`just push` also leaves `~/.kal/push.json` (0600: the cloud URL, time, file count, bytes, the server's stamp for the tree and the index's newest mtime —— never the token); `just status` reads it to say whether the cloud copy is behind. It lives beside the index, so a container with a different `KAL_DIR` reports "never pushed" —— the CLI and the container must point at the same `~/.kal`.
 | `KAL_SKIP=…` | folders, vault-relative | left out of **indexing** as well |
 
 > ⚠ `KAL_SKIP` is a **transmission boundary**. A note in a folder that is not listed goes off the
