@@ -58,10 +58,10 @@ GATED_KEEP = ("doc_id", "no_llm")
 def _gated_ids(docs):
     """doc_ids that must not leave, and the row mask —— two gates, both applied here.
 
-    `documents.no_llm` is the frontmatter flag.  The **path** gate (`KAL_NO_LLM=Private:work/Finance`)
-    lives only in `lr_extract.blocked_path` —— extraction honours it, but nothing marked those rows
-    in the table, so a path-gated note went up in full (deep-review 2026-09-05 R3, sync lens).  The
-    cloud child has no config, so the path gate has to be resolved here, on the machine that has it.
+    `documents.no_llm` carries both gates since 2026-09-05 (`schema_v3.scan_vault` ORs in
+    `lr_extract.blocked_path` at index time).  The path gate is applied here **again** for an index
+    built before that —— the cloud child has no config, so it has to be resolved on the machine that
+    has it (deep-review 2026-09-05 R3–R4, sync/fact lenses).
     """
     from lr_extract import blocked_path
     flag = pc.fill_null(docs.column("no_llm"), False) if "no_llm" in docs.column_names \

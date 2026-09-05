@@ -324,7 +324,7 @@ Two different gates, both read from `.env`:
 | `no_llm: true` in a note's frontmatter | one document | indexed and searchable locally, never sent to extraction; `just push` sends only a stub (id + flag —— no path, title, or text) so the remote MCP keeps filtering derived text (README §"What stays on your machine") |
 | `KAL_NO_LLM=Private:work/Finance` | path fragments, colon-separated | same, for whole paths —— resolved into `documents.no_llm` at index time (rebuild or sync an older index to apply it) |
 
-`just push` also leaves `~/.kal/push.json` (0600: the cloud URL, time, file count, bytes, the server's stamp for the tree, the index's `built_at` and its newest mtime —— never the token); `just status` reads it to say whether the cloud copy is behind (a rebuild after the push counts as behind). The record identifies the index by `built_at`, not by path, so the CLI and a container mounting the same `~/.kal` agree; a container pointed at a different `KAL_DIR` simply reports "never pushed".
+`just push` also leaves `~/.kal/push.json` (0600: the cloud URL, time, file count, bytes, the server's stamp for the tree, the index path, its `built_at` and its newest mtime —— never the token); `just status` reads it to say whether the cloud copy is behind (a rebuild after the push counts as behind). The record identifies the index by `built_at`, not by path, so the CLI and a container mounting the same `~/.kal` agree; a container pointed at a different `KAL_DIR` simply reports "never pushed".
 | `KAL_SKIP=…` | folders, vault-relative | left out of **indexing** as well |
 
 > ⚠ `KAL_SKIP` is a **transmission boundary**. A note in a folder that is not listed goes off the
