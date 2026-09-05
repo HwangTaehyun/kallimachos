@@ -589,9 +589,25 @@ push:
     DB="${KAL_PATH:-${KAL_HOME:-$HOME/.kal}/db}"
     [ -d "$DB" ] || { echo "no index: $DB —— run an index once first (just run index)"; exit 1; }
     echo "uploading: $DB ($(du -sh "$DB" | cut -f1)) → $URL"
-    tar -C "$DB" -czf - . | curl -sS --fail-with-body -X POST "$URL/api/graph" \
-        -H "Authorization: Bearer $KAL_CLOUD_TOKEN" -H "Content-Type: application/gzip" --data-binary @-
-    echo
+    resp=$(tar -C "$DB" -czf - . | curl -sS --fail-with-body -X POST "$URL/api/graph" \
+        -H "Authorization: Bearer $KAL_CLOUD_TOKEN" -H "Content-Type: application/gzip" --data-binary @-)
+    echo "$resp"
+    #  Record what was pushed —— `just status` compares the index against this and says when the cloud copy is
+    #  behind.  Without it "in sync" was only true at the instant of the push and nothing could tell you
+    #  otherwise (deep-review 2026-09-05, sync lens D6).  The token is **not** written; the URL is.
+    KAL_PUSH_URL="$URL" KAL_PUSH_RESP="$resp" {{py}} - <<'PYEOF'
+    import json, os, time, glob
+    db = os.environ.get("KAL_PATH") or os.path.join(os.environ.get("KAL_HOME", os.path.expanduser("~/.kal")), "db")
+    home = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
+    resp = json.loads(os.environ["KAL_PUSH_RESP"])
+    files = glob.glob(os.path.join(db, "**", "*"), recursive=True)
+    rec = {"url": os.environ["KAL_PUSH_URL"], "at": int(time.time()), "files": resp.get("files"), "bytes": resp.get("bytes"),
+           "db_mtime": int(max((os.path.getmtime(f) for f in files if os.path.isfile(f)), default=0))}
+    with open(os.path.join(home, "push.json"), "w") as f:
+        json.dump(rec, f)
+    os.chmod(os.path.join(home, "push.json"), 0o600)
+    print(f"recorded → {home}/push.json (just status shows when the index moves past this)")
+    PYEOF
 
 # Incremental sync (changed documents only)
 sync *args:

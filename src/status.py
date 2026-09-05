@@ -24,8 +24,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import pathlib
 import sys
+import tempfile
 import time
 
 
@@ -58,6 +60,28 @@ def _dirsize(p):
 
 def _mtime(p):
     return int(os.path.getmtime(p)) if os.path.exists(p) else 0
+
+
+def _push_state(home=None, db=None):
+    """What `just push` last recorded, and whether the index has moved since.
+
+    Returns None when nothing was ever pushed (that is a normal state, not an error).  `stale` is
+    True when any file under the DB is newer than the recorded `db_mtime` —— the cloud copy is
+    behind and only a new push fixes it (deep-review 2026-09-05, sync lens D6).
+    """
+    home = home or KAL_HOME
+    db = db or DB
+    p = os.path.join(home, "push.json")
+    if not os.path.isfile(p):
+        return None
+    try:
+        rec = json.load(open(p))
+    except (OSError, ValueError) as e:
+        return {"error": f"push.json unreadable: {e}"}
+    files = glob.glob(os.path.join(db, "**", "*"), recursive=True)
+    now_mtime = int(max((os.path.getmtime(f) for f in files if os.path.isfile(f)), default=0))
+    rec["stale"] = now_mtime > int(rec.get("db_mtime", 0) or 0)
+    return rec
 
 
 def _fs_free():
@@ -1391,6 +1415,18 @@ def _selftest():
     assert not any(a["step"] == "vault" for a in got), "a healthy vault was called absent"
     print("  ✅ status self-check —— an absent vault is told apart from a mass deletion (both ways)")
     print("  ✅ status self-check —— tells a missing table (normal) from a failed query (an error)")
+    #  push record: absent → None · recorded after the last index write → not stale · index written later → stale.
+    _t = tempfile.mkdtemp(); _dbd = os.path.join(_t, "db"); os.makedirs(_dbd)
+    open(os.path.join(_dbd, "x.lance"), "w").write("x"); os.utime(os.path.join(_dbd, "x.lance"), (1000, 1000))
+    assert _push_state(home=_t, db=_dbd) is None, "no push.json must read as 'never pushed', not an error"
+    json.dump({"url": "u", "at": 1, "files": 1, "bytes": 1, "db_mtime": 1000}, open(os.path.join(_t, "push.json"), "w"))
+    assert _push_state(home=_t, db=_dbd)["stale"] is False, "index untouched since the push must not be stale"
+    os.utime(os.path.join(_dbd, "x.lance"), (2000, 2000))
+    assert _push_state(home=_t, db=_dbd)["stale"] is True, "index written after the push must be stale"
+    open(os.path.join(_t, "push.json"), "w").write("{not json")
+    assert "error" in _push_state(home=_t, db=_dbd), "a corrupt push.json must be reported, not swallowed"
+    shutil.rmtree(_t)
+    print("  ✅ status self-check —— push record: absent · current · behind · corrupt each read as itself")
 
 
 def main():
@@ -1406,6 +1442,7 @@ def main():
     a = ap.parse_args()
 
     st = collect()
+    st["push"] = _push_state()
     st["recommend"] = recommend(st)
     if a.json:
         print(json.dumps(st, ensure_ascii=False, indent=1))
@@ -1464,6 +1501,21 @@ def main():
 
     if ar["stale"]:
         print(f"\n  artifacts\n    ⚠ older than the DB: {' · '.join(ar['stale'])}")
+
+    #  Cloud copy —— only shown once something was pushed.  "in sync" is a claim about two places; this is the
+    #  only line that compares them (deep-review 2026-09-05, sync lens D6).
+    ps = st.get("push")
+    if ps:
+        print(f"\n  cloud")
+        if ps.get("error"):
+            print(f"    ⚠ {ps['error']}")
+        else:
+            print(f"    last push     {_ago(ps.get('at', 0))} → {ps.get('url', '?')}"
+                  f"  ({ps.get('files') or '?'} files · {(ps.get('bytes') or 0)/1e6:.0f}MB)")
+            if ps.get("stale"):
+                print(f"    ⚠ the index changed after that push —— the cloud copy is behind.  just push")
+            else:
+                print(f"    ✅ the cloud copy is as new as the index")
 
     print_recommend(st["recommend"])
     print()
