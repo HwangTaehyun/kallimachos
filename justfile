@@ -318,6 +318,7 @@ selftest-py:
     @{{py}} {{src}}/kal_search.py --selftest
     @{{py}} {{src}}/kal_config.py --selftest
     @{{py}} {{src}}/status.py --selftest
+    @{{py}} {{src}}/export_cloud.py --selftest
     @{{py}} {{src}}/estimate.py --selftest
     @{{py}} {{src}}/run.py --selftest
     @{{py}} {{src}}/set_vault.py --selftest
@@ -572,15 +573,18 @@ mcp-test:
     @#     Removing the default exposed it (2026-08-25).  It is stated explicitly through `_vault`.
     @KAL_VAULT="$(just _vault)" {{py}} {{src}}/kal_mcp.py --selftest
 
-#  Upload to the cloud —— **the index (db/)**.  ⚠ That is not "never the source text": `chunks.lance` holds
-#  every indexed note's body in 500-character pieces (that is what search returns), `documents.lance` carries
-#  the absolute host path and `meta.lance` the vault path.  Whatever `no_llm`/`KAL_NO_LLM` excludes is gated at
-#  **serve** time by the remote MCP, not at upload —— the tar is the whole directory (deep-review 2026-09-05,
-#  sync lens; 0 gated documents in the author's index that day, so no data left that should not have).
-#  A cloud export that drops gated rows and strips host paths before the tar is the open item.
-#  The token and address come from the
-#  app's MCP screen (app.kallimachos.dev).  The server swaps the tar into the user's folder wholesale (so an
-#  interruption leaves the old graph alive), so re-running the same command whenever the index changes is enough.
+#  Upload to the cloud —— an **export** of the index, not `db/` as it sits on disk (src/export_cloud.py):
+#    · a document marked `no_llm` (frontmatter or KAL_NO_LLM) goes up as a stub —— doc_id + the flag, nothing else ——
+#      and every row carrying its text stays behind (its chunks and their BM25 rows); the stub is what lets the
+#      remote serve-time gate keep filtering derived text (entities · relations) by doc_id;
+#    · the absolute host path of every document and the vault path are not sent;
+#    · everything else is the index as built: chunk text of the other notes (that is what search returns),
+#      entities, relations, term statistics.  ⚠ So this is still not "never the source text" —— it is the
+#      searchable body of every note you did not gate.  (deep-review 2026-09-05, sync lens D3; before that the tar
+#      was the whole directory and the gate ran only at serve time.)
+#  The token and address come from the app's MCP screen (app.kallimachos.dev).  The server swaps the tar into the
+#  user's folder wholesale (an interruption leaves the old graph alive), so re-running whenever the index changes
+#  is enough —— `just status` says when the cloud copy is behind.
 push:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -588,8 +592,10 @@ push:
     URL="${KAL_CLOUD_URL:?KAL_CLOUD_URL is required (for example: https://app.kallimachos.dev)}"
     DB="${KAL_PATH:-${KAL_HOME:-$HOME/.kal}/db}"
     [ -d "$DB" ] || { echo "no index: $DB —— run an index once first (just run index)"; exit 1; }
-    echo "uploading: $DB ($(du -sh "$DB" | cut -f1)) → $URL"
-    resp=$(tar -C "$DB" -czf - . | curl -sS --fail-with-body -X POST "$URL/api/graph" \
+    EXP=$(mktemp -d); trap 'rm -rf "$EXP"' EXIT
+    {{py}} {{src}}/export_cloud.py "$DB" "$EXP/db"
+    echo "uploading: export of $DB ($(du -sh "$EXP/db" | cut -f1)) → $URL"
+    resp=$(tar -C "$EXP/db" -czf - . | curl -sS --fail-with-body -X POST "$URL/api/graph" \
         -H "Authorization: Bearer $KAL_CLOUD_TOKEN" -H "Content-Type: application/gzip" --data-binary @-)
     echo "$resp"
     #  Record what was pushed —— `just status` compares the index against this and says when the cloud copy is

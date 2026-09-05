@@ -249,9 +249,9 @@ Full walkthrough, with the measured costs and the traps: [`docs/OPENWIKI-PIPELIN
 Everything, unless you say otherwise. Two steps can send note content off your machine, and both are yours to run:
 
 - **Extraction** goes through your own `claude` CLI subscription —— never to a server of ours.
-- **`just push`** uploads the index (`~/.kal/db`) to the cloud you point it at. That index holds every indexed note's body in 500-character pieces (what search returns), each document's absolute path, and the vault path —— it is not "just the graph". Nothing is pushed unless you run it.
+- **`just push`** uploads an export of the index (`~/.kal/db`) to the cloud you point it at. The export holds every *non-gated* note's body in 500-character pieces (what search returns), the entities and relations, and the search tables —— it is not "just the graph". It does **not** hold your documents' absolute paths or the vault path (`src/export_cloud.py` blanks and drops them). Nothing is pushed unless you run it, and `just status` tells you when the cloud copy is behind.
 
-- `no_llm: true` in a note's frontmatter keeps that note out of extraction entirely (still indexed and searchable locally). If you `just push`, the note's pieces are in the upload but the remote MCP never returns them —— the gate runs at serve time, not at upload (an export that drops them before the tar is an open item).
+- `no_llm: true` in a note's frontmatter keeps that note out of extraction entirely (still indexed and searchable locally). If you `just push`, that note goes up as a stub —— its id and the flag, no path, title, or text —— so the remote MCP can keep filtering anything derived from it; its body pieces and search rows stay on your machine.
 - `KAL_NO_LLM=Private:work/Finance` blocks whole folders, matched as path components from the vault root.
 - The optional [hosted service](https://kallimachos.dev) exists for people who want the same graph on every device; the self-hosted pipeline is complete without it.
 
