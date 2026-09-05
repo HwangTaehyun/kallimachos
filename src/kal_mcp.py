@@ -149,7 +149,9 @@ def _docs_index():
     """doc_id → document metadata for responses.  no_llm documents are **never included.**"""
     out = {}
     for d in tbl("documents").to_arrow().to_pylist():
-        if d.get("no_llm"):
+        #  The row's flag, **or** the path rule evaluated here —— defence in depth for an index built before the
+        #  gate moved into the row (deep-review 2026-09-05 R4).  In the cloud child KAL_NO_LLM is unset → no-op.
+        if d.get("no_llm") or _gate_by_path(d.get("path", "")):
             continue
         out[d["doc_id"]] = {
             "doc_id": d["doc_id"], "path": d["path"], "title": d.get("title", ""),
@@ -216,11 +218,17 @@ def fresh():
     _STAMP = st
 
 
+def _gate_by_path(rel):
+    """`KAL_NO_LLM` path rule for one vault-relative path (empty → open).  Same predicate as the indexer."""
+    from schema_v3 import _blocked_by_path
+    return bool(rel) and _blocked_by_path(rel)
+
+
 def blocked():
     global _BLOCKED
     if _BLOCKED is None:
         _BLOCKED = {d["doc_id"] for d in tbl("documents").to_arrow().to_pylist()
-                    if d.get("no_llm")}
+                    if d.get("no_llm") or _gate_by_path(d.get("path", ""))}
     return _BLOCKED
 
 

@@ -891,8 +891,13 @@ def diff_vault(new, db):
                 "renamed": {}, "unchanged": set(), "first_build": True}
     added = set(new) - set(old)
     deleted = set(old) - set(new)
+    #  A document whose **gate** changed is modified too —— its text did not, but `KAL_NO_LLM` gained or lost
+    #  its folder, and `no_llm` lives in the row every reader keys on.  Without this, `sync` left a newly
+    #  gated folder at no_llm=False on an existing index and the local MCP kept serving it until a full
+    #  rebuild, while the config panel said no re-index was needed (deep-review 2026-09-05 R4, security lens).
     modified = {d for d in set(new) & set(old)
-                if new[d]["content_hash"] != old[d]["content_hash"]}
+                if new[d]["content_hash"] != old[d]["content_hash"]
+                or bool(new[d].get("no_llm")) != bool(old[d].get("no_llm"))}
     unchanged = (set(new) & set(old)) - modified
     # rename = the same content_hash appears on both the deleted and the added side
     oh = {old[d]["content_hash"]: d for d in deleted}
@@ -1591,6 +1596,12 @@ def _selftest():
     assert _d["unchanged"] == {2}, f"an unchanged document is reported changed: {_d}"
     assert not _d["added"] and not _d["deleted"], f"add/delete detected wrongly: {_d}"
     #    A pure rename is renamed, not modified (it is not a re-extraction target)
+    #  …and a gate flip alone (same content hash) is a modification —— the row must be rewritten.
+    _g_new = {5: dict(_row(5, "same", "Private/p.md"), no_llm=True)}
+    _g_old = _FakeDB([dict(_row(5, "same", "Private/p.md"), no_llm=False)])
+    assert 5 in diff_vault(_g_new, _g_old)["modified"], "a no_llm change with the same content must count as modified"
+    assert 5 not in diff_vault({5: dict(_row(5, "same", "Private/p.md"), no_llm=False)}, _g_old)["modified"], \
+        "an unchanged gate with the same content must stay unchanged"
     _d2 = diff_vault({3: _row(3, "h", "new.md")}, _FakeDB([_row(9, "h", "old.md")]))
     assert _d2["renamed"] == {9: 3} and not _d2["modified"], f"rename not separated: {_d2}"
     #    An unreadable DB must mean **everything is new** (not a silent zero)

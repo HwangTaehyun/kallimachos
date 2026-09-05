@@ -575,11 +575,11 @@ mcp-test:
 
 #  Upload to the cloud —— an **export** of the index, not `db/` as it sits on disk (src/export_cloud.py):
 #    · a document marked `no_llm` (frontmatter or KAL_NO_LLM) goes up as a stub —— doc_id + the flag, nothing else ——
-#      and every row carrying its text stays behind (its chunks and their BM25 rows); the stub is what lets the
-#      remote serve-time gate keep filtering derived text (entities · relations) by doc_id;
+#      and its chunks stay behind; the stub is what lets the remote serve-time gate keep filtering derived text
+#      (entities · relations) by doc_id;  the hand-rolled BM25 tables (ix_*) are not sent at all;
 #    · the absolute host path of every document and the vault path are not sent;
 #    · everything else is the index as built: chunk text of the other notes (that is what search returns),
-#      entities, relations, term statistics.  ⚠ So this is still not "never the source text" —— it is the
+#      entities, relations, and a rebuilt full-text index.  ⚠ So this is still not "never the source text" —— it is the
 #      searchable body of every note you did not gate.  (deep-review 2026-09-05, sync lens D3; before that the tar
 #      was the whole directory and the gate ran only at serve time.)
 #  The token and address come from the app's MCP screen (app.kallimachos.dev).  The server swaps the tar into the
@@ -616,10 +616,13 @@ push:
     import json, os, time
     home = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
     resp = json.loads(os.environ["KAL_PUSH_RESP"])
-    #  `db` and `stamp` give the record an identity: `just status` says "recorded for a different index" when the
-    #  path differs, and `stamp` is the server's name for the tree it holds (compared remotely in a later version).
+    #  Identity of what was pushed: the index's `meta.built_at` (the same number from the host and from a container
+    #  that mounts the same ~/.kal —— a path would differ between the two) and the server's `stamp` for the tree.
+    #  A rebuild after the push changes built_at, and `just status` then says the cloud copy is behind.
+    import lancedb
+    built_at = {r["key"]: r["value"] for r in lancedb.connect(os.environ["KAL_PUSH_DB"]).open_table("meta").search().limit(99).to_list()}.get("built_at")
     rec = {"url": os.environ["KAL_PUSH_URL"], "at": int(time.time()), "files": resp.get("files"), "bytes": resp.get("bytes"),
-           "stamp": resp.get("stamp"), "db": os.path.abspath(os.environ["KAL_PUSH_DB"]), "db_mtime": int(os.environ["KAL_PUSH_DB_MTIME"] or 0)}
+           "stamp": resp.get("stamp"), "built_at": built_at, "db": os.environ["KAL_PUSH_DB"], "db_mtime": int(os.environ["KAL_PUSH_DB_MTIME"] or 0)}
     with open(os.path.join(home, "push.json"), "w") as f:
         json.dump(rec, f)
     os.chmod(os.path.join(home, "push.json"), 0o600)

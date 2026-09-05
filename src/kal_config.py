@@ -93,7 +93,9 @@ SPEC = {
     #     those notes go out through `claude -p`.  No error is raised.
     #     (deep review 2026-08-25, security lens)
     "no_llm_paths": {
-        "default": "", "type": "str", "env": "KAL_NO_LLM", "reindex": False,
+        #  reindex: the gate now lives in documents.no_llm, so a changed path list needs a sync or rebuild
+        #  (deep-review 2026-09-05 R4) —— the panel lists it under "needs re-index"; `just sync` is enough.
+        "default": "", "type": "str", "env": "KAL_NO_LLM", "reindex": True,
         "min": None, "max": None,
         "label": "Excluded from LLM transmission only (still indexed)",
         "help": ("Vault-relative paths.  Several, colon-separated.  Unlike \"Folders excluded from "
