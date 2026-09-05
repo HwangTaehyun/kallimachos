@@ -72,13 +72,18 @@ services:
       #     walk the Markdown.  The **viewer** does not —— since 2026-09-02 the galaxy graph is read
       #     from KAL_HOME above, which was this mount's only use by the api process itself.
       - ${VAULT_DIR:?VAULT_DIR is not set —— set it with `just vault <path>`}:/vault
-      # The claude CLI settings.  Read-only —— the container has no reason to edit host credentials.
+      # Claude Code's **session transcripts only** (`~/.claude/projects`), read-only.  The `distill`
+      # step reads them —— that is the whole reason this mount exists (src/status.py STEPS).
       #
-      # ⚠ **On macOS, mounting this does not bring the authentication with it.**  The
-      #   credentials are in the keychain.  So the LLM steps (extract, distill, cluster
-      #   labels) cannot run in the container.  The API checks **before** running and
-      #   blocks with a 412 (docs/STACK.md §6).  On a Linux host it is a file and works.
-      - ${CLAUDE_DIR:-~/.claude}:/data/kal/container-home/.claude:ro
+      # ⚠ Not the whole `~/.claude`.  Until 2026-09-06 the entire folder was mounted, on the theory
+      #   that it would bring the `claude` login along.  It does not: on macOS the credentials are
+      #   in the keychain (so the LLM steps go through the host relay above, and the API blocks
+      #   with a 412 before running when there is no route —— docs/STACK.md §6), and on Linux the
+      #   CLI needs to *write* to the folder, which a read-only mount forbids.  What the wider
+      #   mount did carry into this unauthenticated container was settings.json, mcp.json (server
+      #   tokens), CA files, paste and file-history caches —— none of which any step reads
+      #   (deep-review 2026-09-05 R3, security lens; narrowed by the owner's decision).
+      - ${CLAUDE_DIR:-~/.claude}/projects:/data/kal/container-home/.claude/projects:ro
       # The alias files are edited by a person through the UI, so they have to be writable
       - ./aliases.yml:/app/aliases.yml
       - ./homonyms.yml:/app/homonyms.yml

@@ -315,7 +315,7 @@ judgement.
 | 10 | new `.github/workflows/` — build image → `just mcp-plugin-test` | the workflow is green |
 | 11 | **security debt 4** — an empty `no_llm` set passes unconditionally. First-run warning + `KAL_NO_LLM` | removed from the debt list |
 | 12 | **security debt 5** — `SKIP` is a substring of a folder name. It induces self-exclusion on the install path | excluded even when cloned under a different name |
-| 13 | **security debt 6** — make the `CLAUDE_DIR` mount opt-in (state that it is dev-compose only) | reflected in docs and defaults |
+| 13 | **security debt 6** — make the `CLAUDE_DIR` mount opt-in (state that it is dev-compose only) | superseded 2026-09-06: the mount is narrowed to `~/.claude/projects` (read-only, what `distill` reads); settings, `mcp.json`, credentials and caches are no longer mounted |
 
 **Version rule**: semver. `plugin.json`'s `version` == the image tag == the git tag.
 `plugin.json` says `0.1.0` today while there is **no git tag at all**.

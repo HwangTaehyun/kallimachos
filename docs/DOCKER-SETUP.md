@@ -122,7 +122,7 @@ On a Linux host the credentials are a file, and the mount is enough — no relay
    ~/.kal               →   /data/kal            KAL_HOME
    ~/.kal/db            →   /data/kal/db         KAL_PATH
    <your vault>         →   /vault               KAL_VAULT
-   ~/.claude            →   /data/kal/container-home/.claude   (read-only)
+   ~/.claude/projects   →   /data/kal/container-home/.claude/projects   (read-only; what `distill` reads)
                             HOME lives here too, and must be writable
 ```
 
@@ -228,12 +228,15 @@ KAL_RELAY_TOKEN=<what it printed>
 > ⚠ On macOS, mounting `~/.claude` read-only brings the settings but **not the login** — the
 > credentials are in the keychain. On a Linux host they are a file and the mount is enough.
 >
-> The trade-off, stated: that directory holds every Claude Code transcript, `mcp.json` and hooks
-> (several GB on a busy machine), and the container it is mounted into has no authentication of
-> its own — the loopback bind is the only guard. On macOS the mount buys nothing (412 by design)
-> and only widens what a compromised pipeline dependency could read. Point `CLAUDE_DIR` at an
-> empty directory to opt out; the LLM steps then run through the relay on the host instead
-> (§5b). Making the mount opt-in by default is an open decision (deep-review 2026-09-05).
+> What is mounted, and why only that: `$CLAUDE_DIR/projects` — the session transcripts — read-only,
+> because the `distill` step reads them. Nothing else from `~/.claude` enters the container: not
+> `settings.json`, not `mcp.json` (server tokens), not credentials, not the paste and file-history
+> caches. Until 2026-09-06 the whole folder was mounted on the theory that it would bring the
+> `claude` login along; it does not (keychain on macOS, and the CLI needs to *write* there on
+> Linux), so the wider mount only widened what a compromised pipeline dependency inside this
+> unauthenticated, loopback-only container could read (deep-review 2026-09-05, security lens).
+> To keep even the transcripts out, point `CLAUDE_DIR` at a directory with an empty `projects/`;
+> `distill` then finds nothing to do. LLM calls go through the host relay either way (§5b).
 
 > ⚠ Running a step on the **host** while `KAL_CLAUDE_RELAY` is set in the environment sends its
 > calls to a relay meant for the container. `KAL_CLAUDE_RELAY` belongs in `.env` for compose;

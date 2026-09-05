@@ -17,7 +17,7 @@ services:
     volumes:
       - ${KAL_DIR:-~/.kal}:/data/kal
       - ${VAULT_DIR:?VAULT_DIR is not set —— set it with `just vault <path>`}:/vault
-      - ${CLAUDE_DIR:-~/.claude}:/data/kal/container-home/.claude:ro
+      - ${CLAUDE_DIR:-~/.claude}/projects:/data/kal/container-home/.claude/projects:ro
       - ./aliases.yml:/app/aliases.yml
       - ./homonyms.yml:/app/homonyms.yml
       # Python is not compiled —— mounting it means editing without a rebuild.

@@ -77,7 +77,7 @@ Things to check in `.env`:
    ~/.kal                  →   /data/kal     KAL_HOME
    ~/.kal/db               →   /data/kal/db  KAL_PATH
    super-brain (vault)     →   /vault        KAL_VAULT
-   ~/.claude               →   /data/kal/container-home/.claude (ro)
+   ~/.claude/projects      →   /data/kal/container-home/.claude/projects (ro) — transcripts for `distill`; nothing else from ~/.claude
                                HOME lives here too — it must be writable (§6)
 ```
 

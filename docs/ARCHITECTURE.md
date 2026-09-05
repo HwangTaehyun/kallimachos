@@ -139,7 +139,7 @@ node "macOS host" {
 
   folder "~/.kal  ->  /data/kal\n(rw)" as KAL
   folder "super-brain vault  ->  /vault\n(rw)" as VAULT
-  folder "~/.claude  ->  /data/kal/container-home/.claude\n(ro)" as CLAUDE
+  folder "~/.claude/projects  ->  /data/kal/container-home/.claude/projects\n(ro, transcripts for distill)" as CLAUDE
 }
 
 WEB --> API : proxy /api\nread_timeout 24h
