@@ -314,7 +314,7 @@ Two different gates, both read from `.env`:
 
 | | Scope | Effect |
 |---|---|---|
-| `no_llm: true` in a note's frontmatter | one document | indexed and searchable locally, never sent |
+| `no_llm: true` in a note's frontmatter | one document | indexed and searchable locally, never sent to extraction; after `just push` it is in the upload but the remote MCP never returns it (gated at serve time, README §"What stays on your machine") |
 | `KAL_NO_LLM=Private:work/Finance` | path fragments, colon-separated | same, for whole paths |
 | `KAL_SKIP=…` | folders, vault-relative | left out of **indexing** as well |
 

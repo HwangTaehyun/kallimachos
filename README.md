@@ -246,9 +246,12 @@ Full walkthrough, with the measured costs and the traps: [`docs/OPENWIKI-PIPELIN
 
 ## What stays on your machine
 
-Everything, unless you say otherwise. The only step that sends note content anywhere is **extraction**, and it goes through your own `claude` CLI subscription, never to a server of ours.
+Everything, unless you say otherwise. Two steps can send note content off your machine, and both are yours to run:
 
-- `no_llm: true` in a note's frontmatter keeps that note out of extraction entirely (still indexed and searchable locally).
+- **Extraction** goes through your own `claude` CLI subscription —— never to a server of ours.
+- **`just push`** uploads the index (`~/.kal/db`) to the cloud you point it at. That index holds every indexed note's body in 500-character pieces (what search returns), each document's absolute path, and the vault path —— it is not "just the graph". Nothing is pushed unless you run it.
+
+- `no_llm: true` in a note's frontmatter keeps that note out of extraction entirely (still indexed and searchable locally). If you `just push`, the note's pieces are in the upload but the remote MCP never returns them —— the gate runs at serve time, not at upload (an export that drops them before the tar is an open item).
 - `KAL_NO_LLM=Private:work/Finance` blocks whole folders, matched as path components from the vault root.
 - The optional [hosted service](https://kallimachos.dev) exists for people who want the same graph on every device; the self-hosted pipeline is complete without it.
 
