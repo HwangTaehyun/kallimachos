@@ -175,10 +175,13 @@ def _selftest():
     assert any("text" in n for n in names), f"the FTS index on chunks.text must be rebuilt on the copy: {names}"
     assert r["gated_documents"] == 1 and r["gated_chunks"] == 2, r
     #  The blank/zero sets must cover the live documents schema —— a new text column would leak otherwise.
+    #  ⚠ The first version of this check read `S.S["documents"]` —— an attribute that does not exist —— behind a
+    #     `hasattr` guard, so `live` was always empty and the assertion could never fire (a guard that has never
+    #     been seen red is not a guard).  The schemas are a function of the embedding width.
     import schema_v3 as S
-    live = {f.name for f in S.S["documents"]} if hasattr(S, "S") and "documents" in getattr(S, "S", {}) else set()
+    live = {f.name for f in S.schemas(4)["documents"]}
     unknown = live - set(GATED_BLANK) - set(GATED_ZERO) - set(GATED_KEEP)
-    assert not unknown, f"documents columns this module does not classify: {sorted(unknown)}"
+    assert live and not unknown, f"documents columns this module does not classify: {sorted(unknown)}"
     #  A non-empty destination is refused —— never merge into a stale export.
     try:
         export(src, dst); raise AssertionError("a non-empty destination must be refused")

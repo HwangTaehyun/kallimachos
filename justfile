@@ -588,7 +588,7 @@ mcp-test:
 push:
     #!/usr/bin/env bash
     set -euo pipefail
-    : "${KAL_CLOUD_TOKEN:?KAL_CLOUD_TOKEN is required —— create one on the app's MCP screen}"
+    : "${KAL_CLOUD_TOKEN:?KAL_CLOUD_TOKEN is required —— create one on the MCP screen of the app}"
     URL="${KAL_CLOUD_URL:?KAL_CLOUD_URL is required (for example: https://app.kallimachos.dev)}"
     DB="${KAL_PATH:-${KAL_HOME:-$HOME/.kal}/db}"
     [ -d "$DB" ] || { echo "no index: $DB —— run an index once first (just run index)"; exit 1; }
