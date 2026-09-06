@@ -72,6 +72,12 @@ SECRETS = [
     ("GITLAB_PAT",      re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b")),
     ("NPM_TOKEN",       re.compile(r"\bnpm_[A-Za-z0-9]{36}\b")),
     ("HF_TOKEN",        re.compile(r"\bhf_[A-Za-z0-9]{34,}\b")),
+    # Mail providers.  Measured 2026-09-06: a Resend key pasted **in prose** ("키는 re_… 입니다")
+    # passed every net above —— GENERIC_SECRET only fires on `NAME=value`, and nothing knew this
+    # prefix.  Setting up the login mail is exactly when such a key is pasted into a session.
+    ("RESEND_KEY",      re.compile(r"\bre_[A-Za-z0-9]{8,}_[A-Za-z0-9]{20,}\b")),
+    ("SENDGRID_KEY",    re.compile(r"\bSG\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}\b")),
+    ("POSTMARK_TOKEN",  re.compile(r"(?i)\b(x-postmark-server-token\s*:\s*)[A-Za-z0-9\-]{20,}")),
     ("TELEGRAM_TOKEN",  re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_\-]{32,}\b")),
     ("DISCORD_WEBHOOK", re.compile(r"https://(?:discord|discordapp)\.com/api/webhooks/\d+/[A-Za-z0-9_\-]+")),
     # A password embedded in a connection string.  Measured: one survived even in a
@@ -223,6 +229,8 @@ SYNTH = [
 ("GITHUB_TOKEN",  "ghp_" + "c" * 36),
 ("SLACK_WEBHOOK", "https://hooks.slack.com/services/T00/B00/xxxxxxxx"),
 ("JWT",           "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk"),
+("RESEND_KEY",    "re_" + "d" * 8 + "_" + "e" * 24),
+("SENDGRID_KEY",  "SG." + "f" * 22 + "." + "g" * 43),
 ]
 
 
