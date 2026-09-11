@@ -67,6 +67,30 @@ commits, so anyone who had cloned the repository had to reset rather than pull.
 and it has been: every commit since has gone out as written. Repeating this needs a
 reason at least as strong, and it belongs in this section before it happens, not after.
 
+**The second exception, 2026-09-11 —— and it is the first one recurring.** The paragraph above was
+written and then contradicted by the 64 commits that followed it: **46 of them are Korean**, while
+the tree they describe contains zero Korean characters in any tracked file (measured, not
+asserted). The log had drifted back into the exact state the collapse was performed to fix. The
+reason it drifted is the reason it will drift again if nothing changes —— **there was no check.**
+`check-publish` has two history gates and both look for private documents leaking into public
+commits; neither has ever looked at what language a commit message is written in. A rule that only
+a person enforces is a rule that lapses the first busy week, and this repository has a line about
+that: a guard that cannot fire is not a guard.
+
+So this rewrite comes with one. `tools/hooks/pre-push` and the CI boundary job both refuse a push
+carrying a Korean commit message, and the check was mutation-tested —— a deliberately Korean commit
+was created and both gates were confirmed to reject it before this was written down.
+
+⚠ **What this one costs, and how it differs from the first.** The range is `v0.1.2..HEAD`; the
+three release tags sit at or below `v0.1.2` and are not touched. **Only the messages change ——
+every tree is byte-identical**, so unlike the collapse, `git blame` is fully preserved and no
+commit body is lost; each one is translated rather than discarded. What it still costs is the
+hashes: all 64 commits above `v0.1.2` are re-written, and it is a force-push over published
+commits, so anyone who had cloned the repository has to `reset --hard` rather than pull.
+
+The rule after this is unchanged and now enforced: **history is pushed whole, and it is written in
+the language the rest of the repository is written in.**
+
 ## Not there yet
 
 - **CHANGELOG** — the commit history plays that role for now. It gets written when the version
