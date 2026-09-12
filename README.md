@@ -70,7 +70,9 @@ to look for Stripe and Polar.
   next to your notes, so an answer can cite a decision you never wrote down as a note.
 - **Every answer carries its sources** — entity and relation responses include `docs` and
   `refs`, so you can open what it cited and check it.
-- **`kal_timeline`** shows what was written about an entity, when, and what superseded what.
+- **`kal_timeline`** lists what was written about an entity and when. On entities that were
+  revised across sessions it shows the revisions in order; on entities described once it
+  returns that description with its date, which is less than the name suggests.
 - **Korean queries work** — multilingual-e5-small embeddings layered with a 2·3-gram full-text
   index, so a question finds the note even when it never uses that spelling. The full-text half
   is what keeps Korean working when the embedding half misses.
