@@ -29,17 +29,53 @@
 
 Kallimachos is a **local pipeline plus an MCP server** for your own writing. It scans a folder of Markdown — an Obsidian vault, plus your distilled Claude Code session logs — and extracts **entities and relations** into a searchable graph (LanceDB: BM25 + multilingual embeddings + entity/relation vectors, fused with measured weights).
 
-Then it hands that graph to Claude over MCP. When you ask *"what did we decide on auth in that March review?"*, the answer comes back **with the documents it came from**. Every entity and relation response carries `docs` and `refs`, so you never have to trust it blindly.
+Then it hands that graph to Claude over MCP. When you ask *"what did we decide on auth in that March review?"*, the answer comes back **with the documents it came from**. Every entity and relation response carries `docs` and `refs`, so you can open what it cited and check it.
 
 Extraction runs **on your machine, on your own Claude subscription** (`claude -p`). Indexing, embeddings and search are fully local. Nothing requires a server.
 
-## Stuff you can do
+## Three ways you fail to remember
 
-- **Ask questions, not keywords** — "why did we reject JWT" finds the decision *and* the session where it happened, ranked by graph relations, not just string matches.
-- **Make Claude Code remember** — session logs are distilled into the same graph as your notes. Yesterday's architecture debate becomes tomorrow's context.
-- **See your vault as a galaxy** — an Obsidian plugin (and a standalone web build) renders entities as stars and relations as edges, grouped and coloured by topic.
-- **Search Korean that actually works** — multilingual-e5-small embeddings layered with a 2·3-gram full-text index. Embedding-only setups quietly collapse on Korean; this hybrid doesn't.
-- **Track how a decision changed** — `kal_timeline` shows what was written about an entity, when, and what superseded what.
+Only the first one is a search problem, and grep already owns it. Measured over eight
+questions on the author's 1,134-note vault, 2026-09-13:
+
+| What happened | grep · Obsidian search | Kallimachos |
+|---|---|---|
+| You remember the word | Finds it, in 0.1s | Finds it — `--mode keyword`, same file |
+| You remember the thing, not the word | You guess words until one lands | Ask in a sentence |
+| **You do not know what you forgot** | There is no query to type | `kal_entity` · `kal_neighbors` · `kal_timeline` |
+
+The third row is the one no string matcher reaches. Asking `kal_neighbors` about an entity
+returns what it was *compared against*, with the relationship spelled out — on the author's
+vault, in 0.1s:
+
+```
+$ kal_neighbors("Paddle")
+
+Paddle                                         payment processor · 14 documents
+  Stripe                MoR model evaluated, then rejected
+  Polar                 loses to Paddle on per-country pricing
+  Lemon Squeezy         same fee structure
+  Merchant of Record    Paddle operates as one
+  VAT Act §53-2 (KR)    applies once a MoR intermediates the sale
+
+  Decided 2026-08-23
+```
+
+`grep "Paddle"` returns 14 files. To find Stripe and Polar in them you have to already know
+to look for Stripe and Polar.
+
+## The rest of what it does
+
+- **Session logs become part of the graph** — a distilled Claude Code conversation is indexed
+  next to your notes, so an answer can cite a decision you never wrote down as a note.
+- **Every answer carries its sources** — entity and relation responses include `docs` and
+  `refs`, so you can open what it cited and check it.
+- **`kal_timeline`** shows what was written about an entity, when, and what superseded what.
+- **Korean queries work** — multilingual-e5-small embeddings layered with a 2·3-gram full-text
+  index, so a question finds the note even when it never uses that spelling. The full-text half
+  is what keeps Korean working when the embedding half misses.
+- **A galaxy view** renders entities as stars and relations as edges, grouped by topic — useful
+  for spotting a cluster you forgot you had.
 
 ## A look inside
 
