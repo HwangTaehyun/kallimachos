@@ -35,16 +35,18 @@ Extraction runs **on your machine, on your own Claude subscription** (`claude -p
 
 ## Why not just let Claude grep your notes?
 
-Because it does not fit. Measured on the author's 1,134-note vault, 2026-09-13, for the
-question *"why did we pick Paddle?"*:
+Because grep hands back the problem. Measured on the author's 1,134-note vault,
+2026-09-13, for *"why did we pick Paddle?"*:
 
 | | Claude greps the vault | Claude asks Kallimachos |
 |---|---|---|
-| What comes back | 14 files, 499,335 bytes | 14 relations, 15,824 bytes |
-| Context it costs | ~166,000 tokens | ~5,300 tokens |
-| What Claude does next | Read all of it and work out which parts matter | Nothing — the relations are already facts |
+| First response | 41 matching lines, ~6,300 tokens | 14 relations, ~5,300 tokens |
+| Is that the answer? | No — it must now pick files and read them, ~12,000 tokens each | Yes — the relations are already facts |
+| If you cannot name it | Nothing to grep for | Name one thing you do remember |
 
-166,000 tokens is not "slower". It does not go in the window at all.
+The first row is close to a tie, and saying so matters: grep is not expensive. What it is
+is unfinished. It returns the lines that matched and leaves Claude to work out which of the
+14 files holds the reasoning.
 
 And the answer is not in any one of those files. `kal_neighbors` returns what Paddle was
 compared against, with each relationship spelled out — assembled from **10 separate
