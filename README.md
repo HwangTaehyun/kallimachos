@@ -33,20 +33,22 @@ Then it hands that graph to Claude over MCP. When you ask *"what did we decide o
 
 Extraction runs **on your machine, on your own Claude subscription** (`claude -p`). Indexing, embeddings and search are fully local. Nothing requires a server.
 
-## Three ways you fail to remember
+## Why not just let Claude grep your notes?
 
-Only the first one is a search problem, and grep already owns it. Measured over eight
-questions on the author's 1,134-note vault, 2026-09-13:
+Because it does not fit. Measured on the author's 1,134-note vault, 2026-09-13, for the
+question *"why did we pick Paddle?"*:
 
-| What happened | grep · Obsidian search | Kallimachos |
+| | Claude greps the vault | Claude asks Kallimachos |
 |---|---|---|
-| You remember the word | Finds it, in 0.1s | Finds it — `--mode keyword`, same file |
-| You remember the thing, not the word | You guess words until one lands | Ask in a sentence |
-| **You do not know what you forgot** | There is no query to type | `kal_entity` · `kal_neighbors` · `kal_timeline` |
+| What comes back | 14 files, 499,335 bytes | 14 relations, 15,824 bytes |
+| Context it costs | ~166,000 tokens | ~5,300 tokens |
+| What Claude does next | Read all of it and work out which parts matter | Nothing — the relations are already facts |
 
-The third row is the one no string matcher reaches. Asking `kal_neighbors` about an entity
-returns what it was *compared against*, with the relationship spelled out — on the author's
-vault, in 0.1s:
+166,000 tokens is not "slower". It does not go in the window at all.
+
+And the answer is not in any one of those files. `kal_neighbors` returns what Paddle was
+compared against, with each relationship spelled out — assembled from **10 separate
+documents**, no one of which accounts for more than four:
 
 ```
 $ kal_neighbors("Paddle")
@@ -58,11 +60,17 @@ Paddle                                         payment processor · 14 documents
   Merchant of Record    Paddle operates as one
   VAT Act §53-2 (KR)    applies once a MoR intermediates the sale
 
-  Decided 2026-08-23
+  0.1s
 ```
 
-`grep "Paddle"` returns 14 files. To find Stripe and Polar in them you have to already know
-to look for Stripe and Polar.
+The reason it is small and fast is that nothing is being searched. Extraction has already
+read every note and written down what it found, so this is a lookup that returns facts
+rather than a ranking that returns files.
+
+Naming one thing you remember is enough. `kal_neighbors("Kallimachos")` on this repository
+returns, among others, `Electron` — *"previously implemented in Electron"* — and
+`Sponsorware` — *"deferred as a potential pre-launch option"*. Neither is something you
+could have searched for, because forgetting them is the reason you are asking.
 
 ## The rest of what it does
 
