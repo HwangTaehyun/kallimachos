@@ -35,44 +35,39 @@ Extraction runs **on your machine, on your own Claude subscription** (`claude -p
 
 ## Why not just let Claude grep your notes?
 
-Because grep hands back the problem. Measured on the author's 1,134-note vault,
-2026-09-13, for *"why did we pick Paddle?"*:
+Because grep hands the problem back. Measured on the author's 1,134-note vault,
+2026-09-13, for *"why did this project choose AGPL-3.0?"*:
 
 | | Claude greps the vault | Claude asks Kallimachos |
 |---|---|---|
-| First response | 41 matching lines, ~6,300 tokens | 14 relations, ~5,300 tokens |
-| Is that the answer? | No — it must now pick files and read them, ~12,000 tokens each | Yes — the relations are already facts |
+| First response | 106 matching lines across 34 files, ~17,000 tokens | 5 relations, ~4,800 tokens |
+| Is that the answer? | No — it must now pick files and read them, ~6,700 tokens each | Yes — the relations are already facts |
 | If you cannot name it | Nothing to grep for | Name one thing you do remember |
 
-The first row is close to a tie, and saying so matters: grep is not expensive. What it is
-is unfinished. It returns the lines that matched and leaves Claude to work out which of the
-14 files holds the reasoning.
+grep is not expensive. It is unfinished: it returns the lines that matched and leaves
+Claude to decide which of the 34 files holds the reasoning.
 
-And the answer is not in any one of those files. `kal_neighbors` returns what Paddle was
-compared against, with each relationship spelled out — assembled from **10 separate
-documents**, no one of which accounts for more than four:
+What comes back from the catalogue is the reasoning itself:
 
 ```
-$ kal_neighbors("Paddle")
+$ kal_neighbors("AGPL-3.0")
 
-Paddle                                         payment processor · 14 documents
-  Stripe                MoR model evaluated, then rejected
-  Polar                 loses to Paddle on per-country pricing
-  Lemon Squeezy         same fee structure
-  Merchant of Record    Paddle operates as one
-  VAT Act §53-2 (KR)    applies once a MoR intermediates the sale
-
-  0.1s
+AGPL-3.0
+  kallimachos                     chose AGPL-3.0 because hosting services …
+  CLA                             copyleft necessitates a CLA to retain re-licensing rights
+  Permissive open-source license  AGPL-3.0 copyleft creates different contribution mechanics
+  open-source exemption policy    AGPL-3.0 projects automatically qualify
+  Plausible Analytics             uses AGPL-3.0 — real-world evidence for the choice
 ```
 
-The reason it is small and fast is that nothing is being searched. Extraction has already
-read every note and written down what it found, so this is a lookup that returns facts
-rather than a ranking that returns files.
+Nothing is being searched. Extraction has already read every note and written down what it
+found, so this is a lookup that returns facts rather than a ranking that returns files.
+That is why one call ends it.
 
-Naming one thing you remember is enough. `kal_neighbors("Kallimachos")` on this repository
-returns, among others, `Electron` — *"previously implemented in Electron"* — and
-`Sponsorware` — *"deferred as a potential pre-launch option"*. Neither is something you
-could have searched for, because forgetting them is the reason you are asking.
+And naming one thing you remember is enough. `kal_neighbors("Kallimachos")` on this
+repository returns, among others, `Electron` — *"previously implemented in Electron"* — and
+`CLA` — *"required from all contributors"*. Neither is something you could have searched
+for, because forgetting them is the reason you are asking.
 
 ## The rest of what it does
 
