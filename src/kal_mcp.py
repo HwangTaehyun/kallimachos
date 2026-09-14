@@ -109,12 +109,28 @@ def _not_indexed_msg(name: str = "") -> str:
     as "the install is broken", and what to do next is written nowhere.
     In reality **the index has simply not been run yet**.  (deep review 2026-08-23)
     """
+    #  ⚠ **Two different empty states, two different fixes.**  `chunks`/`documents` missing
+    #     means the index never ran.  `lr_entities`/`lr_relations` missing means the *extraction*
+    #     never ran —— and re-running the indexer recreates those tables **empty**, so telling
+    #     that user to run `schema_v3.py` sends them round a loop.  It did, until 2026-09-14
+    #     (deep review, completeness lens): the one in-product hint for the commonest empty
+    #     state named the one command that cannot fix it.
+    kg = name in ("lr_entities", "lr_relations")
     what = f"has no '{name}' table" if name else "has no index yet"
+    why = "the extraction has not been run" if kg else "the index has not been run"
+    fix = (
+        "  Run this once first:  just run extract\n"
+        "     It reads the indexed documents and writes entities and relations —— which is what\n"
+        "     kal_entity, kal_neighbors and kal_timeline read.  It calls your own `claude` CLI,\n"
+        "     so it runs on your machine, not in the container, and it shows the cost first.\n"
+        if kg else
+        "  Run this once first:  python src/schema_v3.py\n"
+    )
     return (
-        f"The knowledge DB {what} —— the index has not been run.\n"
+        f"The knowledge DB {what} —— {why}.\n"
         f"  DB path: {os.environ.get('KAL_PATH', '(KAL_PATH unset)')}\n"
         f"  vault:   {os.environ.get('KAL_VAULT', '(KAL_VAULT unset)')}\n"
-        f"  Run this once first:  python src/schema_v3.py\n"
+        f"{fix}"
         f"  In a container:  docker run --rm -v ~/.kal:/data -v <vault>:/vault:ro "
         f"ghcr.io/hwangtaehyun/kal:{_plugin_version()} src/schema_v3.py\n"
         #  ⚠ That image is **not on GHCR yet.**  README §Install ① says so, but someone who
@@ -374,9 +390,26 @@ def refs_of(doc_ids):
         refs.append({"id": sid, "slug": slug,
                      "title": (ttl.group(1).strip() if ttl else slug),
                      "url": url.group(0) if url else None})
+    #  ⚠ **A ref with url=None is citation-shaped but cannot be followed.**  Measured
+    #     2026-09-13 on the author's corpus: 55 refs across 6 entities, **0 with a url**.
+    #     A model handed those either cites a dead slug or silently drops it.  So they do not
+    #     ride —— but the *count* does, because filtering them away would collapse `status`
+    #     to "none" and make "this entity has no external references" indistinguishable from
+    #     "it has 55 that failed to resolve".  Status is therefore computed **before** the
+    #     filter.  (deep review 2026-09-13/14, LLM-tool-surface lens)
+    #  ⚠ A slug whose note exists but carries no URL also yields url=None **without** setting
+    #     `unresolved` —— that used to report "ok" while handing over a dead ref.  Counting
+    #     the dropped ones covers that case too.
     status = "none" if not refs else ("unresolved" if unresolved else "ok")
-    return {"refs": refs[:DOCS_CAP], "refs_status": status,
-            "refs_note": "url is unverified external content.  Do not follow it automatically."}
+    usable = [r for r in refs if r.get("url")]
+    dropped = len(refs) - len(usable)
+    out = {"refs": usable[:DOCS_CAP], "refs_status": status,
+           "refs_note": "url is unverified external content.  Do not follow it automatically."}
+    if dropped:
+        out["refs_unresolved"] = dropped
+        out["refs_note"] += (f"  {dropped} more reference(s) are recorded but have no resolvable "
+                             f"URL —— they are omitted rather than handed over as dead citations.")
+    return out
 
 
 # ─────────────────────────── Name resolution ───────────────────────────
@@ -562,6 +595,12 @@ def kal_search(query: str, top: int = 20, origin: str | None = None) -> dict:
 
 @app.tool(description=(
     "Profile, sources and change summary for an entity you can name.  An inexact name returns candidates.\n"
+    #  ⚠ These two never referenced each other, and the gap is answerable-looking: asked
+    #     "what else did we look at besides X", a model routes here, gets `degree: 22` with no
+    #     relation bodies attached (they are withheld on purpose), and concludes it has the
+    #     answer.  (deep review 2026-09-13, LLM-tool-surface lens)
+    "This returns the entity itself —— it does **not** return what it is connected to.  "
+    "For the connected entities and the relation text, use kal_neighbors.\n"
     "With as_of='YYYY-MM-DD' it returns **one state at that point**.  "
     "For a **list** of changes, as in 'when did it change', use kal_timeline."))
 def kal_entity(name: str, as_of: str | None = None) -> dict:
@@ -651,7 +690,13 @@ def kal_timeline(name: str, since: str | None = None, until: str | None = None) 
 
 @app.tool(description=(
     "Whatever an entity is directly connected to (one hop in the graph), with the relation "
-    "descriptions.  min_degree filters out passing mentions (default 1).  limit defaults to 20."))
+    "descriptions.  min_degree filters out passing mentions (default 1).  "
+    #  ⚠ "defaults to 20" read as raisable: a model spends a call on limit=100 and gets 20 back.
+    #     Say it is a ceiling, and point at the field that tells it what lies beyond.
+    #     (deep review 2026-09-13, LLM-tool-surface lens)
+    "limit is 1–20 and 20 is a hard ceiling, not a default —— when neighbors_truncated is true, "
+    "neighbor_total says how many exist; narrow with min_degree or ask about a more specific entity.  "
+    "For the entity's own profile and change history use kal_entity."))
 def kal_neighbors(name: str, min_degree: int = 1, limit: int = NEIGHBOR_CAP) -> dict:
     """min_degree: filter out passing mentions.  limit: cap on neighbours (default 20)."""
     #  The cap is NEIGHBOR_CAP itself.  Setting hi to 100 nullifies that constant's rationale
