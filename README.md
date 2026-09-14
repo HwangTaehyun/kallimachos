@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>Give Claude a memory of everything you wrote.</strong><br/>
-  Your Obsidian vault and Claude Code sessions become one knowledge graph, served over MCP with a source behind every answer.
+  Your Obsidian vault — and, if you want them, your Claude Code sessions — become one knowledge graph, served over MCP with a source behind every answer.
 </p>
 
 <p align="center">
@@ -158,7 +158,8 @@ embedding model baked in — no Python, no network at query time, and a hardened
 > true and was never true for anyone who wanted a graph: step 2 is `just setup`, which is
 > `uv sync` — the venv, torch and all. **Containerising the server does not containerise the
 > one-time graph build**, because extraction calls your own `claude` CLI. Path A is Path B plus
-> a containerised server; pick Path B if you would rather not run Docker at all.
+> Path B with the index and the server containerised; pick Path B if you would rather not run
+> Docker at all.
 > (deep review 2026-09-14 round 2, completeness lens)
 
 ```bash
@@ -236,16 +237,18 @@ just search "that auth decision"
 ### Path C — Docker only
 
 ```bash
+# ⚠ FIRST, and not later: docker-compose.kal.yml interpolates ${VAULT_DIR:?…} at config-parse
+#   time, so on a clone with no .env **even `build` aborts** with "VAULT_DIR is not set".
+#   These two write .env and ~/.kal/config.json; nothing below runs without them.
+KAL_VAULT=/path/to/vault just setup
+just vault /path/to/vault
+
 docker compose -f docker-compose.kal.yml build
 docker compose -f docker-compose.kal.yml run --rm kal src/schema_v3.py     # index
 docker compose -f docker-compose.kal.yml run --rm kal src/kal_mcp.py --selftest
 
-# `just up` refuses to start without .env (it is gitignored), and the graph tools stay empty
-# until extraction runs — both need the Path B setup.
 # ⚠ `extract` writes a file; `index` is what reads it and fills the graph tables, so the
 #    index above does not count — you must index again *after* extracting.
-KAL_VAULT=/path/to/vault just setup
-just vault /path/to/vault
 just run extract             # entities + relations (your `claude` CLI, on this machine)
 docker compose -f docker-compose.kal.yml run --rm kal src/schema_v3.py     # re-index to merge
 just up                      # local web UI → http://127.0.0.1:5173
