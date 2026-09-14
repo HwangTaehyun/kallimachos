@@ -169,8 +169,11 @@ just build-kal && docker tag kal:local ghcr.io/hwangtaehyun/kal:0.1.2
 
 # 2. Set up the pipeline on your machine.  Extraction (step 3) calls your own `claude` CLI,
 #    so it cannot run in the container — Path A needs this much of Path B.
+#    ⚠ `just setup` refuses to run without a vault — it will not guess, because a wrong
+#      guess indexes your whole home directory and sends it through `claude -p`. Pass it on
+#      the command line; `just vault` then records it for the containers too.
 mkdir -p ~/.kal
-just setup
+KAL_VAULT=/path/to/vault just setup
 just vault /path/to/vault
 
 # 3. Extract entities and relations.  Writes ~/.kal/lr_kg.json.  Shows the estimated cost
@@ -186,6 +189,17 @@ just run extract
 #    empty results, no error.  The image's own user is 1000:1000; macOS is usually 501:20.
 docker run --rm --user $(id -u):$(id -g) -v ~/.kal:/data -v /path/to/vault:/vault:ro \
   ghcr.io/hwangtaehyun/kal:0.1.2 src/schema_v3.py
+
+# 4b. OPTIONAL — bring your Claude Code session logs into the same graph.
+#     ⚠ This is the second half of this README's opening sentence, and **no path runs it for
+#       you.**  Without it you get a vault-only graph and the session half silently never
+#       happens (deep review 2026-09-14 round 3).  It reads ~/.claude/projects, calls an LLM
+#       (so it costs money and shows the estimate first), writes distilled documents into the
+#       vault, and needs one more index pass to reach the graph.
+just run distill             # ~/.claude/projects → ~/.kal/distilled   (LLM)
+just run promote             # → vault raw/conversations/sessions/
+docker run --rm --user $(id -u):$(id -g) -v ~/.kal:/data -v /path/to/vault:/vault:ro \
+  ghcr.io/hwangtaehyun/kal:0.1.2 src/schema_v3.py      # index again to pick them up
 
 # 5. Register and install the plugin — paths are yours, so they are asked for
 claude plugin marketplace add /path/to/kal
@@ -210,8 +224,9 @@ just init                    # TUI: pick your notes folder, see the cost, index 
 Or by hand:
 
 ```bash
-just setup                   # uv sync + .env (~64s cold, idempotent)
-just vault ~/my-notes        # tell CLI *and* containers where the notes live
+KAL_VAULT=~/my-notes just setup   # uv sync + .env (~64s cold, idempotent).  It will not
+                                  # guess the vault, so give it here on a fresh clone.
+just vault ~/my-notes             # tell CLI *and* containers where the notes live
 just run index               # docs → chunks → vectors → inverted index  (~seconds)
 just search "that auth decision"
 ```
@@ -229,7 +244,8 @@ docker compose -f docker-compose.kal.yml run --rm kal src/kal_mcp.py --selftest
 # until extraction runs — both need the Path B setup.
 # ⚠ `extract` writes a file; `index` is what reads it and fills the graph tables, so the
 #    index above does not count — you must index again *after* extracting.
-just setup && just vault /path/to/vault
+KAL_VAULT=/path/to/vault just setup
+just vault /path/to/vault
 just run extract             # entities + relations (your `claude` CLI, on this machine)
 docker compose -f docker-compose.kal.yml run --rm kal src/schema_v3.py     # re-index to merge
 just up                      # local web UI → http://127.0.0.1:5173
@@ -239,7 +255,12 @@ The embedding model is baked into the image — no network needed at runtime.
 
 ### Try it on the demo vault
 
-Everything above works on the synthetic demo vault in [`docs/demo-vault/`](docs/demo-vault/) — 36 notes about a fictional search-infrastructure project, which extract into ~304 entities and 360 relations. The search output above is its real output:
+Everything above works on the synthetic demo vault in [`docs/demo-vault/`](docs/demo-vault/) — 36 notes about a fictional search-infrastructure project, which extract into ~304 entities and 360 relations.
+
+⚠ The two commands below **index and search only**. They do not extract, so the ~304 entities
+are not what they produce and the ranking shown earlier — which leans 0.59 on relation vectors —
+is not the ranking they run. To reproduce that output, run `just run extract` between them and
+index again. (Caught 2026-09-14 round 3: this block contradicted the pre-extraction note above.)
 
 ```bash
 KAL_VAULT=$PWD/docs/demo-vault KAL_HOME=/tmp/kal-demo .venv/bin/python src/schema_v3.py
