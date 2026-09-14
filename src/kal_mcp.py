@@ -474,7 +474,28 @@ def miss(name, cands):
     One rule throughout —— `error` present means failure; absent means a usable answer.
     A miss used to carry no error, so a model's natural check (`if "error" in r`) let a name
     miss pass as a success.  `hits: []` is not a failure, so it gets no error.
+
+    ⚠ **An empty graph is not a name miss, and it used to report as one.**  `_not_indexed_msg`
+    only ever reached the caller through `tbl()`, i.e. when a table is *missing* —— but
+    `schema_v3.py` creates `lr_entities` / `lr_relations` and leaves them **empty** when the
+    extraction has not been merged.  So the commonest first-run state returned a bare
+    `name_not_found` with `candidates: []`, and the one sentence written to explain it never
+    fired.  A model reading that concludes the entity does not exist; the user concludes the
+    product is broken.  Both are wrong, and the fix is one command.
+    (deep review 2026-09-14 round 2, completeness lens)
     """
+    if not cands:
+        try:
+            if tbl("lr_entities").count_rows() == 0:
+                return {"error": "graph_empty", "matched": None, "query": name, "candidates": [],
+                        "hint": ("the entity table is present but has 0 rows —— the extraction "
+                                 "output has not been merged into the graph.  Run `just run extract` "
+                                 "(writes ~/.kal/lr_kg.json, calls your own claude CLI) and then "
+                                 "**index again** —— indexing is the step that reads that file and "
+                                 "fills this table.  Until then kal_search and kal_doc work and the "
+                                 "three graph tools cannot.")}
+        except Exception:
+            pass          # a missing table is _not_indexed_msg's job, not this one
     hint = ("pass one of the candidates back **verbatim**." if cands
             else "not even a similar name exists.  Find it with kal_search(query) first.")
     return {"error": "name_not_found", "matched": None, "query": name,
@@ -553,8 +574,14 @@ def _plugin_version() -> str:
 
 
 app = MCPServer(name="kal", version=_plugin_version(), instructions=(
-    "Search a personal knowledge DB.  Every entity and relation response always carries its "
-    "source documents (docs) and external references (refs) —— quote them directly.\n"
+    #  ⚠ This string is instructions **to a model**, so an overpromise here is worse than one in
+    #     the README —— it tells the model to quote a field that is reliably empty.  It said
+    #     refs "always" ride and to quote them directly, while refs resolve 0% of the time on
+    #     the author's corpus and two of the five tools return none at all.  Keep it in step
+    #     with README.md's tool section.  (deep review 2026-09-14 round 2, consistency lens)
+    "Search a personal knowledge DB.  Every entity and relation response carries its source "
+    "documents (docs) —— quote those directly.  External references (refs) ride only when they "
+    "resolve; read refs_status (none | unresolved | ok) before relying on them.\n"
     "Time arguments: as_of = one **state** at that point (kal_entity).  "
     "since/until = the **list of changes** in that range (kal_timeline)."))
 

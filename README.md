@@ -42,7 +42,7 @@ question itself names, `AGPL-3.0`:
 | | Claude greps the vault | Claude asks Kallimachos |
 |---|---|---|
 | First response | 31 matching lines across 14 files, ~3,600 tokens | 20 relations, ~3,500 tokens |
-| Is that the answer? | No — it must now pick files and read them, ~12,700 tokens each | Yes — the relations are already facts |
+| Is that the answer? | No — it must now pick and read them: ~2,000 tokens for a typical file, but one of the 14 is a 390 KB generated index | Yes — the relations are already facts |
 | What else was considered? | You must already know the names to grep for | Returned alongside the answer |
 
 **The sizes are a wash.** That is the point: grep is not expensive, it is *unfinished*. It
@@ -143,6 +143,11 @@ The decision note and the **conversation where the decision actually happened** 
 > extraction step — and those three are what the graph examples above show. Extraction calls
 > your own `claude` CLI, so it runs on your machine, not in the container: Path A and Path C
 > both need the Path B setup for that one step.
+>
+> ⚠ **And the order is extract → index, not the other way round.** `just run extract` writes
+> `~/.kal/lr_kg.json` and touches no table; `index` is the step that reads that file and fills
+> `lr_entities` / `lr_relations` (`src/status.py:416-425`). Extracting after you index leaves
+> the tables exactly as empty as before, which is the shape this warning exists to prevent.
 
 ### Path A — Claude Code plugin (recommended)
 
@@ -154,25 +159,34 @@ git clone https://github.com/HwangTaehyun/kallimachos.git kal && cd kal
 # 1. Build the image (until it is published on GHCR, build locally — same tag the manifest expects)
 just build-kal && docker tag kal:local ghcr.io/hwangtaehyun/kal:0.1.2
 
-# 2. Index your vault once (the tools answer "no index yet" until you do)
-#    --user must match step 3's run_as, or the plugin reads an index it cannot see:
+# 2. Set up the pipeline on your machine.  Extraction (step 3) calls your own `claude` CLI,
+#    so it cannot run in the container — Path A needs this much of Path B.
+mkdir -p ~/.kal
+just setup
+just vault /path/to/vault
+
+# 3. Extract entities and relations.  Writes ~/.kal/lr_kg.json.  Shows the estimated cost
+#    and asks before running.
+just run extract
+
+# 4. Index.  Chunks and embeds the vault AND merges step 3's output into the graph tables —
+#    ⚠ THE ORDER MATTERS.  `extract` writes a file; `index` is what actually fills
+#    lr_entities / lr_relations by reading it (src/status.py:416-425).  Index before you
+#    extract and the graph tables are created **empty**, so kal_entity, kal_neighbors and
+#    kal_timeline answer name_not_found — with nothing on screen to say why.
+#    --user must match step 5's run_as, or the plugin reads an index it cannot see:
 #    empty results, no error.  The image's own user is 1000:1000; macOS is usually 501:20.
 docker run --rm --user $(id -u):$(id -g) -v ~/.kal:/data -v /path/to/vault:/vault:ro \
   ghcr.io/hwangtaehyun/kal:0.1.2 src/schema_v3.py
 
-# 3. Build the graph.  THIS IS THE STEP THAT MAKES kal_entity / kal_neighbors / kal_timeline
-#    answer anything — step 2 creates their tables empty.  It calls your own `claude` CLI,
-#    so it cannot run in the container; it shows the estimated cost and asks first.
-just setup && just vault /path/to/vault && just run extract
-
-# 4. Register and install the plugin — paths are yours, so they are asked for
+# 5. Register and install the plugin — paths are yours, so they are asked for
 claude plugin marketplace add /path/to/kal
 claude plugin install kal@kallimachos \
   --config vault_dir=/path/to/vault \
   --config kal_dir=$HOME/.kal \
   --config run_as=$(id -u):$(id -g)
 
-# 5. Verify
+# 6. Verify
 claude mcp list | grep kal        # → ✔ Connected
 ```
 
@@ -204,9 +218,12 @@ docker compose -f docker-compose.kal.yml run --rm kal src/schema_v3.py     # ind
 docker compose -f docker-compose.kal.yml run --rm kal src/kal_mcp.py --selftest
 
 # `just up` refuses to start without .env (it is gitignored), and the graph tools stay empty
-# until extraction runs — both need the Path B setup:
+# until extraction runs — both need the Path B setup.
+# ⚠ `extract` writes a file; `index` is what reads it and fills the graph tables, so the
+#    index above does not count — you must index again *after* extracting.
 just setup && just vault /path/to/vault
 just run extract             # entities + relations (your `claude` CLI, on this machine)
+docker compose -f docker-compose.kal.yml run --rm kal src/schema_v3.py     # re-index to merge
 just up                      # local web UI → http://127.0.0.1:5173
 ```
 
