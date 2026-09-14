@@ -151,7 +151,15 @@ The decision note and the **conversation where the decision actually happened** 
 
 ### Path A — Claude Code plugin (recommended)
 
-The repository is itself a Claude Code plugin. The MCP server runs in a container — nobody has to install Python or a 1.1 GB venv.
+The repository is itself a Claude Code plugin, and the MCP server runs containerised with the
+embedding model baked in — no Python, no network at query time, and a hardened server surface.
+
+> ⚠ This path used to say "nobody has to install Python or a 1.1 GB venv". That is no longer
+> true and was never true for anyone who wanted a graph: step 2 is `just setup`, which is
+> `uv sync` — the venv, torch and all. **Containerising the server does not containerise the
+> one-time graph build**, because extraction calls your own `claude` CLI. Path A is Path B plus
+> a containerised server; pick Path B if you would rather not run Docker at all.
+> (deep review 2026-09-14 round 2, completeness lens)
 
 ```bash
 git clone https://github.com/HwangTaehyun/kallimachos.git kal && cd kal
@@ -257,6 +265,12 @@ KAL_VAULT=$PWD/docs/demo-vault KAL_HOME=/tmp/kal-demo .venv/bin/python src/kal_s
 | `graph` | .20 · 0 · .30 · .50 | you want the reasoning, not the wording |
 | `vector` | 0 · 1 · 0 · 0 | the wording is certainly different from the notes |
 
+**Before extraction, search is weaker than it looks.** The `default` ranking is
+`.18 · .05 · .18 · .59` — nearly four fifths of it comes from the entity and relation halves.
+Until the extraction is merged, those tables are empty and contribute nothing, so what you are
+actually running is BM25 plus chunk vectors. `kal_search` works; it just is not the ranking
+these numbers were tuned for.
+
 **When a tool finds nothing.** `kal_search` returns `hit_count: 0` with no `error` — that is a
 successful search that matched nothing, and the response says which ranking was used so you can
 retry under another. The name-based tools return `{"error": "name_not_found", "candidates": [...]}`
@@ -271,6 +285,13 @@ Every entity/relation response carries its sources (`docs` — path, title, date
 ```bash
 python src/kal_mcp.py --selftest    # exercises all 5 tools + boundary checks
 ```
+
+> ⚠ **The installed plugin serves a pinned image, not your working tree.** `claude plugin
+> install` copies the manifest into `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`
+> and that copy pins an image tag. Editing `src/` changes nothing a model sees until you
+> rebuild the image *and* reinstall the plugin — and a cached copy from an older version keeps
+> pinning the older tag. If a tool's behaviour does not match this README, check which tag the
+> cached `.mcp.json` names before debugging the code.
 
 ## The galaxy view
 
