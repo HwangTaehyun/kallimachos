@@ -243,10 +243,10 @@ KAL_VAULT=$PWD/docs/demo-vault KAL_HOME=/tmp/kal-demo .venv/bin/python src/kal_s
 | Tool | When | Ceiling |
 |---|---|---|
 | `kal_search(query, top?, origin?, mode?)` | You don't know what you're looking for. The main entry point. | `top` ≤ 50 |
-| `kal_entity(name, as_of?)` | What a known name is + sources + how it changed. **Not** what it is connected to. | — |
+| `kal_entity(name, as_of?)` | What a known name is + sources + how it changed. **Not** what it is connected to. | 10 docs (`doc_ids_all` carries the rest) |
 | `kal_timeline(name, since?, until?)` | "When did this change, and how" — with original wording. | 20 events |
 | `kal_neighbors(name, min_degree?, limit?)` | One hop of the graph around an entity — the connected names and the relation text. | **20 relations, hard.** `neighbor_total` says how many exist |
-| `kal_doc(doc_id, max_chars?)` | Verify a citation — the original document. | `max_chars` |
+| `kal_doc(doc_id, max_chars?)` | Verify a citation — the original document. | `max_chars` 200–20,000, default 4,000 |
 
 `kal_search` takes a **ranking mode**, and which one you pick changes what comes back:
 

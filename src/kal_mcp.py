@@ -17,7 +17,7 @@ authentication, and loopback binding is the only defence (docs/STACK.md §7).  O
 in MCP would collapse that premise.
 """
 import vault_path
-import json, logging, os, re, sys, time
+import glob, json, logging, os, re, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -310,9 +310,38 @@ def docs_of(ids, cap=DOCS_CAP):
     return out
 
 
-_SRC_RE = re.compile(r"^sources:\s*(.+)$", re.M)
+#  ⚠ **`sources:` is a YAML **block** list in this format, not an inline scalar.**  This regex
+#     was `^sources:\s*(.+)$`, which captures only what sits on the *same line* —— for
+#     
+#         sources:
+#           - id: local-copy
+#             resource: /personal/sources/ai-2027.md
+#
+#     that is the empty string, and `findall` over the next line yields `['-', 'id:', ...]`.
+#     `'-'` passes SLUG_RE, so **1,078 documents contributed a "reference" named `-`** and the
+#     real target on the `resource:` line was never read.  Measured 2026-09-14 (round 2):
+#     0 of 400 sampled entities could reach refs_status "ok".  Capture the whole block.
+_SRC_BLOCK_RE = re.compile(r"^sources:[ \t]*\n((?:[ \t]+\S.*\n?)+)|^sources:[ \t]*(.+)$", re.M)
+_RESOURCE_RE = re.compile(r"^\s*(?:-\s*)?resource:\s*[\"']?([^\"'\n]+)", re.M)
 SLUG_RE = re.compile(r"[\w-]{1,64}")          # no path separators, no dots
-SRC_DIR = os.path.realpath(os.path.join(VAULT, "wiki", "sources"))
+
+
+def _src_dir():
+    """Where `<slug>.md` source notes live —— **found, not assumed.**
+
+    This was hardcoded to `VAULT/wiki/sources`, which **does not exist** in this vault ——
+    the real directory is `VAULT/personal/wiki/sources`.  Every legacy slug therefore
+    resolved to a missing file and reported `unresolved` forever (round 2, 2026-09-14).
+    Look one level down as well before giving up.
+    """
+    for cand in (os.path.join(VAULT, "wiki", "sources"),
+                 *sorted(glob.glob(os.path.join(VAULT, "*", "wiki", "sources")))):
+        if os.path.isdir(cand):
+            return os.path.realpath(cand)
+    return os.path.realpath(os.path.join(VAULT, "wiki", "sources"))
+
+
+SRC_DIR = _src_dir()
 _URL_RE = re.compile(r"https?://[^\s)\]>\"']+")
 
 
@@ -332,7 +361,7 @@ def refs_of(doc_ids):
     global _DOCS
     if _DOCS is None:
         _DOCS = _docs_index()
-    slugs, unresolved = [], False
+    slugs, paths, unresolved = [], [], False
     for i in doc_ids[:DOCS_CAP]:
         d = _DOCS.get(i)
         if not d:
@@ -342,13 +371,77 @@ def refs_of(doc_ids):
             head = open(f, encoding="utf-8", errors="ignore").read(1500)
         except OSError:
             continue
-        m = _SRC_RE.search(head.split("\n---", 1)[0])
+        front = head.split("\n---", 1)[0]
+        m = _SRC_BLOCK_RE.search(front)
         if m:
-            # `:` must be in the character class —— without it "s1:slug" splits into "s1" and
-            # "slug", and the non-existent slug "s1" produces an unresolved on every call.
-            slugs += re.findall(r"[\w./:-]+", m.group(1))
+            block, inline = m.group(1), m.group(2)
+            if block:
+                #  The modern shape: each entry carries a vault-relative `resource:` path.
+                #  Those are resolved directly (below); they are not slugs.
+                paths += _RESOURCE_RE.findall(block)
+                #  A block may still carry bare `id: <slug>` entries with no resource.
+                if not _RESOURCE_RE.search(block):
+                    slugs += re.findall(r"[\w./:-]+", block)
+            if inline:
+                # `:` must be in the character class —— without it "s1:slug" splits into "s1" and
+                # "slug", and the non-existent slug "s1" produces an unresolved on every call.
+                slugs += re.findall(r"[\w./:-]+", inline)
 
     refs, seen = [], set()
+
+    def _note_ref(sid, key, note):
+        """Read a resolved source note into a ref.  Shared by both shapes."""
+        nonlocal unresolved
+        if not os.path.isfile(note):
+            # exists() is not enough —— a **directory** named `<slug>.md` makes open() raise
+            # IsADirectoryError, and the absolute path rides in that message.
+            unresolved = True
+            refs.append({"id": sid, "slug": key, "title": "", "url": None})
+            return
+        try:
+            t = open(note, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            log.warning("refs: could not read the source note key=%s", key)
+            unresolved = True
+            return
+        if doc_meta(t)[2]:                  # the source note itself is gated out of transmission
+            return
+        ttl = re.search(r'^title:\s*"?([^"\n]+)', t, re.M)
+        url = _URL_RE.search(t)
+        refs.append({"id": sid, "slug": key,
+                     "title": (ttl.group(1).strip() if ttl else key),
+                     "url": url.group(0) if url else None})
+
+    #  ⚠ `resource:` is a **vault-relative path**, so it is resolved against VAULT —— but the
+    #     traversal guard is the same one the slug path needs and for the same reason: these
+    #     values are written by an LLM from content fetched off the web.  An adversarial review
+    #     really did extract a file outside the vault through this field.
+    #  ⚠ **`resource:` is relative to the *wiki root*, not the vault root.**  The values read
+    #     `/wiki/sources/ai-2027.md` while the file is at `VAULT/personal/wiki/sources/ai-2027.md`
+    #     —— resolving them against VAULT alone finds nothing, which is how this looked "fixed"
+    #     while still returning zero URLs (round 2, 2026-09-14).  Try the vault-relative reading
+    #     first, then the wiki-root one via SRC_DIR, which `_src_dir()` already located.
+    _vroot = os.path.realpath(VAULT)
+    for rel in paths:
+        rel = rel.strip()
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        for cand in (os.path.join(VAULT, rel.lstrip("/")),
+                     os.path.join(SRC_DIR, os.path.basename(rel))):
+            note = os.path.realpath(cand)
+            #  The guard is the same one the slug path needs and for the same reason: these
+            #  values are written by an LLM from content fetched off the web.  An adversarial
+            #  review really did extract a file outside the vault through this field.
+            if os.path.commonpath([note, _vroot]) != _vroot:
+                continue                    # escaped the vault —— refuse silently
+            if os.path.isfile(note):
+                _note_ref("", os.path.basename(rel), note)
+                break
+        else:
+            unresolved = True
+            refs.append({"id": "", "slug": os.path.basename(rel), "title": "", "url": None})
+
     for raw in slugs:
         sid, _, slug = raw.partition(":")
         if not slug:
@@ -364,32 +457,10 @@ def refs_of(doc_ids):
         note = os.path.join(SRC_DIR, f"{slug}.md")
         if os.path.realpath(note) != os.path.join(SRC_DIR, f"{slug}.md"):
             continue                       # a symlink pointing outside
-        if not os.path.isfile(note):
-            # exists() is not enough —— a **directory** named `<slug>.md` makes open() raise
-            # IsADirectoryError, and the absolute path rides in that message.
-            unresolved = True
-            refs.append({"id": sid, "slug": slug, "title": "", "url": None})
-            continue
-        try:
-            t = open(note, encoding="utf-8", errors="ignore").read()
-        except OSError:
-            log.warning("refs: could not read the source note slug=%s", slug)
-            unresolved = True
-            continue
-        # The source note itself may be excluded from transmission.  A back door in the gate.
-        #  ⚠ **`doc_meta`, not a bare regex over the head.**  This scanned `t[:1500]` with no
-        #     fence, so a note that merely *documents* the key —— in prose or inside a fenced code
-        #     block —— was silently dropped from `refs`, while every other consumer said it was
-        #     fine.  Measured 2026-09-04: a how-to page with `no_llm: true` in a yaml block was
-        #     blocked here and passed by `doc_meta`.  In this corpus the distilled session
-        #     documents *are* write-ups about this gate, so it fires often.
-        if doc_meta(t)[2]:
-            continue
-        ttl = re.search(r'^title:\s*"?([^"\n]+)', t, re.M)
-        url = _URL_RE.search(t)
-        refs.append({"id": sid, "slug": slug,
-                     "title": (ttl.group(1).strip() if ttl else slug),
-                     "url": url.group(0) if url else None})
+        #  ⚠ `doc_meta`, not a bare regex over the head —— a note that merely *documents* the
+        #     no_llm key was silently dropped while every other consumer said it was fine
+        #     (measured 2026-09-04).  That check lives in `_note_ref`.
+        _note_ref(sid, slug, note)
     #  ⚠ **A ref with url=None is citation-shaped but cannot be followed.**  Measured
     #     2026-09-13 on the author's corpus: 55 refs across 6 entities, **0 with a url**.
     #     A model handed those either cites a dead slug or silently drops it.  So they do not
@@ -397,12 +468,15 @@ def refs_of(doc_ids):
     #     to "none" and make "this entity has no external references" indistinguishable from
     #     "it has 55 that failed to resolve".  Status is therefore computed **before** the
     #     filter.  (deep review 2026-09-13/14, LLM-tool-surface lens)
-    #  ⚠ A slug whose note exists but carries no URL also yields url=None **without** setting
-    #     `unresolved` —— that used to report "ok" while handing over a dead ref.  Counting
-    #     the dropped ones covers that case too.
-    status = "none" if not refs else ("unresolved" if unresolved else "ok")
+    #  ⚠ A note that exists but carries no URL yields url=None **without** setting `unresolved`.
+    #     An earlier fix claimed "counting the dropped ones covers that case" —— it does not:
+    #     `status` was still computed from `unresolved` alone, so the response could say
+    #     `refs_status: "ok"` while `refs` was empty (round 2, 2026-09-14).  10 of 17 real source
+    #     notes carry no URL, so that is the **common** case, not an edge.  `dropped` counts here.
     usable = [r for r in refs if r.get("url")]
     dropped = len(refs) - len(usable)
+    status = ("unresolved" if (unresolved or dropped)
+              else ("none" if not refs else "ok"))
     out = {"refs": usable[:DOCS_CAP], "refs_status": status,
            "refs_note": "url is unverified external content.  Do not follow it automatically."}
     if dropped:
