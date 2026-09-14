@@ -46,7 +46,14 @@ contribution history along with it.
 **The exception, once, after 0.1.2.** Everything up to that point was collapsed into a single
 commit (`737e84a`) and the three tags were re-cut onto it.  That commit —— not a version number
 —— is the boundary this section is about; **0.2.0 has not been cut**, `plugin.json` still says
-`0.1.2`, and the 46 commits sitting on top of the collapsed root are what it will contain.
+`0.1.2`, and everything sitting on top of the collapsed root is what it will contain.
+
+> ⚠ **Do not write that count as a number here.**  It was written as "46" in this paragraph and
+> again in `CLAUDE.md`, and both went stale without anyone noticing —— the same range measured
+> 72 on 2026-09-14 (deep review, freshness lens).  It matters because the paragraph below scopes
+> a *force-push* by this range.  Count it: `git rev-list --count v0.1.2..HEAD`.
+> (The two counts further down are different —— they record what the 2026-09-11 rewrite actually
+> touched at the time it ran, so they are history and stay as written.)
 
 The reason is that the history had stopped being readable by the people it is for. This is a
 public AGPL repository whose code, documentation, tests and comments are now English throughout,

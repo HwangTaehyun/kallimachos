@@ -223,13 +223,31 @@ KAL_VAULT=$PWD/docs/demo-vault KAL_HOME=/tmp/kal-demo .venv/bin/python src/kal_s
 
 ## The MCP tools
 
-| Tool | When |
-|---|---|
-| `kal_search(query)` | You don't know what you're looking for. The main entry point. |
-| `kal_entity(name, as_of?)` | What a known name is + sources + how it changed. |
-| `kal_timeline(name, since?, until?)` | "When did this change, and how" — with original wording. |
-| `kal_neighbors(name, limit?)` | One hop of the graph around an entity. |
-| `kal_doc(doc_id)` | Verify a citation — the original document. |
+| Tool | When | Ceiling |
+|---|---|---|
+| `kal_search(query, top?, origin?, mode?)` | You don't know what you're looking for. The main entry point. | `top` ≤ 50 |
+| `kal_entity(name, as_of?)` | What a known name is + sources + how it changed. **Not** what it is connected to. | — |
+| `kal_timeline(name, since?, until?)` | "When did this change, and how" — with original wording. | 20 events |
+| `kal_neighbors(name, min_degree?, limit?)` | One hop of the graph around an entity — the connected names and the relation text. | **20 relations, hard.** `neighbor_total` says how many exist |
+| `kal_doc(doc_id, max_chars?)` | Verify a citation — the original document. | `max_chars` |
+
+`kal_search` takes a **ranking mode**, and which one you pick changes what comes back:
+
+| `mode` | Weights (bm25 · chunk · entity · relation) | Reach for it when |
+|---|---|---|
+| `default` | .18 · .05 · .18 · .59 | the question is about a topic or a decision |
+| `keyword` | 1 · 0 · 0 · 0 | the user quoted an exact string — a flag, an error, an identifier |
+| `graph` | .20 · 0 · .30 · .50 | you want the reasoning, not the wording |
+| `vector` | 0 · 1 · 0 · 0 | the wording is certainly different from the notes |
+
+**When a tool finds nothing.** `kal_search` returns `hit_count: 0` with no `error` — that is a
+successful search that matched nothing, and the response says which ranking was used so you can
+retry under another. The name-based tools return `{"error": "name_not_found", "candidates": [...]}`
+when the name is close to something, and say so plainly when it is not: resolve the name with
+`kal_search` first. A malformed date gives `bad_date`, an unknown `origin` or `mode` gives
+`bad_origin` / `bad_mode` with the accepted values. **An out-of-range integer is clamped
+silently** — if you asked for 100 neighbours and got 20, the cap is why, and `neighbor_total`
+tells you what is beyond it.
 
 Every entity/relation response carries its sources (`docs` — path, title, date). External references (`refs`) ride when the entity has any that resolve; `refs_status` says `none`, `unresolved` or `ok`, and `refs_unresolved` counts the ones recorded but not resolvable, which are omitted rather than handed over as dead citations. `kal_search` and `kal_doc` return `docs` but not `refs`. One rule for time arguments: `as_of` = the **state** at a moment; `since`/`until` = the **list of changes** in a range.
 

@@ -559,23 +559,47 @@ app = MCPServer(name="kal", version=_plugin_version(), instructions=(
     "since/until = the **list of changes** in that range (kal_timeline)."))
 
 
+#  ⚠ `mode` was unreachable from MCP until 2026-09-14.  `kal_search.py` has had four usable
+#     ranking presets since tuning, `search()` takes `mode=`, and the MCP wrapper simply never
+#     passed it —— so every call ran `default` and no description mentioned the others existed.
+#     That matters because the gap is real and measured: `keyword` (BM25 only) finds exact
+#     strings that `default` buries under relation scores, which is precisely the case a model
+#     hits when the user quotes a flag name, an error string or an identifier.
+#     A capability a model cannot know to reach for is dead capability.
+#     (deep review 2026-09-13/14, LLM-tool-surface lens)
+#  ⚠ `legacy` is deliberately not offered —— it is the pre-tuning baseline kept for comparison,
+#     not a mode anyone should pick at runtime.
+SEARCH_MODES = {
+    "default": "hybrid, relation-weighted.  Use when the question is about a topic or a decision.",
+    "keyword": "BM25 only.  Use when the user quoted an exact string —— a flag, an error, an identifier.",
+    "graph":   "entity and relation scores, chunks excluded.  Use to follow reasoning rather than wording.",
+    "vector":  "meaning only, no keyword or graph.  Use when the wording is certainly different from the notes.",
+}
+
+
 @app.tool(description=(
     "Search the knowledge DB in natural language.  The main entry point when you do not know "
-    "what you are looking for.  If you already know a name, use kal_entity instead."))
-def kal_search(query: str, top: int = 20, origin: str | None = None) -> dict:
+    "what you are looking for.  If you already know a name, use kal_entity instead.\n"
+    "mode picks the ranking: " + " | ".join(f"{k} = {v}" for k, v in SEARCH_MODES.items()) +
+    "\nWhen a search returns nothing useful and you know the exact wording, retry with mode='keyword' "
+    "before concluding the note does not exist."))
+def kal_search(query: str, top: int = 20, origin: str | None = None,
+               mode: str | None = None) -> dict:
     """origin: 'vault' (notes written by hand) | 'session' (distilled from a conversation) | None (all)"""
     top = _clamp(top, 1, 50, 20)
     fresh()
     if origin not in (None, "vault", "session"):
         return {"error": "bad_origin", "got": origin,
                 "expected": ["vault", "session", None]}
+    if mode is not None and mode not in SEARCH_MODES:
+        return {"error": "bad_mode", "got": mode, "expected": sorted(SEARCH_MODES)}
     global _DOCS
     if _DOCS is None:
         _DOCS = _docs_index()
     # search() returns a 3-tuple (rows, mode, weights), not a dict.
     # Treating it as a dict meant **every call was dying** —— and the self-check passed
     # because it called no tools at all.  _selftest now calls all five.
-    rows, _mode, _w = db().search(query, top=top, origin=origin)
+    rows, used_mode, _w = db().search(query, mode=mode or "default", top=top, origin=origin)
     rows = [r for r in rows if r.get("doc_id") in _DOCS]     # no_llm excluded
     ids = [r["doc_id"] for r in rows]
     # rows carry no body text.  Evidence fragments come separately from snippets().
@@ -589,8 +613,15 @@ def kal_search(query: str, top: int = 20, origin: str | None = None) -> dict:
              "score": r.get("score", 0),
              "snippets": snip.get(r["doc_id"], [])}
             for r in rows]
-    return {"query": query, "hits": hits, "hit_count": len(hits),
-            "note": "for an entity's identity or time axis, pick a name from the hits' titles or bodies and call kal_entity(name)."}
+    #  ⚠ The note used to say "pick a name from the hits' titles" unconditionally —— including
+    #     on **zero hits**, where there is nothing to pick from and the useful next move is a
+    #     different ranking, not a different tool.  (deep review 2026-09-13, LLM-tool-surface lens)
+    note = ("for an entity's identity or time axis, pick a name from the hits' titles or bodies "
+            "and call kal_entity(name).") if hits else (
+            "no hits.  This is not an error —— the query simply matched nothing under the "
+            f"'{used_mode}' ranking.  If you know the exact wording, retry with mode='keyword'; "
+            "if you are paraphrasing, retry with mode='vector'.  Widen `origin` if you set it.")
+    return {"query": query, "hits": hits, "hit_count": len(hits), "mode": used_mode, "note": note}
 
 
 @app.tool(description=(

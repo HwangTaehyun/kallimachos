@@ -317,6 +317,13 @@ class KAL:
         # origin is denormalised into chunks, so a BITMAP index filters it directly.
         # (It used to require listing hundreds of doc_ids in an IN clause)
         where = f"origin = '{origin}'" if origin else None
+        #  ⚠ **Known ceiling: this encodes even when the weights make the vector irrelevant.**
+        #     `keyword` is (1, 0, 0, 0) and `graph` is (.20, 0, .30, .50) —— neither needs a chunk
+        #     vector, yet both pay a full encode, and `keyword` therefore cannot run when the
+        #     embedding model is unreachable. That is exactly the situation someone reaches for
+        #     keyword in. Skipping the encode when `w[1] == 0` is not free: chunk_vec also feeds
+        #     the entity/relation halves through their own vectors in some paths, so it needs a
+        #     measurement before it changes. Recorded rather than fixed (deep review 2026-09-14).
         qv = encode_query(q).tolist()
         parts = [self.bm25(q, k=DEPTH["bm25"], where=where),
                  self.chunk_vec(qv, k=DEPTH["chunk"], where=where),
