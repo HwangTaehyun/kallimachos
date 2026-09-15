@@ -411,6 +411,21 @@ Everything, unless you say otherwise. Two steps can send note content off your m
 - `KAL_NO_LLM=Private:work/Finance` blocks whole folders, matched as path components from the vault root. Since 2026-09-05 the path rule is resolved **at index time** into the same `no_llm` mark the frontmatter sets, so the local MCP, `just push` and the remote MCP all honour it —— before that only extraction did (an index built earlier needs `just run index` or a sync to pick it up).
 - The optional [hosted service](https://kallimachos.dev) exists for people who want the same graph on every device; the self-hosted pipeline is complete without it.
 
+  What actually differs — the tools are the same five either way:
+
+  | | Self-host | Hosted |
+  |---|---|---|
+  | Where it answers from | the machine running it, while that machine is on | anywhere, including while your laptop sleeps |
+  | stdio MCP (Claude Code) | ✅ | ✅ |
+  | Remote MCP (claude.ai · phone · ChatGPT · Gemini) | — | ✅ |
+  | Web UI · galaxy view | ✅ | ✅ |
+  | Extraction | your machine, your `claude` CLI | **same** — extraction never moves |
+  | What leaves the machine | nothing but what you `just push` | entity names, relations, and the 500-character pieces search returns |
+  | Licence | AGPL-3.0 | AGPL-3.0 |
+
+  Pricing is on the [site](https://kallimachos.dev) — deliberately not duplicated here, because a
+  number in two places is a number that will disagree with itself.
+
 ### The relay — when the container needs an LLM
 
 On **macOS**, mounting `~/.claude` into a container brings the settings but **not the login**: the
