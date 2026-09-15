@@ -50,6 +50,13 @@ returns the lines that matched and leaves Claude to decide which of the 14 files
 reasoning — and reading even one of them costs more than the whole catalogue answer did.
 
 > Reproduce it with `grep -r "AGPL-3.0" <vault> --include='*.md'` and `kal_neighbors("AGPL-3.0")`.
+> Token figures are **bytes ÷ 3** throughout — this corpus is Korean-dominant, where UTF-8 runs
+> three bytes per character and real tokenization lands near one token per character, so bytes/3
+> approximates it. `chars/4` assumes English and undercounts Korean about threefold. Measured
+> bytes-per-character here: 1.57. No tokenizer runs offline, hence the `~`.
+> And measure against **the vault the index was built from** (`vaultPath` in the private config),
+> not whichever one `KAL_VAULT` happens to point at — two reviewers independently measured a
+> different tree and reported numbers that could not be reconciled (2026-09-14/15).
 > ⚠ Grep the **same string the question names**. An earlier version of this table reported
 > "106 lines across 34 files" — those came from grepping the looser `AGPL`, not `AGPL-3.0`,
 > so the two columns were not answering the same question (deep review 2026-09-13).
@@ -166,7 +173,12 @@ embedding model baked in — no Python, no network at query time, and a hardened
 git clone https://github.com/HwangTaehyun/kallimachos.git kal && cd kal
 
 # 1. Build the image (until it is published on GHCR, build locally — same tag the manifest expects)
-just build-kal && docker tag kal:local ghcr.io/hwangtaehyun/kal:0.1.2
+#    ⚠ Derive the tag, do not type it.  `kal_mcp.py` reads `.claude-plugin/plugin.json` for
+#      both the image tag it prints and the `serverInfo.version` it reports, so a hand-typed
+#      tag drifts the moment the manifest moves — and then the host is told one version while
+#      the image is another, with nothing to say which to believe.
+KAL_VER=$(python3 -c 'import json;print(json.load(open(".claude-plugin/plugin.json"))["version"])')
+just build-kal && docker tag kal:local ghcr.io/hwangtaehyun/kal:$KAL_VER
 
 # 2. Set up the pipeline on your machine.  Extraction (step 3) calls your own `claude` CLI,
 #    so it cannot run in the container — Path A needs this much of Path B.
@@ -189,7 +201,7 @@ just run extract
 #    --user must match step 5's run_as, or the plugin reads an index it cannot see:
 #    empty results, no error.  The image's own user is 1000:1000; macOS is usually 501:20.
 docker run --rm --user $(id -u):$(id -g) -v ~/.kal:/data -v /path/to/vault:/vault:ro \
-  ghcr.io/hwangtaehyun/kal:0.1.2 src/schema_v3.py
+  ghcr.io/hwangtaehyun/kal:$KAL_VER src/schema_v3.py
 
 # 4b. OPTIONAL — bring your Claude Code session logs into the same graph.
 #     ⚠ This is the second half of this README's opening sentence, and **no path runs it for
@@ -200,7 +212,7 @@ docker run --rm --user $(id -u):$(id -g) -v ~/.kal:/data -v /path/to/vault:/vaul
 just run distill             # ~/.claude/projects → ~/.kal/distilled   (LLM)
 just run promote             # → vault raw/conversations/sessions/
 docker run --rm --user $(id -u):$(id -g) -v ~/.kal:/data -v /path/to/vault:/vault:ro \
-  ghcr.io/hwangtaehyun/kal:0.1.2 src/schema_v3.py      # index again to pick them up
+  ghcr.io/hwangtaehyun/kal:$KAL_VER src/schema_v3.py      # index again to pick them up
 
 # 5. Register and install the plugin — paths are yours, so they are asked for
 claude plugin marketplace add /path/to/kal

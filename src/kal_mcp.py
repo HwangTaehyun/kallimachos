@@ -296,6 +296,12 @@ def docs_of(ids, cap=DOCS_CAP):
 
     There is a cap, but **the response records that it truncated.**  Without that, the model
     believes 10 is all there is.
+
+    ⚠ `docs_total` and the count the marketing copy uses are **different quantities and both
+      right** —— 12 documents mention the entity; 11 carry one of its relations.  The two
+      relations the neighbour cap hides cite documents already inside the 11, so 11 holds for
+      all 22.  Recorded because a review round tried to reconcile them as one number
+      (2026-09-15); they are not one number.
     """
     global _DOCS
     if _DOCS is None:
@@ -536,6 +542,12 @@ def refs_of(doc_ids):
         _note_ref(sid, slug, note)
     #  ⚠ **A ref with url=None is citation-shaped but cannot be followed.**  Measured
     #     2026-09-13 on the author's corpus: 55 refs across 6 entities, **0 with a url**.
+    #  ⚠ **Quote the sample method with the number.**  The commit that fixed this reported the
+    #     before-state as "unresolved 375" and the after as "unresolved 72" —— those came from a
+    #     *random* sample and a *deterministic* one, so the pair was not one measurement
+    #     (caught 2026-09-15).  Like for like on the first-400 rows: unresolved 113 → 72, ok
+    #     0 → 41, urls **0 → 70**.  The url claim and the direction survive; the size of the
+    #     `unresolved` drop was overstated.  When re-measuring, fix the sample first.
     #     A model handed those either cites a dead slug or silently drops it.  So they do not
     #     ride —— but the *count* does, because filtering them away would collapse `status`
     #     to "none" and make "this entity has no external references" indistinguishable from
