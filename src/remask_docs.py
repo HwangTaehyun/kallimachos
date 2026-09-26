@@ -21,7 +21,7 @@ Why it is needed
 What it walks
   ~/.kal/distilled/*.md                      the distilled originals
   <vault>/raw/conversations/sessions/*.md    the vault copies
-  ~/.kal/sessions/session_docs.json          the transcript store
+  ~/.kal/sessions/*session_docs.json         the transcript stores —— every one distill reads
 
 Usage:
   python remask_docs.py --dry-run     # only what it catches
@@ -42,7 +42,10 @@ TARGETS = [
     os.path.join(KAL_HOME, "distilled/*.md"),
     f"{VAULT}/raw/conversations/sessions/*.md",
 ]
-SESSIONS_JSON = os.path.join(KAL_HOME, "sessions/session_docs.json")
+#  Every transcript store —— the corpora distill reads, from its one list.  This named
+#  session_docs.json alone, so the Codex and Hermes stores were never re-masked (2026-09-26).
+from distill_sessions import CORPORA  # noqa: E402
+STORES = [p for _, p in CORPORA]
 
 
 #  `mask` is **taken from ingest_sessions as it is.**  There used to be a second implementation
@@ -94,7 +97,58 @@ def _selftest():
     #  Ordinary prose is left alone (no crying wolf)
     plain = "A story that starts with sk-, the acronym AKIA, and a mention of hooks.slack.com."
     assert not find_leaks(plain) and mask(plain)[0] == plain, "it touches ordinary prose"
-    print("  ✅ remask_docs —— masking effective · re-verified · target globs exist · no false positives")
+    #  Every transcript store is re-masked —— not the Claude one alone, as it was.  Two checks,
+    #  because each mutation audit found the other one missing: the list is the corpora distill
+    #  reads (a single-store list stays green on the run below, which patches it) ……
+    assert sorted(STORES) == sorted(p for _, p in CORPORA), \
+        f"remask walks {STORES}, distill reads {[p for _, p in CORPORA]}"
+    #  …… and `run()` really visits every one of them, on three small stores in a temp dir.
+    import io, contextlib, tempfile, stat
+    from unittest import mock
+    import distill_sessions, ingest_sessions
+    with tempfile.TemporaryDirectory() as d:
+        stores = []
+        for n, (_, sample) in zip(("claude", "codex", "hermes"), SYNTH):
+            p = os.path.join(d, f"{n}_session_docs.json")
+            with open(p, "w") as fh:
+                json.dump([{"session_id": n, "text": f"{n} said {sample} once"}], fh)
+            stores.append(p)
+        me = sys.modules[__name__]
+        with mock.patch.object(me, "STORES", stores), \
+                mock.patch.object(me, "TARGETS", [os.path.join(d, "none", "*.md")]):
+            at = int(os.path.getmtime(stores[0])) - 3600     # collected an hour ago (whole seconds)
+            for p in stores:
+                os.utime(p, (at, at))
+            before = [open(p).read() for p in stores]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                run(dry=True)
+            seen = [os.path.basename(p) for p in stores if f"{os.path.basename(p)}  1 hit(s)" in buf.getvalue()]
+            assert len(seen) == 3, f"the dry run visited {seen} of the three stores:\n{buf.getvalue()}"
+            assert [open(p).read() for p in stores] == before, "a dry run changed a store"
+            with contextlib.redirect_stdout(io.StringIO()):
+                run(dry=False)
+            for p in stores:
+                assert not find_leaks(open(p).read()), f"{os.path.basename(p)} still leaks after the run"
+                assert stat.S_IMODE(os.stat(p).st_mode) == 0o600, f"{os.path.basename(p)} is left readable"
+                assert os.path.getmtime(p) == at, f"{os.path.basename(p)} took a new time from the remask"
+        #  …so distill's refusal to cut by a list newer than the corpus still fires after a remask.
+        excl = os.path.join(d, "exclude.txt")
+        with open(excl, "w") as fh:
+            fh.write("codex 2026-09-25T09:00:00Z\n")
+        os.utime(excl, (at + 60, at + 60))              # listed after the collection, before the remask
+        corp = [(os.path.basename(p).split("_")[0], p) for p in stores]
+        with mock.patch.object(distill_sessions, "CORPORA", corp), \
+                mock.patch.object(distill_sessions, "OUT", os.path.join(d, "distilled")), \
+                mock.patch.object(distill_sessions, "DONE", os.path.join(d, "distilled", ".done")), \
+                mock.patch.object(ingest_sessions, "EXCLUDE", excl):
+            try:
+                distill_sessions.corpus_records()
+                raise AssertionError("after a remask, distil cut by a list newer than the corpus")
+            except SystemExit as e:
+                assert "collect again first" in str(e), str(e)
+    print("  ✅ remask_docs —— masking effective · re-verified · target globs exist · no false positives "
+          "· every transcript store visited and masked, its collection time kept")
 
 
 def run(dry):
@@ -112,30 +166,39 @@ def run(dry):
             if not dry:
                 open(p, "w", encoding="utf-8").write(out)
 
-    # The transcript store too —— it is distillation's input, so leaving it revives them on the next run
+    # The transcript stores too —— they are distillation's input, so leaving them revives them on the next run
     jhits = {}
-    if os.path.exists(SESSIONS_JSON):
-        recs = json.load(open(SESSIONS_JSON))
-        changed = 0
+    for store in STORES:
+        if not os.path.exists(store):
+            continue
+        recs = json.load(open(store))
+        changed, here = 0, {}
         for r in recs:
             out, hits = mask(r["text"])
             if hits:
                 changed += 1
                 r["text"] = out
                 for k, v in hits.items():
-                    jhits[k] = jhits.get(k, 0) + v
-        if jhits and not dry:
+                    here[k] = here.get(k, 0) + v
+        if here and not dry:
             # ⚠ It used to copy the original to .bak here —— a tool for deleting secrets creating
             #   a file that preserves them forever.  Confirmed by measurement:
             #   session_docs.json.bak held a live, unmasked PRIVATE KEY.
             #   A backup's purpose (undoing) is served by the masked previous version too.
             #   (adversarial review 2026-08-18, BLOCKER)
-            tmp = SESSIONS_JSON + ".tmp"
+            tmp = store + ".tmp"
+            was = os.stat(store)
             json.dump(recs, open(tmp, "w"), ensure_ascii=False)
             os.chmod(tmp, 0o600)
-            os.replace(tmp, SESSIONS_JSON)          # an atomic swap —— there is no in-between state
-        if jhits:
-            print(f"  session_docs.json  {sum(jhits.values())} hit(s) across {changed} session(s)")
+            os.replace(tmp, store)                  # an atomic swap —— there is no in-between state
+            #  ⚠ …keeping the time it was collected.  distill refuses to cut by an exclude.txt newer
+            #     than the corpus ("collect again first"), and a fresh time here would read as a new
+            #     collection —— the refusal would go quiet while nothing had been cut (2026-09-26).
+            os.utime(store, ns=(was.st_atime_ns, was.st_mtime_ns))
+        if here:
+            print(f"  {os.path.basename(store)}  {sum(here.values())} hit(s) across {changed} session(s)")
+        for k, v in here.items():
+            jhits[k] = jhits.get(k, 0) + v
 
     print(f"\ncaught in {len(touched)} file(s)")
     for p, hits in touched[:20]:

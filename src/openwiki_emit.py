@@ -15,8 +15,8 @@ drift from it.  What that means concretely:
   * exactly three extension keys —— `no_llm`, `doc_type`, `why_captured` (`okf_convert.EXT_OPENWIKI`)
   * `status` is always stated.  Omitting it asserts `stable` (OKF §5.4), which would be a lie
     about a machine-distilled page nobody has read.
-  * session provenance rides in `sources[].resource` as `claude-session://` / `codex-session://`,
-    so the bundle needs no `origin` key to say which agent produced a page.
+  * session provenance rides in `sources[].resource` as `<agent>-session://`, one scheme per agent
+    in `schema_v3.SESSION_AGENTS`, so the bundle needs no `origin` key to say which agent produced a page.
 
 ⚠ **Deleting is the dangerous half, not writing.**  `promote_distilled.py` once cleared a
    destination with `shutil.rmtree` and took a folder from **201 files to 3** —— 200 attachments
@@ -30,6 +30,7 @@ import os, re, sys, json, glob, shutil, hashlib, argparse, subprocess, datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from okf_convert import parse_fm, to_okf, build_link_index, EXT_OPENWIKI   # noqa: E402
 from schema_v3 import NO_LLM_RE   # the transmission gate lives in one place
+from schema_v3 import SESSION_AGENTS, SESSION_URI   # …and so do the agents and the line that names one (see OWNED_LINE)
 #  The same two path gates the indexer and the extractor use —— imported, never restated, so a
 #  document excluded at the source cannot become unexcluded by being published.
 import schema_v3                         # ← the module, so a rebound `VAULT` is seen (see below)
@@ -81,7 +82,12 @@ SHRINK_RATIO = 0.8
 #     anchored on `^\s*resource:` matched our own pages and would have missed any
 #     bundle written the other way —— a self-check written for this guard caught it
 #     before it mattered (2026-09-02).
-OWNED_LINE = re.compile(r"^[ \t]*(?:-[ \t]+)?resource:[ \t]*\"?(?:claude|codex)-session://", re.M)
+#  ⚠ It **is** `schema_v3.SESSION_URI` —— the same compiled pattern the indexer classifies with, not a
+#     copy of it.  This line once spelled `claude|codex` itself, so on the next run a Hermes page
+#     this tool had written was someone else's: never removed once stale, reported under "did not
+#     write", and outside the shrink guard's count (2026-09-25).  Then it was rebuilt here from the
+#     same list —— a second copy of the regex, which is how the first drift happened (impl round 1).
+OWNED_LINE = SESSION_URI
 
 
 def _fm_scalar_free(fm):
@@ -906,6 +912,21 @@ def _selftest():
                               '  - resource: "claude-session://abc"\n---\n본문\n')
         assert real in owned(os.path.dirname(real)), "a genuine session page stopped being owned"
         ok.append("ownership reads mapping entries, not block-scalar contents (both directions)")
+
+        #  ⑦h A Hermes page is ours too.  Written by the converter this tool writes pages with, so
+        #      the scheme it emits and the one ownership accepts cannot drift apart —— the
+        #      alternation here once knew `claude|codex` only.  (2026-09-25)
+        herm = os.path.join(wiki, "personal", "sessions", "hermes", "h.md")
+        os.makedirs(os.path.dirname(herm), exist_ok=True)
+        open(herm, "w", encoding="utf-8").write(to_okf(
+            {"type": "conversation", "title": "h", "session_id": "abc-123", "session_agent": "hermes",
+             "distilled_by": "distill_sessions.py (LLM, needs review afterwards)",
+             "captured": "2026-09-25"},
+            "본문", "personal/sessions/hermes/h.md", {}, set(), extensions=EXT_OPENWIKI))
+        assert "hermes-session://abc-123" in open(herm, encoding="utf-8").read(), \
+            "the fixture carries no Hermes URI, so this tests nothing"
+        assert herm in owned(os.path.dirname(herm)), "a Hermes session page is not recognised as ours"
+        ok.append("a Hermes session page is ours —— the schemes come from schema_v3.SESSION_AGENTS")
 
         #  ⑦e `session_agent` becomes a path component and is **not** covered by the `--into`
         #      containment check.  Reproduced: it normalised to /tmp/PRECIOUS/x.md.

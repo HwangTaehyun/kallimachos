@@ -44,17 +44,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 #   ② Even with the names right, the claude inside the container has no auth ("Not logged in").
 #      It has to go through the host relay (KAL_CLAUDE_RELAY), and a direct call bypasses that.
 # claude_cli.run decides between relay and local itself.  (pipeline check, 2026-08-19)
-from claude_cli import run as claude_run  # noqa: E402
+from claude_cli import run as claude_run, ThirdPartyGateError  # noqa: E402
 
 
 # Where ~/.kal lives.  Mounted at /data/kal inside the container (see docker-compose).
 KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
-#  Two corpora, one pipeline.  Claude and Codex sessions distil identically —— what differs is
-#  only the URI scheme their provenance gets in the openwiki bundle (claude-session:// vs
-#  codex-session://), which `openwiki_emit.py` derives from the `agent` field carried through here.
-#  A missing file is not an error: a machine may have only one of the two agents installed.
+#  Three corpora, one pipeline.  Claude, Codex and Hermes sessions distil identically —— what
+#  differs is only the URI scheme their provenance gets in the openwiki bundle (claude-session://,
+#  codex-session://, hermes-session://), which `okf_convert.py` derives from the `agent` field
+#  carried through here as `session_agent`.
+#  A missing file is not an error: a machine may have any subset of the agents installed.
 CORPORA = [("claude", os.path.join(KAL_HOME, "sessions/session_docs.json")),
-           ("codex",  os.path.join(KAL_HOME, "sessions/codex_session_docs.json"))]
+           ("codex",  os.path.join(KAL_HOME, "sessions/codex_session_docs.json")),
+           ("hermes", os.path.join(KAL_HOME, "sessions/hermes_session_docs.json"))]
 SESS = CORPORA[0][1]        # kept for the self-check and for anything still naming it
 OUT = os.environ.get("KAL_DISTILLED", os.path.join(KAL_HOME, "distilled"))          # built outside the vault first
 # ⚠ REVIEW and DONE **must follow OUT.**  They used to be hardcoded to KAL_HOME, so an attempt
@@ -419,6 +421,124 @@ def write(rec, docs, seen):
     return made
 
 
+#  ── what is pending —— one rule, shared with estimate.py (2026-09-26) ────────────────────────
+#  estimate.py used to count pending sessions on its own: the Claude corpus only, bare-id markers
+#  only (every session distilled since the markers gained an agent prefix read as pending), and
+#  its own environment variable for the output.  It now asks these three.
+def corpus_records():
+    """Every corpus in CORPORA, minus what exclude.txt lists → (records, [(agent, kept, file,
+    left out), …]).  A missing file is skipped: a machine may have any subset of the agents.
+
+    ⚠ **exclude.txt is applied here too, not only when collecting** (2026-09-26).  A line added
+       after the last collection used to be distilled, promoted and indexed anyway —— `just distill`,
+       the web screen's distil step and rebuild_all.sh all start here, from the corpus as it was.
+       A whole-session line drops the record; any session of a stitched Hermes conversation drops
+       the conversation (its record lists them as `members`).  A cutoff cannot be applied here:
+       a record's text carries no message times.  So a corpus older than the list that holds a cut
+       session stops the run —— collect again first, and the collector cuts it.
+    """
+    import ingest_sessions as I
+    raw, roots = [], {}
+    for agent, path in CORPORA:
+        if not os.path.exists(path):
+            continue
+        with open(path) as fh:
+            rows = json.load(fh)
+        for r in rows:
+            #  ⚠ Set only when absent.  `ingest_codex_sessions` already writes it; the Claude
+            #     corpus predates the field, so it is filled in here rather than by rewriting
+            #     a 12 MB file that a running pipeline may be reading.
+            r.setdefault("agent", agent)
+            for m in r.get("members") or [r["session_id"]]:
+                roots[m.lower()] = r["session_id"].lower()
+        raw.append((agent, path, rows))
+    excluded = I.load_excluded(known=roots, strict=False)
+    listed_at = os.path.getmtime(I.EXCLUDE) if excluded else 0
+    recs, loaded = [], []
+    for agent, path, rows in raw:
+        kept, gone = [], 0
+        for r in rows:
+            hit = [excluded[m.lower()] for m in r.get("members") or [r["session_id"]]
+                   if m.lower() in excluded]
+            if None in hit:
+                gone += 1
+                continue
+            if hit and listed_at > os.path.getmtime(path):
+                raise SystemExit(f"❌ {I.EXCLUDE} is newer than {path}, and it cuts {r['session_id']} ——\n"
+                                 "   a corpus record carries no message times to cut by, so collect again "
+                                 "first (just openwiki-sessions, or the ingest_*_sessions.py collector) "
+                                 "and distil after.")
+            kept.append(r)
+        recs += kept
+        loaded.append((agent, len(kept), os.path.basename(path), gone))
+    return recs, loaded
+
+
+def wanted(r):
+    """Not in a project EXCLUDE_PROJECTS names (a substring match)."""
+    return not any(x in r["project"].lower() for x in EXCLUDE_PROJECTS)
+
+
+def is_done(r):
+    """Does this session carry a completion marker?
+
+    ⚠ The marker is namespaced by agent.  A Claude id and a Codex id are both UUIDs from different
+       generators; nothing guarantees they never collide, and a collision would silently skip a
+       session that had never been distilled.
+    ⚠ **A conversation that grew since is still done** (impl rounds 4–5).  Round 4 distilled it
+       again and replaced its pages; round 5 showed what that breaks further down —— two forks under
+       one id deleted each other's pages, a hand-set `no_llm` is carried forward by path and was lost
+       when a title changed, a reused page name brought the replaced page's extraction back as
+       history, and the full build does not purge a gone page's facts.  Distilling again waits for an
+       append-only design; `grew` counts what is left behind so a run can say so.
+    """
+    return _marker_of(r) is not None
+
+
+def _marker_of(r):
+    """The completion marker of `r`, or None.
+
+    ⚠ The bare id is the **pre-2026-09-02 name**, written before the corpus grew a second agent.
+       Every marker of that shape is Claude's by construction, and 464 of them existed when the
+       scheme changed —— not honouring them would have re-distilled the whole Claude corpus, 464 LLM
+       calls, for nothing.  Drop this arm once no ~/.kal/distilled/.done holds an unprefixed name.
+    """
+    a = r.get("agent", "claude")
+    for p in [os.path.join(DONE, f"{a}-{r['session_id']}")] + \
+             ([os.path.join(DONE, r["session_id"])] if a == "claude" else []):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def marker_info(path):
+    """What a marker recorded —— {"last_ts": how far the text reached, "pages": the slugs it made}
+    —— or None for one written before 2026-09-26, which is empty.  The exclusion check reads it to
+    tell pages made from cut text from older ones (`ingest_sessions._check_listed`)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            info = json.loads(fh.read() or "null")
+    except (OSError, ValueError):
+        return None
+    return info if isinstance(info, dict) else None
+
+
+def grew(r):
+    """Distilled before, and holding turns from after what its marker recorded?  Reported, not
+    acted on (see is_done).  An empty, older marker recorded nothing, so it cannot tell."""
+    import ingest_sessions as I
+    m = _marker_of(r)
+    now = I.epoch(r.get("last_ts"))
+    was = I.epoch((marker_info(m) or {}).get("last_ts")) if m else None
+    return now is not None and was is not None and now > was
+
+
+def mark_done(r, made=()):
+    """The completion marker, recording how far `r` was distilled and the pages it made (`write`)."""
+    with open(os.path.join(DONE, f"{r.get('agent', 'claude')}-{r['session_id']}"), "w") as fh:
+        json.dump({"last_ts": r.get("last_ts"), "pages": [m[0] for m in made]}, fh)
+
+
 def _selftest():
     """Guards this file's two silent losses —— in both, data vanished with no error."""
     import types
@@ -516,6 +636,237 @@ def _selftest():
     assert (_f, _c) == (46, 360), f"the split is wrong: {(_f, _c)}"
     print("  ✅ cancelled futures are not reported as failures")
 
+    #  ── pending sessions: one rule, and estimate.py counts with it ─────────────────────────
+    #  Patched on the module *as imported* —— that is the copy estimate.py reads, and it is not
+    #  this one when this file runs as __main__.
+    import tempfile, contextlib, io
+    from unittest import mock
+    import distill_sessions as D
+    import estimate
+    import ingest_sessions as I
+    with tempfile.TemporaryDirectory() as d:
+        corp = [(a, os.path.join(d, f"{a}.json")) for a in ("claude", "codex", "hermes")]
+        rows = {"claude": [{"session_id": "c1", "project": "p"}, {"session_id": "c2", "project": "p"}],
+                "codex": [{"session_id": "x1", "project": "p", "agent": "codex"}],
+                "hermes": [{"session_id": "h1", "project": "quad-work", "agent": "hermes"},
+                           {"session_id": "h2", "project": "p", "agent": "hermes"}]}
+        for a, p in corp:
+            with open(p, "w") as fh:
+                json.dump(rows[a], fh)
+        done = os.path.join(d, ".done")
+        os.makedirs(done)
+        #  a legacy bare Claude marker, an agent-prefixed Hermes one, and a bare one that must not
+        #  count for Codex —— the bare shape is Claude's alone
+        for name in ("c1", "hermes-h2", "x1"):
+            open(os.path.join(done, name), "w").close()
+        #  exclude.txt and the distilled pages are read too: both point into the temp dir
+        with mock.patch.object(D, "CORPORA", corp), mock.patch.object(D, "DONE", done), \
+                mock.patch.object(D, "OUT", d), \
+                mock.patch.object(I, "EXCLUDE", os.path.join(d, "no-exclude.txt")):
+            recs, loaded = D.corpus_records()
+            assert [a for a, *_ in loaded] == ["claude", "codex", "hermes"], loaded
+            pending = [r["session_id"] for r in recs if D.wanted(r) and not D.is_done(r)]
+            assert pending == ["c2", "x1"], f"the pending set is wrong: {pending}"
+            n, why = estimate._count_distill()
+            assert (n, why) == (2, "2 of 4 session(s) done"), \
+                f"estimate counts pending sessions differently from distill: {(n, why)}"
+    print("  ✅ pending = every corpus · project exclusions · agent-namespaced markers, and "
+          "estimate.py counts the same")
+
+    #  ── the marker records how far it distilled; a conversation that grew is reported, not redone ──
+    #  (impl rounds 4–5 —— see is_done).  The record is what the exclusion check reads.
+    with tempfile.TemporaryDirectory() as d:
+        done = os.path.join(d, ".done")
+        os.makedirs(done)
+        at = "2026-09-25T09:00:00Z"
+        with mock.patch.object(D, "DONE", done), mock.patch.object(D, "OUT", d):
+            D.mark_done({"session_id": "same", "agent": "hermes", "last_ts": at}, [("a-page", "t", "x", "same")])
+            assert D.marker_info(os.path.join(done, "hermes-same")) == {"last_ts": at, "pages": ["a-page"]}, \
+                "the marker does not record how far it distilled —— the exclusion check falls back to mtimes"
+            for sid in ("grown", "no-ts"):
+                D.mark_done({"session_id": sid, "agent": "hermes", "last_ts": at})
+            open(os.path.join(done, "legacy"), "w").close()                  # before 2026-09-26: empty
+            got = {r["session_id"]: (D.is_done(r), D.grew(r)) for r in (
+                {"session_id": "same", "agent": "hermes", "last_ts": at},
+                {"session_id": "grown", "agent": "hermes", "last_ts": "2026-09-25T10:00:00Z"},
+                {"session_id": "no-ts", "agent": "hermes"},
+                {"session_id": "legacy", "last_ts": "2030-01-01T00:00:00Z"},
+                {"session_id": "never", "agent": "hermes", "last_ts": at})}
+            assert got == {"same": (True, False), "grown": (True, True), "no-ts": (True, False),
+                           "legacy": (True, False), "never": (False, False)}, got
+            #  …and main() writes that record, reports what grew without redoing it, retries a
+            #  failure (no marker —— the 41 sessions lost to a marker written on failure are in this
+            #  file's history), and marks a SKIP done with no page.  Every path main() writes is in the
+            #  temp dir (REVIEW is derived from OUT at import, so it needs its own).
+            corpus = os.path.join(d, "hermes.json")
+
+            def rec(sid, last_ts):
+                return {"session_id": sid, "project": "p", "agent": "hermes", "n_msg": 2, "first_ts": at,
+                        "last_ts": last_ts, "text": "**Me**: a question\n\n**Hermes**: an answer"}
+
+            def run(recs, reply):
+                with open(corpus, "w") as fh:
+                    json.dump(recs, fh)
+                buf = io.StringIO()
+                with mock.patch.object(D, "CORPORA", [("hermes", corpus)]), \
+                        mock.patch.object(D, "REVIEW", os.path.join(d, "_distill_review.tsv")), \
+                        mock.patch.object(I, "EXCLUDE", os.path.join(d, "no-exclude.txt")), \
+                        mock.patch.object(D, "call", reply), \
+                        mock.patch.object(sys, "argv", ["distill_sessions.py", "--workers", "1"]), \
+                        contextlib.redirect_stdout(buf):
+                    try:
+                        D._main_distill()
+                    except SystemExit as e:
+                        assert not e.code, f"distillation stopped: {e.code}"
+                return buf.getvalue()
+
+            def pages():
+                return sorted(f for f in os.listdir(d) if f.endswith(".md"))
+            doc = lambda *a, **k: ("<<<DOC>>>\ntitle: Marker check\ndoc_type: decision\nwhy_captured: w\n"
+                                   "tags: a\n---\nbody\n<<<END>>>")
+            run([rec("h9", at)], doc)
+            assert D.marker_info(os.path.join(done, "hermes-h9")) == {"last_ts": at, "pages": ["marker-check"]}
+            out = run([rec("h9", "2026-09-25T10:00:00Z")], doc)
+            assert "1 of them grew since they were distilled" in out and pages() == ["marker-check.md"], \
+                f"a conversation that grew was redone, or went unreported: {pages()}\n{out}"
+            run([rec("hfail", at)], lambda *a, **k: "")
+            assert not os.path.exists(os.path.join(done, "hermes-hfail")), \
+                "a failed session was marked done —— it is never retried"
+            #  A page removed by hand leaves its name taken while a marker lists it (review round 6).
+            os.remove(os.path.join(d, "marker-check.md"))
+            run([rec("h10", at)], doc)
+            assert pages() == ["marker-check-v2.md"], f"a name a marker still lists was reused: {pages()}"
+            os.remove(os.path.join(d, "marker-check-v2.md"))
+            with open(os.path.join(d, "marker-check.md"), "w") as fh:
+                fh.write("---\ntitle: \"t\"\nsession_id: h9\nsession_agent: hermes\n---\nbody\n")
+            run([rec("hskip", at)], lambda *a, **k: "SKIP")
+            assert D.marker_info(os.path.join(done, "hermes-hskip")) == {"last_ts": at, "pages": []} \
+                and pages() == ["marker-check.md"], "a SKIP was not marked done, or wrote a page"
+            #  estimate's --json stays JSON: the ⓘ note the exclusion check prints went ahead of it, and
+            #  the web screen's parse fell back to {} (review round 6).  h9 is distilled up to `at`,
+            #  listed with a later cutoff —— exactly the state that prints the note.
+            excl = os.path.join(d, "exclude-note.txt")
+            with open(excl, "w") as fh:
+                fh.write("h9 2026-09-25T10:00:00Z\n")
+            os.utime(excl, (os.path.getmtime(corpus) - 60,) * 2)
+            buf = io.StringIO()
+            with mock.patch.object(D, "CORPORA", [("hermes", corpus)]), mock.patch.object(I, "EXCLUDE", excl), \
+                    contextlib.redirect_stdout(buf):
+                estimate._count_distill()
+            assert buf.getvalue() == "", f"estimate printed ahead of its JSON: {buf.getvalue()!r}"
+    print("  ✅ the marker records how far it distilled and the pages it made; a grown conversation is "
+          "reported, a failure retried, a SKIP marked done")
+
+    #  ── exclude.txt at distil time, not only at collection (2026-09-26) ────────────────────
+    #  `just distill`, the web screen's distil step and rebuild_all.sh start from the corpus as it
+    #  was collected; a line added since used to be distilled, promoted and indexed anyway.
+    with tempfile.TemporaryDirectory() as d:
+        corp = [(a, os.path.join(d, f"{a}.json")) for a in ("claude", "codex", "hermes")]
+        rows = {"claude": [{"session_id": "c1", "project": "p"}, {"session_id": "c2", "project": "p"}],
+                "codex": [{"session_id": "x1", "project": "p", "agent": "codex"}],
+                "hermes": [{"session_id": "h1", "project": "p", "agent": "hermes", "members": ["h1"]},
+                           {"session_id": "h2", "project": "p", "agent": "hermes",
+                            "members": ["h2", "h2-cont"]}]}
+        at = time.time() - 3600
+        for a, p in corp:
+            with open(p, "w") as fh:
+                json.dump(rows[a], fh)
+            os.utime(p, (at, at))
+        done = os.path.join(d, ".done")
+        os.makedirs(done)
+        excl = os.path.join(d, "exclude.txt")
+
+        def listing(text, when):
+            with open(excl, "w") as fh:
+                fh.write(text)
+            os.utime(excl, (when, when))
+
+        def stops(needle):
+            try:
+                D.corpus_records()
+            except SystemExit as e:
+                assert needle in str(e), f"the stop does not say {needle!r}: {e}"
+                return
+            raise AssertionError(f"distil went ahead where it should have stopped ({needle!r})")
+
+        with mock.patch.object(D, "CORPORA", corp), mock.patch.object(D, "DONE", done), \
+                mock.patch.object(D, "OUT", d), mock.patch.object(I, "EXCLUDE", excl), \
+                contextlib.redirect_stdout(io.StringIO()):
+            #  listed after the last collection: a Claude id (in capitals), and a *later* session of
+            #  a stitched Hermes conversation —— which takes the whole conversation with it.  The
+            #  third id is in no corpus here (another machine's, or filtered at collection): distil is
+            #  not the place to judge that —— it may not see every collector —— so it is let be.
+            listing("C2\nh2-cont\nnot-in-any-corpus\n", at + 60)
+            recs, loaded = D.corpus_records()
+            assert sorted(r["session_id"] for r in recs) == ["c1", "h1", "x1"], \
+                f"exclude.txt was not applied at distil time: {sorted(r['session_id'] for r in recs)}"
+            assert [g for *_, g in loaded] == [1, 0, 1], f"the left-out counts are wrong: {loaded}"
+            #  a cutoff the corpus predates cannot be applied here —— no message times —— so stop
+            listing("x1 2026-09-25T09:00:00Z\n", at + 60)
+            stops("collect again first")
+            n, why = estimate._count_distill()           # a time estimate reports it, not dies
+            assert n == 0 and "newer than" in why, (n, why)
+            #  …with the reason, where it sits on the stop's second line: the first alone is
+            #  "❌ <path>:" (review round 5).  `c` is only the start of c1 and c2.
+            listing("c\n", at + 60)
+            stops("only the start of session")
+            n, why = estimate._count_distill()
+            assert n == 0 and "only the start of session" in why, (n, why)
+            #  …while one the corpus postdates was applied by the collector already
+            listing("x1 2026-09-25T09:00:00Z\n", at - 60)
+            assert "x1" in [r["session_id"] for r in D.corpus_records()[0]], "an applied cutoff dropped x1"
+            #  a whole-session line for a conversation already distilled stops, pointing at its
+            #  marker —— found through the later session's first one
+            open(os.path.join(done, "hermes-h2"), "w").close()
+            listing("h2-cont\n", at + 60)
+            stops(os.path.join(done, "hermes-h2"))
+    print("  ✅ exclude.txt applies at distil time: whole lines drop (any session of a stitched "
+          "conversation), a cutoff the corpus predates stops the run, a distilled one points at "
+          "its marker")
+
+    #  ── the third-party gate's refusal ends the run, loudly (impl review round 2) ───────────
+    #  The real gate, end to end: other people's text marked as collected, no no-tools receipt,
+    #  no relay, and no `claude` on PATH —— so nothing here can reach a model, whatever happens.
+    with tempfile.TemporaryDirectory() as d:
+        home = os.path.join(d, "kal")
+        os.makedirs(os.path.join(home, "sessions"))
+        os.makedirs(os.path.join(home, "checks"))
+        with open(os.path.join(home, "sessions", "session_docs.json"), "w") as fh:
+            json.dump([{"session_id": "s1", "project": "p", "n_msg": 2,
+                        "text": "**Me**: a question\n\n**Claude**: an answer"}], fh)
+        open(os.path.join(home, "checks", "third-party-corpus"), "w").close()
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("KAL_CLAUDE_RELAY", "KAL_DISTILLED", "KAL_SESSIONS")}
+        env.update(KAL_HOME=home, PATH="/usr/bin:/bin")
+        r = subprocess.run([sys.executable, os.path.abspath(__file__), "--workers", "1"],
+                           env=env, capture_output=True, text=True, timeout=120)
+        out = r.stdout + r.stderr
+        assert r.returncode != 0 and "verify-extract-tools" in out, \
+            f"the gate's refusal was swallowed (exit {r.returncode}):\n{out}"
+        assert "simply run again" not in out, "the refusal was reported as a retry"
+        assert not os.listdir(os.path.join(home, "distilled", ".done")), "a refused session was marked done"
+        runs = os.path.join(home, "runs")
+        recorded = [json.load(open(os.path.join(runs, f))) for f in os.listdir(runs)]
+        assert recorded and all(x.get("status") == "failed" for x in recorded), \
+            f"the refused run was not recorded as failed: {recorded}"
+    print("  ✅ the third-party gate's refusal stops distillation: non-zero exit, its message, no "
+          "marker, recorded failed")
+
+    #  ── the corpora follow the agents the index knows ────────────────────────────────────
+    #  CORPORA names the agents a second time; `schema_v3.SESSION_AGENTS` is the list the index
+    #  classifies provenance by.  A corpus whose agent the index does not know is indexed as a
+    #  **vault** note, silently; an agent the index knows with no corpus here is never distilled.
+    #  Compared rather than derived, so distilling does not import lancedb.
+    from schema_v3 import SESSION_AGENTS
+    assert {a for a, _ in CORPORA} == set(SESSION_AGENTS), \
+        f"CORPORA {[a for a, _ in CORPORA]} and schema_v3.SESSION_AGENTS {list(SESSION_AGENTS)} differ"
+    #  …and the Hermes corpus is the file its ingester writes.  A missing corpus reads as "not
+    #  installed" (see CORPORA), so a drifted name would mean zero Hermes sessions, forever, quietly.
+    import ingest_hermes_sessions
+    assert os.path.basename(dict(CORPORA)["hermes"]) == ingest_hermes_sessions.DOCS, \
+        "distill reads a different Hermes file from the one ingest_hermes_sessions writes"
+    print("  ✅ CORPORA matches schema_v3.SESSION_AGENTS, and the Hermes path matches its ingester")
+
     print("  ✅ prompt contract —— supersession · closed threads only · correction is a document")
 
     print("  ✅ early abort —— a trailing window, so a deteriorating run is caught while a\n          recovered one finishes")
@@ -526,7 +877,9 @@ def _main_distill():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int)
     ap.add_argument("--workers", type=int, default=10)
-    ap.add_argument("--restart", action="store_true", help="ignore the completion markers and start over")
+    ap.add_argument("--restart", action="store_true",
+                    help="distil every session again —— the new pages are written beside the old ones, "
+                         "which stay (see is_done)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -535,25 +888,17 @@ def _main_distill():
     os.makedirs(OUT, exist_ok=True)
     os.makedirs(DONE, exist_ok=True)
     os.chmod(OUT, 0o700)
-    recs = []
-    for _agent, _path in CORPORA:
-        if not os.path.exists(_path):
-            continue
-        _rows = json.load(open(_path))
-        for _r in _rows:
-            #  ⚠ Set only when absent.  `ingest_codex_sessions` already writes it; the Claude
-            #     corpus predates the field, so it is filled in here rather than by rewriting
-            #     a 12 MB file that a running pipeline may be reading.
-            _r.setdefault("agent", _agent)
-        recs += _rows
-        print(f"  {_agent}: {len(_rows)} session(s) from {os.path.basename(_path)}")
+    recs, loaded = corpus_records()
+    for _agent, _n, _file, _gone in loaded:
+        print(f"  {_agent}: {_n} session(s) from {_file}"
+              + (f" · {_gone} left out by exclude.txt" if _gone else ""))
     if not recs:
-        print(f"❌ no session corpus found — run ingest_sessions.py / ingest_codex_sessions.py first")
+        print("❌ no session corpus found — run ingest_sessions.py / ingest_codex_sessions.py / "
+              "ingest_hermes_sessions.py first")
         raise SystemExit(1)
     if EXCLUDE_PROJECTS:
         n0 = len(recs)
-        recs = [r for r in recs
-                if not any(x in r["project"].lower() for x in EXCLUDE_PROJECTS)]
+        recs = [r for r in recs if wanted(r)]
         if n0 != len(recs):
             print(f"excluded — skipped {n0-len(recs)} session(s) from {'/'.join(EXCLUDE_PROJECTS)}")
     if a.limit:
@@ -562,22 +907,13 @@ def _main_distill():
     # means starting over after an interruption is not affordable.
     if not a.restart:
         n0 = len(recs)
-        #  ⚠ The marker is namespaced by agent.  A Claude id and a Codex id are both UUIDs from
-        #     different generators; nothing guarantees they never collide, and a collision would
-        #     silently skip a session that had never been distilled.
-        def _done(r):
-            #  ⚠ The bare id is the **pre-2026-09-02 name**, written before the corpus grew a
-            #     second agent.  Every marker of that shape is Claude's by construction, and
-            #     464 of them existed when the scheme changed —— not honouring them would have
-            #     re-distilled the whole Claude corpus, 464 LLM calls, for nothing.
-            #     Drop this arm once no ~/.kal/distilled/.done holds an unprefixed name.
-            a = r.get("agent", "claude")
-            if os.path.exists(os.path.join(DONE, f"{a}-{r['session_id']}")):
-                return True
-            return a == "claude" and os.path.exists(os.path.join(DONE, r["session_id"]))
-        recs = [r for r in recs if not _done(r)]
+        grown = sum(1 for r in recs if grew(r))
+        recs = [r for r in recs if not is_done(r)]
         if n0 != len(recs):
             print(f"resuming — skipped {n0 - len(recs)} completed")
+        if grown:
+            print(f"ⓘ {grown} of them grew since they were distilled —— the later turns are not distilled "
+                  "yet (distilling a conversation again in place is not supported; see is_done)")
     if not recs:
         # SystemExit("a string") prints that string to stderr and exits with **code 1**.
         # Having nothing to do is not a failure —— the web UI displayed this as "failed".
@@ -589,6 +925,11 @@ def _main_distill():
     # Register the slugs a previous run created — so resuming does not overwrite the same names
     seen = {os.path.basename(f)[:-3]: 1
             for f in __import__("glob").glob(os.path.join(OUT, "*.md"))}
+    #  …and every name a marker still lists, even if its page was removed by hand: reused, the exclusion
+    #  check read two markers' records for one page, and the removed page's extraction came back under
+    #  it as history (review round 6).
+    for _m in (os.listdir(DONE) if os.path.isdir(DONE) else ()):
+        seen.update((s, 1) for s in (marker_info(os.path.join(DONE, _m)) or {}).get("pages") or [])
     rows, done, empty, failed, aborted, recent, cancelled = [], 0, 0, 0, False, [], 0
     with cf.ThreadPoolExecutor(a.workers) as ex:
         futs = {ex.submit(distill, r): r for r in recs}
@@ -597,14 +938,22 @@ def _main_distill():
             done += 1
             try:
                 docs, status = f.result()
+            except ThirdPartyGateError:
+                #  ⚠ The one refusal that is not a retry.  Counted as a failure, it printed "simply
+                #     run again", exited 0 and recorded the run as ok —— while nothing could pass
+                #     until the no-tools receipt is renewed (impl review round 2).  Stop the queue
+                #     and let it out.
+                for fut in futs:
+                    fut.cancel()
+                raise
             except Exception:
                 docs, status = [], "fail"
-            if status == "ok":
-                rows += write(r, docs, seen)
-            elif status == "skip":
+            made = write(r, docs, seen) if status == "ok" else []
+            rows += made
+            if status == "skip":
                 empty += 1
             if status != "fail":             # a failure leaves no marker → the next run picks it up again
-                open(os.path.join(DONE, f"{r.get('agent','claude')}-{r['session_id']}"), "w").close()
+                mark_done(r, made)
             recent.append(status)
             #  ⚠ After the abort, `as_completed` still yields every future that was already
             #     submitted.  They come back instantly as exceptions (cancelled), and counting
@@ -652,8 +1001,17 @@ def _main_distill():
 
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        #  A self-check is not a run.  Recorded, every `just selftest` put a successful "distill"
+        #  into the real ~/.kal/runs —— the history the web screen reads (audit 2026-09-26).
+        _selftest()
+        sys.exit(0)
     # Record the run under ~/.kal/runs/ —— the web screen's "last run" only knew about runs
     # started from the web UI, so a CLI success still showed yesterday's failure as the last.
     from run_log import record
-    with record("distill"):
-        _main_distill()
+    try:
+        with record("distill"):                # records the refusal as a failed run, then re-raises
+            _main_distill()
+    except ThirdPartyGateError as e:
+        print(f"❌ {e}")
+        sys.exit(1)

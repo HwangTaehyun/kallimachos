@@ -28,15 +28,24 @@ the justfile's 27 entries and left 18 checks silently not running.  One list, th
 Masking runs before anything is written, and `find_leaks` is checked **before** the write —— the
 same order `ingest_sessions.py` had to be corrected to (2026-08-18 review, BLOCKER).
 """
-import os, re, sys, json, glob, collections, argparse
+import os, re, sys, json, errno, fnmatch, collections, argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 #  ⚠ Imported, never copied.  See the module docstring.
 from ingest_sessions import (SECRETS, mask, find_leaks, SYNTH,      # noqa: F401  (SECRETS/SYNTH re-exported for tests)
-                             NOISE_PREFIX, NOISE_RE)
+                             NOISE_PREFIX, NOISE_RE, load_excluded, before_cutoff)
 
 KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
-SESS = os.environ.get("KAL_CODEX_SESSIONS", os.path.expanduser("~/.codex/sessions"))
+#  Where Codex itself keeps them: `$CODEX_HOME` when set (`find_codex_home`, openai/codex
+#  codex-rs/utils/home-dir/src/lib.rs@f92655d07f), else ~/.codex.  The connection snippets honour it,
+#  so the collector must too —— or a relocated store reads as "no store" (review round 6).
+#  KAL_CODEX_SESSIONS overrides both (the self-checks point it into a temp dir).
+def _store():
+    return os.environ.get("KAL_CODEX_SESSIONS") or os.path.join(
+        os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex"), "sessions")
+
+
+SESS = _store()
 OUT = os.environ.get("KAL_SESSIONS", os.path.join(KAL_HOME, "sessions"))
 
 #  ⚠ Never read ~/.codex/config.toml.  It holds live plaintext credentials on this machine.
@@ -102,8 +111,11 @@ def is_noise(block):
     return any(p.search(s) for p in NOISE_RE)
 
 
-def parse_rollout(path):
-    """One rollout file → {text, n_msg, first_ts, last_ts, cwd, cli_version} or None."""
+def parse_rollout(path, cutoff=None):
+    """One rollout file → {text, n_msg, first_ts, last_ts, cwd, cli_version} or None.
+
+    `cutoff` (epoch seconds, from exclude.txt) drops every row stamped at or after it.
+    """
     meta, parts, seen = {}, [], set()
     n_msg = 0
     first_ts = last_ts = None
@@ -127,6 +139,8 @@ def parse_rollout(path):
                 continue
             if kind not in ("response_item", "event_msg"):
                 continue                       # turn_context, compacted, …
+            if not before_cutoff(row.get("timestamp"), cutoff):
+                continue                       # at or after this session's cutoff in exclude.txt
             ptype = payload.get("type")
             if ptype in DROP_PAYLOAD:
                 continue
@@ -183,12 +197,44 @@ def project_of(cwd, path):
     return os.path.basename(os.path.dirname(path))
 
 
+def rollouts(root, onerror):
+    """Every rollout under `root`, sorted —— walked through symlinked folders the way glob's `**`
+    went, each real folder once (a link back up would loop), and each file once however many links
+    reach it (one conversation read twice is two page sets).  `onerror(OSError)` receives whatever
+    cannot be read —— an unreadable folder or rollout, a link whose target is gone —— so a caller can
+    stop or warn instead of reading it as absent (review round 5).  A missing `root` is simply empty.
+    """
+    try:
+        os.scandir(root).close()
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    except PermissionError as e:
+        onerror(e)
+        return []
+    seen, found = set(), {}
+    for d, dirs, names in os.walk(root, onerror=onerror, followlinks=True):
+        if os.path.realpath(d) in seen:
+            dirs[:] = []
+            continue
+        seen.add(os.path.realpath(d))
+        dirs.sort()                           # a fixed order, so the same path wins every run
+        for n in names:
+            p = os.path.join(d, n)
+            if os.path.islink(p) and not os.path.exists(p):
+                onerror(FileNotFoundError(errno.ENOENT, "a link whose target is gone", p))
+            elif fnmatch.fnmatch(n, ROLLOUT):
+                if not os.access(p, os.R_OK):
+                    onerror(PermissionError(errno.EACCES, "Permission denied", p))
+                found.setdefault(os.path.realpath(p), p)
+    return sorted(found.values())
+
+
 def session_id_of(path, meta_id):
     """rollout-2026-06-16T04-38-12-<uuid>.jsonl → <uuid>.  The uuid is what Codex calls the id."""
     if meta_id:
         return meta_id
     base = os.path.basename(path)[:-6]          # strip .jsonl
-    m = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$", base)
+    m = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$", base, re.I)
     return m.group(1) if m else base
 
 
@@ -203,22 +249,56 @@ def main():
     if a.selftest:
         return _selftest()
 
-    os.makedirs(OUT, exist_ok=True)
-    dest = a.out or os.path.join(OUT, "codex_session_docs.json")
-    files = sorted(glob.glob(os.path.join(SESS, "**", ROLLOUT), recursive=True))
+    #  ⚠ **No Codex here is not a failure** (2026-09-26).  This exited 1 on any machine without
+    #     ~/.codex, and `just openwiki-sessions` stopped before the Hermes collector —— most machines
+    #     have one agent, not every one.  Said out loud, so a wrong KAL_CODEX_SESSIONS is visible.
+    #     A store that exists but cannot be read still stops the run: walked with os.walk and its
+    #     `onerror`, because glob skips an unreadable directory without a word.  Opened rather than
+    #     tested with `isdir`, which says "no store" when a folder above it cannot be read, and
+    #     walked through symlinked folders the way glob's `**` went (impl round 4).
+    try:
+        os.scandir(SESS).close()
+    except (FileNotFoundError, NotADirectoryError):
+        print(f"ⓘ no Codex session store at {SESS} —— nothing to collect")
+        return 0
+    except PermissionError as e:
+        print(f"❌ {SESS}: cannot be read ({e.strerror}) —— a Codex store may be there.  Nothing is written.")
+        return 1
+    unreadable = []
+    files = rollouts(SESS, unreadable.append)
+    if unreadable:
+        print(f"❌ {unreadable[0].filename}: cannot be read ({unreadable[0].strerror}) —— the Codex "
+              "store is there but not all of it is readable.  Nothing is written.")
+        return 1
     if a.limit:
         files = files[:a.limit]
     if not files:
-        print(f"❌ no rollout found under {SESS}")
-        return 1
+        print(f"ⓘ no rollout under {SESS} —— nothing to collect")
+        return 0
+    os.makedirs(OUT, exist_ok=True)
+    dest = a.out or os.path.join(OUT, "codex_session_docs.json")
 
-    kept, dropped, total_masked = [], 0, collections.Counter()
+    excluded = load_excluded()
+    kept, dropped, n_excl, n_cut, total_masked, seen = [], 0, 0, 0, collections.Counter(), set()
     raw_chars = out_chars = 0
     for f in files:
         d = parse_rollout(f)
+        sid = session_id_of(f, d["meta_id"] if d else "")
+        key = sid.lower()                      # exclude.txt ids are lower-cased
+        seen.add(key)
         if not d:
             dropped += 1
             continue
+        if key in excluded:
+            if excluded[key] is None:
+                n_excl += 1
+                continue
+            #  The id is read from inside the file, so a cut needs a second pass —— for listed ids only.
+            n_cut += 1
+            d = parse_rollout(f, excluded[key])
+            if not d:
+                dropped += 1
+                continue
         raw_chars += len(d["text"])
         text, nm = mask(d["text"])
         total_masked += nm
@@ -226,7 +306,6 @@ def main():
             dropped += 1
             continue
         out_chars += len(text)
-        sid = session_id_of(f, d["meta_id"])
         proj = project_of(d["cwd"], f)
         kept.append({
             "session_id": sid, "project": proj,
@@ -241,6 +320,8 @@ def main():
             "text": text,
         })
 
+    matched = len(excluded.keys() & seen)
+
     #  ⚠ Verified **before** writing.  Writing first and checking after means a leak is already
     #     on disk and downstream by the time anyone reads the log (2026-08-18 review, BLOCKER).
     blob = "".join(x["text"] for x in kept)
@@ -254,6 +335,8 @@ def main():
     json.dump(kept, open(dest, "w"), ensure_ascii=False)
     os.chmod(dest, 0o600)          # even inside a 700 directory the file is created 644
     print(f"{len(files)} rollout(s) → {len(kept)} kept · {dropped} dropped")
+    print(f"exclude.txt: {matched} of {len(excluded)} listed id(s) name a Codex session —— "
+          f"{n_excl} left out whole · {n_cut} cut at a timestamp")
     print(f"body {raw_chars/1e6:.1f}M chars → {out_chars/1e6:.1f}M after removing noise and duplicates "
           f"({out_chars/max(1,raw_chars)*100:.0f}%)")
     print(f"\nsecrets masked, {sum(total_masked.values())}:")
@@ -338,6 +421,172 @@ def _selftest():
         assert session_id_of(p2, "meta-wins") == "meta-wins"
         assert project_of("", p2) == os.path.basename(d)
         ok.append("session id and project survive a truncated session_meta")
+
+        #  ⑤ exclude.txt end to end —— the real command against a temp home, so it is the call
+        #     sites that are tested, not only the parser (ingest_sessions tests that).
+        import subprocess
+        day = os.path.join(d, "codex", "2026", "09", "25")
+        os.makedirs(day)
+
+        def rollout(uuid, turns):
+            p = os.path.join(day, f"rollout-2026-09-25T07-00-00-{uuid}.jsonl")
+            with open(p, "w") as fh:
+                fh.write(json.dumps({"timestamp": "2026-09-25T07:00:00Z", "type": "session_meta",
+                                     "payload": {"id": uuid, "cwd": "/w/p"}}) + "\n")
+                for ts, text in turns:
+                    fh.write(json.dumps({"timestamp": ts, "type": "event_msg",
+                                         "payload": {"type": "user_message", "message": text}}) + "\n")
+            return p
+
+        gone, cut, kept_id = ("019eccca-a239-7cc0-b56a-%012d" % i for i in (1, 2, 3))
+        p_gone = rollout(gone, [("2026-09-25T08:00:00Z", "CANARY-EXCLUDED-WHOLE")])
+        rollout(cut, [("2026-09-25T08:59:59.999Z", "said before the cutoff"),
+                      ("2026-09-25T09:00:00Z", "CANARY-AT-THE-CUTOFF")])
+        rollout(kept_id, [("2026-09-25T08:00:00Z", "an ordinary session")])
+        upper = "019ECCCA-A239-7CC0-B56A-000000000004"   # an id in capitals, listed in lower case
+        rollout(upper, [("2026-09-25T08:00:00Z", "CANARY-UPPER-ID")])
+        assert "CANARY-EXCLUDED-WHOLE" in parse_rollout(p_gone)["text"], "the canary is not live"
+        out_dir = os.path.join(d, "out")
+        os.makedirs(out_dir)
+        out_json = os.path.join(out_dir, "codex_session_docs.json")
+        #  Every collector root is a temp dir, so "known to some collector" is checked against
+        #  fixtures: one Claude session under a temp HOME, an empty Hermes home, no distilled pages.
+        claude = os.path.join(d, "home", ".claude", "projects", "p")
+        os.makedirs(claude)
+        open(os.path.join(claude, "a-claude-session-id.jsonl"), "w").close()
+
+        def run(listing):
+            with open(os.path.join(out_dir, "exclude.txt"), "w") as fh:
+                fh.write(listing)
+            return subprocess.run([sys.executable, os.path.abspath(__file__), "--min-chars", "1"],
+                                  env=dict(os.environ, HOME=os.path.join(d, "home"),
+                                           KAL_HOME=os.path.join(d, "kal"), KAL_SESSIONS=out_dir,
+                                           KAL_CODEX_SESSIONS=os.path.join(d, "codex"),
+                                           KAL_HERMES_HOME=os.path.join(d, "no-hermes"),
+                                           KAL_DISTILLED=os.path.join(d, "distilled")),
+                                  capture_output=True, text=True, timeout=120)
+
+        #  `A-CLAUDE-SESSION-ID` is another agent's session, in capitals —— known elsewhere, and so
+        #  left alone here; the cut id in capitals must still cut.
+        r = run(f"{gone}\n{cut.upper()} 2026-09-25T09:00:00Z   # the end only\nA-CLAUDE-SESSION-ID\n"
+                f"{upper.lower()}\n")
+        assert r.returncode == 0, r.stdout + r.stderr
+        with open(out_json) as fh:
+            docs = {x["session_id"]: x["text"] for x in json.load(fh)}
+        assert set(docs) == {cut, kept_id}, f"exclude.txt was not honoured: {sorted(docs)}"
+        assert "said before the cutoff" in docs[cut] and "CANARY-AT-THE-CUTOFF" not in docs[cut], \
+            "the cutoff did not reach the rows"
+        assert "3 of 4 listed id(s) name a Codex session —— 2 left out whole · 1 cut at a timestamp" \
+            in r.stdout, r.stdout
+        #  ⚠ An abbreviated id, or one no collector knows, stops the run before anything is written.
+        for listing, needle in ((f"{kept_id[:8]}\n", f"'{kept_id[:8]}' is only the start of session"),
+                                (f"{kept_id[:-1]}f\n", "delete the line if the session is gone")):
+            if os.path.exists(out_json):
+                os.remove(out_json)
+            r = run(listing)
+            assert r.returncode != 0 and needle in r.stderr, \
+                f"exclude.txt was accepted ({needle!r}):\n{r.stdout}{r.stderr}"
+            assert not os.path.exists(out_json), "a run stopped by exclude.txt still wrote its output"
+        ok.append("exclude.txt end to end: a listed id is gone (capitals too), a cutoff drops the row "
+                  "at it and after, an abbreviated or unknown id stops the run, another agent's id is "
+                  "left alone")
+
+        #  ⑥ No Codex is not a failure —— `just openwiki-sessions` must reach the Hermes collector ——
+        #     but a Codex store that exists and cannot be read is.
+        def bare(store):
+            return subprocess.run([sys.executable, os.path.abspath(__file__), "--min-chars", "1"],
+                                  env=dict(os.environ, HOME=os.path.join(d, "home"),
+                                           KAL_HOME=os.path.join(d, "kal"), KAL_SESSIONS=out_dir,
+                                           KAL_CODEX_SESSIONS=store,
+                                           KAL_HERMES_HOME=os.path.join(d, "no-hermes")),
+                                  capture_output=True, text=True, timeout=120)
+
+        os.remove(os.path.join(out_dir, "exclude.txt"))
+        r = bare(os.path.join(d, "no-codex-here"))
+        assert r.returncode == 0 and "no Codex session store" in r.stdout, \
+            f"a machine without Codex failed the run:\n{r.stdout}{r.stderr}"
+        os.makedirs(os.path.join(d, "codex-empty"))
+        r = bare(os.path.join(d, "codex-empty"))              # installed, nothing recorded yet
+        assert r.returncode == 0 and "no rollout under" in r.stdout, \
+            f"an empty Codex store failed the run:\n{r.stdout}{r.stderr}"
+        locked = os.path.join(d, "codex", "2026", "09", "locked")
+        os.makedirs(locked)
+        os.chmod(locked, 0)
+        try:
+            r = bare(os.path.join(d, "codex"))
+        finally:
+            os.chmod(locked, 0o700)
+        #  ⚠ Root reads a mode-0 directory anyway, so there the unreadable case cannot be staged.
+        if os.geteuid() != 0:
+            assert r.returncode != 0 and "cannot be read" in r.stdout, \
+                f"an unreadable part of the Codex store was skipped quietly:\n{r.stdout}{r.stderr}"
+            #  …and so does a store under a folder that cannot be read: `isdir` said "no store".
+            above = os.path.join(d, "codex-above")
+            os.makedirs(os.path.join(above, "sessions"))
+            os.chmod(above, 0)
+            try:
+                r = bare(os.path.join(above, "sessions"))
+            finally:
+                os.chmod(above, 0o700)
+            assert r.returncode != 0 and "cannot be read" in r.stdout, \
+                f"a store under an unreadable folder read as no store:\n{r.stdout}{r.stderr}"
+            #  …and the walker says so itself, for the id lookup that only warns: without it the line
+            #  was told "delete the line if the session is gone" (review round 6).
+            errs = []
+            os.chmod(above, 0)
+            try:
+                assert rollouts(os.path.join(above, "sessions"), errs.append) == [] and errs, errs
+            finally:
+                os.chmod(above, 0o700)
+        #  A store reached through a symlinked folder yields what the real one does —— glob's `**`
+        #  followed the link, and the walk that replaced it dropped such rollouts (impl round 4).
+        dest = os.path.join(out_dir, "codex_session_docs.json")
+
+        def ids(store):
+            if os.path.exists(dest):
+                os.remove(dest)                  # a stale output from the run before would pass
+            r = bare(store)
+            assert r.returncode == 0 and os.path.exists(dest), r.stdout + r.stderr
+            with open(dest) as fh:
+                return sorted(x["session_id"] for x in json.load(fh))
+        linked = os.path.join(d, "codex-linked")
+        os.makedirs(linked)
+        os.symlink(os.path.join(d, "codex", "2026"), os.path.join(linked, "2026"))
+        want = ids(os.path.join(d, "codex"))
+        assert want and ids(linked) == want, "rollouts behind a symlinked folder were left out"
+        #  Where the store is: KAL_CODEX_SESSIONS, else $CODEX_HOME/sessions, else ~/.codex/sessions.
+        from unittest import mock as _m
+        for env, want in (({"KAL_CODEX_SESSIONS": "", "CODEX_HOME": ""}, os.path.expanduser("~/.codex/sessions")),
+                          ({"KAL_CODEX_SESSIONS": "", "CODEX_HOME": "/opt/cx"}, "/opt/cx/sessions"),
+                          ({"KAL_CODEX_SESSIONS": "/k", "CODEX_HOME": "/opt/cx"}, "/k")):
+            with _m.patch.dict(os.environ, env):
+                assert _store() == want, (env, _store())
+        #  …each real folder and file once: a link back up and a second link to the same folder
+        #  leave one row per rollout (a loop gave 15 rows for one id), and a link whose target is
+        #  gone or a rollout that cannot be read is reported, not skipped (review round 5).
+        loop = os.path.join(d, "codex-loop")
+        one = os.path.join(loop, "2026", "09", "25", "rollout-2026-09-25T00-00-00-" + "0" * 8 + ".jsonl")
+        os.makedirs(os.path.dirname(one))
+        open(one, "w").close()
+        os.symlink(loop, os.path.join(loop, "2026", "back-up"))
+        os.symlink(os.path.join(loop, "2026"), os.path.join(loop, "again"))
+        os.makedirs(os.path.join(loop, "elsewhere"))       # …and a link to the file itself
+        os.symlink(one, os.path.join(loop, "elsewhere", "rollout-linked.jsonl"))
+        errs = []
+        assert rollouts(loop, errs.append) == [one] and not errs, (rollouts(loop, errs.append), errs)
+        os.symlink(os.path.join(d, "nowhere"), os.path.join(loop, "gone"))
+        rollouts(loop, errs.append)
+        assert [e.filename for e in errs] == [os.path.join(loop, "gone")], errs
+        os.remove(os.path.join(loop, "gone"))
+        if os.geteuid():                      # root reads a mode-0 file anyway
+            errs = []
+            os.chmod(one, 0)
+            try:
+                rollouts(loop, errs.append)
+            finally:
+                os.chmod(one, 0o600)
+            assert one in [e.filename for e in errs], f"an unreadable rollout was not reported: {errs}"
+        ok.append("no Codex store, or an empty one: a note and exit 0; a store that cannot be read: a stop")
 
     for line in ok:
         print(f"  ✅ {line}")

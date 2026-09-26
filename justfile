@@ -87,11 +87,11 @@ build-kal:
     docker build -t kal:local .
 
 # ★ The acceptance test —— does the plugin **really start**.  It performs a real stdio
-#   handshake with the same hardened flags as `.mcp.json` and checks the 5 tools, the version
+#   handshake with the same hardened flags as `.mcp.json` and checks the 6 tools, the version
 #   and a clean stdout.  Why it is not called `plugin-test`: in this repository "the plugin"
 #   already means `plugin/` (the Obsidian plugin kal-galaxy) —— see `just build-plugin`.
 
-# The acceptance test —— does the container's MCP really start over stdio (5 tools · version · stdout)
+# The acceptance test —— does the container's MCP really start over stdio (6 tools · version · stdout)
 mcp-plugin-test:
     @docker image inspect kal:local >/dev/null 2>&1 || just build-kal
     @{{py}} {{src}}/plugin_probe.py \
@@ -107,7 +107,16 @@ mcp-plugin-test:
 #   The widely circulated blog guidance saying `~/.codex/skills` is wrong.  Copy it and you
 #   get a silent no-op (official: learn.chatgpt.com/docs/build-skills.md, confirmed 2026-08-23).
 
-# Install the skills for Codex (~/.agents/skills).  It shows what changes before overwriting
+#  ⚠ **The installed copy is read-only (2026-09-25).**  `~/.agents/skills` is read by several agents,
+#     and Hermes (which can load it through `skills.external_dirs`) edits skills where it finds
+#     them —— its docs say external dirs are not a write-protection boundary, and
+#     `skills.write_approval` defaults to false (hermes-agent.nousresearch.com/docs/user-guide/
+#     features/skills, retrieved 2026-09-25).  A Hermes driven by other people's chat messages could
+#     rewrite what the other agents then follow.  So the copy is `chmod -R a-w` after installing and
+#     made writable again only to be replaced.  An agent with a shell can undo a mode; this stops
+#     the skill-editing path, not a shell.
+
+# Install the skills for Codex (~/.agents/skills), read-only.  It shows what changes before overwriting
 codex-skills:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -118,9 +127,21 @@ codex-skills:
       if [ -e "$DEST/$n" ] && ! diff -rq "$d" "$DEST/$n" >/dev/null 2>&1; then
         echo "  ⚠ $n —— it exists with different content.  Overwriting (the original is in the repository)"
       fi
+      if [ -e "$DEST/$n" ]; then chmod -R u+w "$DEST/$n"; fi    # the last install left it read-only
       rm -rf "$DEST/$n"; cp -R "$d" "$DEST/$n"
-      echo "  ✅ $n → $DEST/$n"
+      chmod -R a-w "$DEST/$n"
+      echo "  ✅ $n → $DEST/$n (read-only)"
     done
+    #  `hermes config set` takes the dotted key and a YAML/JSON literal for a list; the value
+    #  **replaces** what is there (Hermes docs, reference/cli-commands.md `config set`; both keys in
+    #  hermes_cli/config_defaults.py —— NousResearch/hermes-agent@59004a6, committed 2026-09-25,
+    #  retrieved 2026-09-26).
+    #  Writing `skills.external_dirs:` into config.yaml as a line would make a wrong top-level key.
+    echo "  ⓘ Hermes reads it only when told to —— per profile (drop -p for the default one):"
+    #  No trailing `# …` on a printed command: pasted into an interactive zsh, `#` is an argument.
+    echo "       (the first replaces the list —— if it already has entries, add this one to them by hand)"
+    echo "       hermes -p <profile> config set skills.external_dirs '[\"~/.agents/skills\"]'"
+    echo "       hermes -p <profile> config set skills.write_approval true"
 
 # Print the MCP configuration snippet for Codex (paste it into ~/.codex/config.toml)
 codex-config:
@@ -303,9 +324,11 @@ selftest-py:
     @{{py}} {{src}}/entity_resolve.py
     @{{py}} {{src}}/run_log.py
     @{{py}} {{src}}/claude_relay.py --selftest
+    @{{py}} {{src}}/claude_cli.py --selftest
+    @{{py}} {{src}}/kal_mcp.py --selftest-static
     @{{py}} {{src}}/test_stale_resolve.py
     @{{py}} {{src}}/alias_suggest.py --selftest
-    @{{py}} {{src}}/verify_docs.py --selftest
+    @R="${KAL_HOME:-$HOME/.kal}/runs"; n=$(ls "$R" 2>/dev/null | wc -l); {{py}} {{src}}/verify_docs.py --selftest || exit 1; [ "$(ls "$R" 2>/dev/null | wc -l)" = "$n" ] || { echo "  ❌ verify_docs --selftest wrote a run record into $R"; exit 1; }
     @{{py}} {{src}}/db_ready.py --selftest
     @{{py}} {{src}}/vault_path.py --selftest
     @{{py}} {{src}}/fixture_db.py --selftest
@@ -328,11 +351,15 @@ selftest-py:
     @{{py}} {{src}}/sync_v3.py --selftest
     @{{py}} {{src}}/ingest_sessions.py --selftest
     @{{py}} {{src}}/ingest_codex_sessions.py --selftest
+    @{{py}} {{src}}/ingest_hermes_sessions.py --selftest
     @{{py}} {{src}}/remask_docs.py --selftest
     @{{py}} {{src}}/export_graph.py --selftest
     @{{py}} {{src}}/export_webgl.py --selftest
-    @{{py}} {{src}}/promote_distilled.py --selftest
-    @{{py}} {{src}}/distill_sessions.py --selftest
+    @R="${KAL_HOME:-$HOME/.kal}/runs"; n=$(ls "$R" 2>/dev/null | wc -l); {{py}} {{src}}/promote_distilled.py --selftest || exit 1; [ "$(ls "$R" 2>/dev/null | wc -l)" = "$n" ] || { echo "  ❌ promote_distilled --selftest wrote a run record into $R"; exit 1; }
+    @#  ⚠ A self-check is not a run: distill_sessions used to record its self-check as a successful
+    @#     "distill" in the real run history the web screen reads.  The count before and after is
+    @#     what proves it no longer does (audit 2026-09-26).
+    @R="${KAL_HOME:-$HOME/.kal}/runs"; n=$(ls "$R" 2>/dev/null | wc -l); {{py}} {{src}}/distill_sessions.py --selftest || exit 1; [ "$(ls "$R" 2>/dev/null | wc -l)" = "$n" ] || { echo "  ❌ distill_sessions --selftest wrote a run record into $R"; exit 1; }
     @{{py}} {{src}}/okf_convert.py --selftest
     @{{py}} {{src}}/openwiki_emit.py --selftest
     @{{py}} {{src}}/openwiki_enrich.py --selftest
@@ -364,7 +391,7 @@ selftest-py:
     @#     legitimately refuses —— what is being checked is "does it exit 0 when there is
     @#     nothing to do", and an empty temporary vault is exactly that state.  Using the
     @#     author's vault would make this check run on that machine alone (2026-08-25).
-    @T=$(mktemp -d) && KAL_VAULT="$T" KAL_DIR="$T" {{py}} {{src}}/promote_distilled.py --dry-run >/dev/null && rm -rf "$T" && echo "  ✅ promote --dry-run exits 0"
+    @T=$(mktemp -d) && KAL_HOME="$T" KAL_VAULT="$T" KAL_DIR="$T" {{py}} {{src}}/promote_distilled.py --dry-run >/dev/null && rm -rf "$T" && echo "  ✅ promote --dry-run exits 0"
     @bash -n {{src}}/rebuild_all.sh && bash -n {{src}}/export_all.sh && echo "  ✅ rebuild_all.sh · export_all.sh syntax"
     @#  ⚠ Syntax was the **only** thing checked here, and the two scripts drifted: `export_all.sh`
     @#     learned not to write `kg/` and `.obsidian/` into a vault that is not an Obsidian vault,
@@ -373,6 +400,10 @@ selftest-py:
     @#     the run write nothing; only the branch taken is observed.
     @#     (codex adversarial review 2026-09-04)
     @{{py}} {{src}}/check_vault_writes.py
+    @#  The installed skills must come out read-only (see `codex-skills`) —— and a second install
+    @#  must still replace them.  Mode bits, not `-w`: as root, `-w` is true for any file.  The skills
+    @#  directory itself stays writable, so only what is under it is checked.
+    @T=$(mktemp -d); trap 'chmod -R u+w "$T"; rm -rf "$T"' EXIT; HOME="$T" just codex-skills >/dev/null && HOME="$T" just codex-skills >/dev/null || { echo "  ❌ codex-skills failed in a temp HOME"; exit 1; }; w=$(find "$T/.agents/skills" -mindepth 1 \( -perm -u=w -o -perm -g=w -o -perm -o=w \) | head -3); if [ -n "$w" ]; then echo "  ❌ codex-skills left writable: $w"; exit 1; fi; echo "  ✅ codex-skills installs read-only, and reinstalls over a read-only copy"
     @#  ⚠ Neither .gitignore nor .dockerignore supports an end-of-line comment —— the whole
     @#     line becomes one pattern and matches nothing.  Both files say so in their own
     @#     headers, and .dockerignore:22 was that shape anyway.  Measured 2026-09-01 with
@@ -436,7 +467,8 @@ index *args:
 #  One bundle, two kinds of input, one knowledge DB:
 #
 #      ~/.claude/projects/  ─┐
-#      ~/.codex/sessions/   ─┼─ ingest ─ distil ─┐
+#      ~/.codex/sessions/   ─┤
+#      ~/.hermes/state.db   ─┼─ ingest ─ distil ─┐
 #                            │                    ├─ openwiki_emit ─→ openwiki/personal/
 #      an Obsidian vault    ─┴────────────────────┘                          │
 #                                                                       index ▼
@@ -462,6 +494,10 @@ openwiki wiki=openwiki_dir vault=vault_dir:
 openwiki-sessions wiki=openwiki_dir:
     @{{py}} {{src}}/ingest_sessions.py
     @{{py}} {{src}}/ingest_codex_sessions.py
+    @#  Default platforms only (cli · tui · desktop).  Any other (acp, a messaging platform) is
+    @#  opt-in through KAL_HERMES_SOURCES and refuses to run until `just verify-extract-tools` has
+    @#  passed —— see the script's docstring.
+    @{{py}} {{src}}/ingest_hermes_sessions.py
     @#  ⚠ **`--workers` is passed explicitly.**  The script's own default is 10 while every
     @#     measurement in OPENWIKI-PIPELINE.md and the note above `openwiki-kg` is at 8 —— and 28
     @#     collapsed outright (436 failures in 8.4 minutes).  Leaving it to the default meant this
@@ -542,6 +578,9 @@ openwiki-status wiki=openwiki_dir vault=vault_dir:
     @echo "  sources"
     @printf "    claude sessions   %6s\n" "$(ls ~/.claude/projects/*/*.jsonl 2>/dev/null | wc -l | tr -d ' ')"
     @printf "    codex rollouts    %6s\n" "$(find ~/.codex/sessions -name 'rollout-*.jsonl' 2>/dev/null | wc -l | tr -d ' ')"
+    @#  Row counts only, through the ingester's own file allowlist and read-only opener —— no
+    @#  message is read, and no second copy of which files count as a Hermes store.
+    @printf "    hermes sessions   %6s\n" "$({{py}} -c "import sys;sys.path.insert(0,'{{src}}');import ingest_hermes_sessions as H;print(sum(H._open(p).execute('SELECT COUNT(*) FROM sessions').fetchone()[0] for p in H.stores(H.HOME)))" 2>/dev/null || echo '-')"
     @printf "    distilled         %6s\n" "$(ls ~/.kal/distilled/*.md 2>/dev/null | wc -l | tr -d ' ')"
     @printf "    obsidian vault    %6s\n" "$(find '{{vault}}' -name '*.md' -not -path '*/.git/*' 2>/dev/null | wc -l | tr -d ' ')"
     @echo "  bundle"
@@ -565,7 +604,7 @@ openwiki-plan wiki=openwiki_dir vault=vault_dir:
 homonyms *args:
     @{{py}} {{src}}/homonym_suggest.py {{args}}
 
-# An MCP server check —— it really calls all 5 tools
+# An MCP server check —— it really calls all 6 tools
 mcp-test:
     @#  ⚠ This test reads a document for real through `kal_doc`, **so it needs a real vault**.
     @#     `kal_mcp.py` used to hardcode the author's path as a default, so it passed on that
@@ -693,6 +732,16 @@ search query *args:
 
 relay *args:
     @{{py}} {{src}}/claude_relay.py {{args}}
+
+#  ⚠ **One real `claude -p` call.**  It reads the tool list the CLI reports at start-up for the
+#     exact flags the extraction calls use, and on "0 tools, 0 MCP servers" leaves a receipt in
+#     ~/.kal/checks bound to this CLI version and those flags —— an upgrade voids it.  Text other
+#     people wrote (Hermes sessions from any platform beyond cli · tui · desktop) is not ingested
+#     until the receipt holds.
+
+# Confirm the extraction model runs with zero tools (one real claude call) —— opt-in Hermes platforms need it
+verify-extract-tools:
+    @{{py}} {{src}}/claude_cli.py --verify-no-tools
 
 # ── Containers ────────────────────────────────────────────────────────
 

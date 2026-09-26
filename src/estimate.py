@@ -179,17 +179,26 @@ def _count_index():
 
 
 def _count_distill():
-    """The number of sessions not yet distilled (no .done marker)."""
-    out = os.environ.get("KAL_DISTILL_OUT", os.path.join(KAL_HOME, "distilled"))
-    sess = os.path.join(KAL_HOME, "sessions/session_docs.json")
-    if not os.path.exists(sess):
-        return 0, "no session list — run ingest_sessions.py first"
+    """The number of sessions not yet distilled —— counted by distill_sessions' own rule.
+
+    ⚠ This used to count on its own and drifted three ways: the Claude corpus only (not Codex or
+       Hermes), bare-id markers only (every session distilled since the markers gained an agent
+       prefix read as pending), and `KAL_DISTILL_OUT` where distill reads `KAL_DISTILLED`.  It
+       now asks distill_sessions —— its CORPORA, its project exclusions, its markers (2026-09-26).
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import distill_sessions as D
     try:
-        recs = json.load(open(sess, encoding="utf-8"))
-    except Exception:
-        return 0, "the session list could not be read"
-    done = os.path.join(out, ".done")
-    todo = [r for r in recs if not os.path.exists(os.path.join(done, r.get("session_id", "")))]
+        #  Its notes (ⓘ …) would land ahead of `--json` and break the web screen's parse (review round 6).
+        with contextlib.redirect_stdout(io.StringIO()):
+            recs, _ = D.corpus_records()
+    except (Exception, SystemExit) as e:        # exclude.txt stops distil with SystemExit —— say why
+        #  The stop's first line is only "❌ <path>:" —— its reason is on the next (review round 5).
+        return 0, " ".join(l.strip() for l in str(e).splitlines()[:2]) or "a session corpus could not be read"
+    if not recs:
+        return 0, "no session corpus — run the ingest_*_sessions.py collectors first"
+    recs = [r for r in recs if D.wanted(r)]
+    todo = [r for r in recs if not D.is_done(r)]
     return len(todo), f"{len(recs) - len(todo)} of {len(recs)} session(s) done"
 
 

@@ -13,13 +13,30 @@ The pipeline:
 
 Masking is applied before indexing, so no secret reaches chunks, vectors or the KG.
 """
-import os, re, sys, json, glob, hashlib, collections, argparse
+import os, re, sys, json, glob, errno, hashlib, datetime, collections, argparse
 
 
 # Where ~/.kal lives.  Mounted at /data/kal inside the container (see docker-compose).
 KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
 SESS = os.path.expanduser("~/.claude/projects")
 OUT = os.environ.get("KAL_SESSIONS", os.path.join(KAL_HOME, "sessions"))
+
+#  ── Sessions kept out on purpose (2026-09-25) ───────────────────────────────────────────────
+#  An operator sometimes has to keep one particular conversation —— or the end of one —— out of
+#  the knowledge base without dropping the whole project it ran in (`distill_sessions.
+#  EXCLUDE_PROJECTS` works per project, far too coarse for that).  The list lives in
+#  KAL_SESSIONS, outside the public repository, because the reason a session is listed can itself
+#  be private.  One list, every consumer: the Codex and Hermes ingesters import `load_excluded`.
+#
+#      <session-id>                        the whole session stays out
+#      <session-id> <ISO-8601 instant>     the session stays, minus every message at or after it
+#
+#  The cutoff exists because a whole session is too blunt a unit: a long-running session can hold
+#  a month of useful work and, only at its end, material that must not be ingested.
+#  ⚠ A line that cannot be read **stops the run.**  Skipping it would silently keep exactly the
+#     session someone asked to remove.  A cutoff without an offset is refused for the same reason
+#     —— read as local time or as UTC, it moves by hours.
+EXCLUDE = os.path.join(OUT, "exclude.txt")
 
 # ── Secret patterns.  All of them substituted before indexing ──
 SECRETS = [
@@ -72,6 +89,21 @@ SECRETS = [
     ("GITLAB_PAT",      re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b")),
     ("NPM_TOKEN",       re.compile(r"\bnpm_[A-Za-z0-9]{36}\b")),
     ("HF_TOKEN",        re.compile(r"\bhf_[A-Za-z0-9]{34,}\b")),
+    # The product's own token (`kal_` + 32 base64url characters).  Review 2026-09-26: a bare token
+    # and the hosted MCP address that carries one (`…/u/kal_…/mcp`) passed every net above ——
+    # GENERIC_SECRET needs a `NAME=` label, and a URL has none.  Connecting an agent is exactly
+    # when one gets pasted into a session.  The 32-character floor keeps the 12-character prefix
+    # the app displays (`kal_` + 8) from reading as a leak.
+    #   ⚠ **The anchor is not `\b`.**  `\b` missed the URL-encoded address (`%2Fkal_…`), a
+    #      JSON-escaped one (`\nkal_…`) and one glued to Korean text (`토큰은kal_…`) —— and no
+    #      anchor at all matched ~100 generated protobuf names (`file_kal_cloud_v1_…`).  So: not
+    #      after an ASCII word character, or right after any percent-encoded byte (`%20`, `%3D`,
+    #      `%2F`, twice-encoded `%252F`) or an escape (`\n`, `\x2F`, `\u002F`) —— review rounds
+    #      5–6.  Counted against the repository, the session corpora, the distilled pages and the
+    #      vault: 0 false hits.
+    ("KAL_TOKEN",       re.compile(r"(?:(?<![A-Za-z0-9_])|(?<=%[0-9A-Fa-f]{2})|(?<=%25[0-9A-Fa-f]{2})"
+                                   r"|(?<=\\[nrt])|(?<=\\x[0-9A-Fa-f]{2})|(?<=\\u[0-9A-Fa-f]{4}))"
+                                   r"kal_[A-Za-z0-9_\-]{32,}")),
     # Mail providers.  Measured 2026-09-06: a Resend key pasted **in prose** ("키는 re_… 입니다")
     # passed every net above —— GENERIC_SECRET only fires on `NAME=value`, and nothing knew this
     # prefix.  Setting up the login mail is exactly when such a key is pasted into a session.
@@ -231,6 +263,16 @@ SYNTH = [
 ("JWT",           "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijk"),
 ("RESEND_KEY",    "re_" + "d" * 8 + "_" + "e" * 24),
 ("SENDGRID_KEY",  "SG." + "f" * 22 + "." + "g" * 43),
+("KAL_TOKEN",     "kal_" + "h" * 16 + "H1" * 8),
+("KAL_TOKEN",     "https://mcp.example/u/kal_" + "i" * 16 + "I2" * 8 + "/mcp"),
+("KAL_TOKEN",     "https%3A%2F%2Fmcp.example%2Fu%2Fkal_" + "j" * 16 + "J3" * 8 + "%2Fmcp"),
+("KAL_TOKEN",     '{"url": "…\\nkal_' + "k" * 16 + "K4" * 8 + '"}'),
+("KAL_TOKEN",     "토큰은kal_" + "m" * 16 + "M5" * 8),
+("KAL_TOKEN",     "Authorization: Bearer%20kal_" + "n" * 16 + "N6" * 8),
+("KAL_TOKEN",     "https%253A%252F%252Fmcp.example%252Fu%252fkal_" + "p" * 16 + "P7" * 8),
+("KAL_TOKEN",     '"\\u002Fu\\u002Fkal_' + "q" * 16 + "Q8" * 8 + '"'),
+("KAL_TOKEN",     "\\tkal_" + "r" * 16 + "R9" * 8),
+("KAL_TOKEN",     "\\rkal_" + "s" * 16 + "S0" * 8),
 ]
 
 
@@ -292,6 +334,9 @@ def blocks_of(msg, agent_ids=()):
                         yield "[subagent report]\n" + txt
 
 
+TURN_MAX = 6000        # the most one turn contributes; the Hermes twin imports it so the corpora read alike
+
+
 def is_noise(t):
     s = t.strip()
     if len(s) < 40:
@@ -303,8 +348,241 @@ def is_noise(t):
     return hit >= max(3, len(lines[:20]) * 0.5)
 
 
-def parse_session(path):
-    """One session → {text, meta}.  None on failure."""
+def epoch(ts):
+    """A timestamp as UTC epoch seconds, or None when it cannot be read.
+
+    ISO-8601 **with an offset** (the Claude and Codex logs write `…Z`) or a number (Hermes stores
+    epoch seconds).  A naive ISO string reads as None: which clock it meant would be a guess.
+    """
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        t = datetime.datetime.fromisoformat(ts)
+    except (TypeError, ValueError):
+        return None
+    return t.timestamp() if t.tzinfo else None
+
+
+def before_cutoff(ts, cutoff):
+    """May a message stamped `ts` be kept under `cutoff` (epoch seconds; None = no cutoff)?
+
+    ⚠ Fail closed: under a cutoff, a message whose time cannot be read is dropped —— nothing
+       shows it came before the point someone asked to cut at.
+    """
+    if cutoff is None:
+        return True
+    e = epoch(ts)
+    return e is not None and e < cutoff
+
+
+def load_excluded(path=None, known=None, strict=True):
+    """`exclude.txt` → {session id: cutoff}.  The cutoff is epoch seconds, or None when the whole
+    session stays out.  `#` starts a comment, blank lines are ignored, a missing file excludes
+    nothing, and an id listed twice keeps the stricter entry.  See the note above `EXCLUDE`.
+
+    Ids are lower-cased and a byte-order mark is read past: a UUID pasted in capitals, or an editor
+    that writes a BOM, used to leave a line that matched nothing —— silently.  Collectors look ids
+    up lower-cased too.
+
+    Every listed id is then checked (`_check_listed`) against what distillation already made and
+    against `known` —— {id: the first session of its conversation}; from `known_sessions()` when
+    `strict` and not given (the self-checks pass a fixture).  The collectors are strict.
+    Distillation is not (`strict=False`): it runs where not every collector's sessions may be
+    visible (a container), so it passes only what its corpora say about conversations.  There the
+    abbreviated-id check still runs against them, and "is this id real at all" is left to the
+    collectors.
+    A Hermes session stitched into a longer conversation is excluded with all of it —— the
+    conversation is one document; a cutoff on any of its sessions cuts it at that instant.
+    """
+    path = path or EXCLUDE
+    try:
+        fh = open(path, encoding="utf-8-sig")
+    except FileNotFoundError:
+        return {}
+    out = {}
+    with fh:
+        for n, line in enumerate(fh, 1):
+            f = line.split("#", 1)[0].split()
+            if not f:
+                continue
+            cut = epoch(f[1]) if len(f) == 2 else None
+            if len(f) > 2 or (len(f) == 2 and cut is None):
+                raise SystemExit(f"❌ {path}:{n}: cannot read {line.strip()!r} —— write `<session-id>` "
+                                 "or `<session-id> <ISO-8601 with an offset>`, e.g. "
+                                 "2026-09-25T09:00:00Z.  Nothing is written.")
+            sid = f[0].lower()
+            if sid in out:
+                cut = None if out[sid] is None or cut is None else min(out[sid], cut)
+            out[sid] = cut
+    if out:
+        unread = []                        # folders known_sessions could not read (see _check_listed)
+        if strict:
+            known = known_sessions(unread) if known is None else known
+        _check_listed(out, path, known or {}, strict, unread)
+    return out
+
+
+def transcripts(onerror):
+    """Every Claude transcript (`<SESS>/<project>/<id>.jsonl`), sorted.  What cannot be read —— the
+    store or a folder above it, a project folder, a link whose target is gone, a transcript —— goes
+    to `onerror(OSError)` instead of reading as absent: glob skipped all of it without a word, and a
+    mode-000 ~/.claude collected "0 sessions" and overwrote the corpus with [] (review rounds 5–6).
+    A missing store is simply empty —— most machines have no Claude Code.
+    """
+    try:
+        with os.scandir(SESS) as it:
+            projects = sorted((e for e in it if not e.name.startswith(".")), key=lambda e: e.name)
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    except OSError as e:
+        onerror(e)
+        return []
+    out = []
+    for p in projects:
+        try:
+            if p.is_symlink() and not os.path.exists(p.path):
+                onerror(FileNotFoundError(errno.ENOENT, "a link whose target is gone or cannot be read", p.path))
+                continue
+            if not p.is_dir():
+                continue
+            with os.scandir(p.path) as it:
+                names = sorted(e.name for e in it if e.name.endswith(".jsonl") and not e.name.startswith("."))
+        except OSError as e:
+            onerror(OSError(e.errno, e.strerror, e.filename or p.path))
+            continue
+        for n in names:
+            f = os.path.join(p.path, n)
+            if not os.access(f, os.R_OK):
+                onerror(PermissionError(errno.EACCES, "Permission denied", f))
+            out.append(f)
+    return out
+
+
+def known_sessions(unreadable=None):
+    """{session id: the first session of its conversation}, lower-cased, for every session the
+    three collectors can see, whatever their own filters decide later.  A Claude or Codex session is
+    its own conversation; a Hermes session may be stitched into a longer one (see
+    ingest_hermes_sessions.LINEAGE).  Read-only —— file names for Claude and Codex, one read of the
+    session table per Hermes store —— and the roots are the collectors' own constants, imported.
+
+    ⚠ A Hermes store that cannot be read as one is reported and skipped, not fatal: it used to raise
+       here and take the Claude and Codex collection down with it.  Only a line naming none of the
+       sessions that *could* be read then fails (2026-09-26).
+    """
+    import sqlite3
+    import ingest_codex_sessions as codex, ingest_hermes_sessions as hermes   # both import this module
+    out = {}
+
+    def warn(folder, why):          # also kept for the stop: see `_check_listed`
+        if unreadable is not None:
+            unreadable.append(folder)
+        print(f"⚠ {folder}: cannot be read ({why}) —— exclude.txt lines naming its sessions cannot be matched")
+    for f in transcripts(lambda e: warn(e.filename, e.strerror)):
+        sid = os.path.basename(f)[:-6].lower()
+        out[sid] = sid
+    for f in codex.rollouts(codex.SESS, lambda e: warn(e.filename, e.strerror)):
+        sid = codex.session_id_of(f, "").lower()
+        out[sid] = sid
+    for db in hermes.stores(hermes.HOME, unreadable=warn):
+        try:
+            out.update(hermes.chain_roots(db))
+        except (hermes.SchemaError, sqlite3.Error) as e:
+            why = str(e).splitlines()[0][:160] if str(e) else type(e).__name__
+            print(f"⚠ {db}: not readable as a Hermes store ({why}) —— exclude.txt lines naming its "
+                  "sessions cannot be matched")
+    return out
+
+
+def _check_listed(listed, path, known, strict=True, unreadable=()):
+    """Stop before anything is collected when the list cannot do what it says (2026-09-26).
+
+      · an id already distilled.  Excluding is not retroactive: listed whole, its pages would keep
+        reaching the bundle, the index and a push while the log says "left out".  Listed with a
+        cutoff, pages whose text reaches **past** the cutoff may hold exactly what it removes;
+        the rest are fine, and the later text is distilled only on `--restart`, cut.  How far a
+        page's text reaches is what its marker recorded (`distill_sessions.mark_done`) —— the
+        file times said "after the cutoff" for pages made from the cut text itself, so a cutoff
+        stopped every run after the first distillation, and following the stop looped (impl round
+        5).  Files from before 2026-09-26 recorded nothing and are judged by their mtime.
+        A session's pages and markers carry the id of its conversation's **first** session
+        (`known`), so a later session of a stitched Hermes conversation is looked up as that too.
+      · an id that only **starts** a session —— abbreviated, the first 8 characters the way a UUID
+        is usually quoted —— reads as applied and excludes nothing.  Checked in both modes, against
+        whatever `known` holds: distillation's own corpora are enough to see it, and a line added
+        after the last collection reached distillation first (impl round 4).
+      · `strict` only: an id no collector can see: a typo, or a session deleted since —— the line
+        matches nothing, and if the session is gone it should go too.
+    """
+    import distill_sessions as ds                  # the distilled layout is defined there, once
+    done = {n.lower(): os.path.join(ds.DONE, n)
+            for n in (os.listdir(ds.DONE) if os.path.isdir(ds.DONE) else ())}
+    names = {sid: {sid, known.get(sid, sid)} for sid in listed}
+    markers = set(done.values())
+    made = collections.defaultdict(list)
+    for sid, ids in names.items():                 # markers: `<agent>-<id>`, or the bare legacy id
+        made[sid] += [done[x] for i in sorted(ids) for x in [i] + [f"{a}-{i}" for a, _ in ds.CORPORA]
+                      if x in done]
+    agent_of = {}
+    for p in sorted(glob.glob(os.path.join(ds.OUT, "*.md"))):
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(1500)
+        m = re.search(r"^session_id:\s*\"?([^\"\s]+)", head, re.M)
+        a = re.search(r"^session_agent:\s*\"?([a-z0-9_-]+)", head, re.M)
+        agent_of[p] = a.group(1) if a else "claude"
+        for sid, ids in names.items():
+            if m and m.group(1).lower() in ids:
+                made[sid].append(p)
+    problems = []
+    for sid, cut in listed.items():
+        paths = made.get(sid)
+        via = f" (as part of {known[sid]}, the conversation it was stitched into)" \
+            if known.get(sid, sid) != sid else ""
+        #  How far the text behind each file reached: what **this session's** markers recorded ——
+        #  another session's stale marker listing a reused page name vouched for it before (review
+        #  round 6) —— else the file's mtime.
+        reach = {}
+        for mk in (p for p in paths or () if p in markers):
+            info = ds.marker_info(mk) or {}
+            t = epoch(info.get("last_ts"))
+            if t is not None:
+                reach[mk] = t
+                reach.update((os.path.join(ds.OUT, s + ".md"), t) for s in info.get("pages") or [])
+        at = max((reach.get(p, os.path.getmtime(p)) for p in paths), default=None) if paths else None
+        if paths and (cut is None or at >= cut):
+            pages = [p for p in paths if p.endswith(".md")]
+            keys = sorted({k for p in pages for k in (
+                f"personal_sessions_{agent_of.get(p, 'claude')}_{os.path.basename(p)[:-3]}",
+                f"raw_conversations_sessions_{os.path.basename(p)[:-3]}")})
+            problems.append(
+                (f"{sid} is listed whole, but was distilled already{via}" if cut is None else
+                 f"{sid} was distilled past its cutoff{via}, so its pages may hold what the cutoff "
+                 "removes") + " —— remove these, and any copy already promoted or emitted:"
+                + "".join(f"\n        {p}" for p in paths)
+                + ("\n      …and what was already extracted from those pages: their lines in "
+                   "~/.kal/lr_cache.jsonl (`doc` " + " · ".join(keys) + "), or `just reset extract` "
+                   "—— a page later written under the same name otherwise brings the removed text "
+                   "back as history" if keys else ""))
+            continue
+        if paths:
+            print(f"ⓘ {path}: {sid}{via} is distilled up to "
+                  f"{datetime.datetime.fromtimestamp(at, datetime.timezone.utc).isoformat(timespec='seconds')}, "
+                  "before its cutoff —— a conversation is distilled once, so anything it said after "
+                  "that is not (see Cache ① in docs/PIPELINE.md)")
+        if sid not in known:
+            hit = next((s for s in known if s.startswith(sid)), None)
+            if hit or strict:
+                problems.append(f"{sid!r} is only the start of session {hit} —— an abbreviated id "
+                                "excludes nothing; write it in full" if hit else
+                                f"{sid!r} names no session any collector can see (Claude, Codex or "
+                                "Hermes) —— " + (f"it may be in {', '.join(unreadable)}, which could not "
+                                "be read: fix that rather than deleting the line" if unreadable else
+                                "delete the line if the session is gone"))
+    if problems:
+        raise SystemExit(f"❌ {path}:\n   " + "\n   ".join(problems) + "\n   Nothing is written.")
+
+
+def parse_session(path, cutoff=None):
+    """One session → {text, meta}.  None on failure.  `cutoff`: see `load_excluded`."""
     parts, seen = [], set()
     n_msg = 0
     first_ts = last_ts = None
@@ -318,6 +596,10 @@ def parse_session(path):
         except Exception:
             continue
         if r.get("type") not in ("user", "assistant"):
+            continue
+        #  Before anything is taken from the record —— a subagent report arrives inside a user
+        #  record, so it is cut with the record that carries it.
+        if not before_cutoff(r.get("timestamp"), cutoff):
             continue
         _c = (r.get("message") or {}).get("content")
         if isinstance(_c, list):
@@ -337,7 +619,7 @@ def parse_session(path):
                 continue
             seen.add(h)
             role = "Me" if r["type"] == "user" else "Claude"
-            parts.append(f"**{role}**: {t.strip()[:6000]}")
+            parts.append(f"**{role}**: {t.strip()[:TURN_MAX]}")
             n_msg += 1
     if not parts:
         return None
@@ -410,6 +692,10 @@ def _selftest():
     #     publication rather than redacting a line.
     assert not find_leaks("fixed in 0123456789abcdef0123456789abcdef"), \
         "a bare 32-hex value is treated as a secret —— every page quoting a commit now blocks"
+    assert not find_leaks("the token starting kal_Ab3dEf9h was rotated"), \
+        "the 12-character prefix the app displays reads as a token —— KAL_TOKEN's floor dropped"
+    assert not find_leaks("var file_kal_cloud_v1_cloud_proto_rawDescData00 = []"), \
+        "a generated identifier reads as a kal token —— KAL_TOKEN lost its anchor"
     #     ⚠ The 16-character floor is the knob the comment on `GENERIC_SECRET` names, so it needs
     #        a case only **it** excludes.  These carry a digit or a capital, so the other
     #        look-ahead lets them through and the length is the whole defence; without this,
@@ -515,6 +801,359 @@ def _selftest():
         "a report delivered as a list of text blocks was dropped"
     print("  ✅ subagent report kept, command dumps still dropped (paired by tool_use_id)")
 
+    #  ── known_sessions: a folder it cannot read is named, and a line it then cannot match is not
+    #     told "delete the line" —— the session may be in that folder (review round 6) ────────────
+    import tempfile as _tf, contextlib as _cl, io as _io
+    from unittest import mock as _mock
+    import ingest_codex_sessions as _cx, ingest_hermes_sessions as _hm, distill_sessions as _ds0
+    with _tf.TemporaryDirectory() as _d0, \
+            _mock.patch.object(sys.modules[__name__], "SESS", os.path.join(_d0, "claude")), \
+            _mock.patch.object(_cx, "SESS", os.path.join(_d0, "codex")), \
+            _mock.patch.object(_hm, "HOME", os.path.join(_d0, "hermes")), \
+            _mock.patch.object(_ds0, "OUT", os.path.join(_d0, "distilled")), \
+            _mock.patch.object(_ds0, "DONE", os.path.join(_d0, "distilled", ".done")):
+        os.makedirs(os.path.join(_d0, "claude", "p"))
+        open(os.path.join(_d0, "claude", "p", "seen-one.jsonl"), "w").close()
+        _lk = os.path.join(_d0, "claude", "locked")
+        os.makedirs(_lk)
+        _l0 = os.path.join(_d0, "exclude.txt")
+        with open(_l0, "w") as _fh:
+            _fh.write("seen-one\nnot-seen\n")
+        if os.geteuid():
+            os.chmod(_lk, 0)
+        try:
+            _b = _io.StringIO()
+            with _cl.redirect_stdout(_b):
+                _k = known_sessions()
+            try:
+                with _cl.redirect_stdout(_io.StringIO()):
+                    load_excluded(_l0)
+                _why = ""
+            except SystemExit as _e:
+                _why = str(_e)
+        finally:
+            os.chmod(_lk, 0o700)
+        assert "seen-one" in _k, _k
+        if os.geteuid():
+            assert "locked: cannot be read" in _b.getvalue(), f"an unreadable Claude folder went unreported: {_b.getvalue()}"
+            assert "could not be read" in _why and "delete the line" not in _why, \
+                f"a line that may name a session in an unreadable folder was told to go: {_why}"
+    print("  ✅ known_sessions names what it cannot read, and the stop does not say \"delete the line\" then")
+
+    #  ── exclude.txt: whole sessions and cutoffs (2026-09-25) ─────────────────────────────────
+    import subprocess, tempfile, contextlib, io
+    from unittest import mock
+    import distill_sessions as _ds
+    #  Distillation's output is pointed into the temp dir for the whole block —— nothing here reads
+    #  the real ~/.kal/distilled.
+    with tempfile.TemporaryDirectory() as _d, \
+            mock.patch.object(_ds, "OUT", os.path.join(_d, "distilled")), \
+            mock.patch.object(_ds, "DONE", os.path.join(_d, "distilled", ".done")):
+        os.makedirs(_ds.DONE)
+        _lst = os.path.join(_d, "exclude.txt")
+        assert load_excluded(_lst) == {}, "a missing list must exclude nothing"
+        _K = {k: k for k in ("aaa", "bbb", "ccc", "ddd", "eee", "ok-id",
+                             "f0f0f0f0-1111-2222-3333-444444444444")}
+        #  A byte-order mark in front of the first id, and a UUID in capitals: both used to match
+        #  nothing, silently.
+        with open(_lst, "w", encoding="utf-8-sig") as _fh:
+            _fh.write("AAA\n# the reasons can be private\n\nbbb 2026-09-25T09:00:00Z  # the end only\n"
+                      "ccc 2026-09-25T20:00:00+09:00\nccc\nddd 2026-09-25T18:00:00+09:00\n"
+                      "eee 2026-09-25T10:00:00Z\neee 2026-09-25T09:00:00Z\n"
+                      "  F0F0F0F0-1111-2222-3333-444444444444  \n")
+        _want = {"aaa": None, "bbb": 1790326800.0, "ccc": None, "ddd": 1790326800.0,
+                 "eee": 1790326800.0, "f0f0f0f0-1111-2222-3333-444444444444": None}
+        assert load_excluded(_lst, known=_K) == _want, \
+            f"BOM · case · comments · offsets · 'the stricter entry wins' misread: {load_excluded(_lst, known=_K)}"
+
+        def _stops(listing, needle, known=_K):
+            with open(_lst, "w") as _fh:
+                _fh.write(listing)
+            try:
+                load_excluded(_lst, known=known)
+            except SystemExit as _e:
+                assert needle in str(_e), f"the stop does not say {needle!r}: {_e}"
+                return str(_e)
+            raise AssertionError(f"exclude.txt was accepted, but should have stopped ({needle!r}):\n{listing}")
+
+        #  ⚠ A line it cannot read **stops the run** —— skipped, it would keep exactly the session
+        #     someone asked to remove.  A naive time is refused: local or UTC is a guess.
+        for _bad in ("aaa 2026-09-25", "aaa 2026-09-25T09:00:00", "aaa yesterday",
+                     "aaa 2026-09-25T09:00:00Z trailing"):
+            _stops(f"ok-id\n{_bad}\n", "exclude.txt:2")
+        #  …and so does an id that cannot exclude anything: abbreviated, or known to no collector.
+        _stops("ok-id\nf0f0f0f0\n", "'f0f0f0f0' is only the start of session f0f0f0f0-1111")
+        _stops("ok-id\nnever-seen-anywhere\n", "delete the line if the session is gone")
+        #  Distillation is not strict, but an abbreviated id still stops it: a line added after the
+        #  last collection reaches distillation first, and would let the session through silently.
+        with open(_lst, "w") as _fh:
+            _fh.write("ok-id\nf0f0f0f0\n")
+        try:
+            load_excluded(_lst, known=_K, strict=False)
+            raise AssertionError("distillation accepted an abbreviated id —— the session is distilled")
+        except SystemExit as _e:
+            assert "only the start of session" in str(_e), _e
+        with open(_lst, "w") as _fh:
+            _fh.write("ok-id\nnever-seen-anywhere\n")
+        assert load_excluded(_lst, known=_K, strict=False) == {"ok-id": None, "never-seen-anywhere": None}, \
+            "distillation stopped on an id it cannot see —— that check belongs to the collectors"
+
+        #  ⚠ Excluding is not retroactive.  A session listed after it was distilled keeps its pages
+        #     —— they reach the bundle, the index and a push while the log says "left out".
+        def _mark(name, when):
+            _p = os.path.join(_ds.DONE, name)
+            open(_p, "w").close()
+            os.utime(_p, (when, when))
+            return _p
+
+        _m = _mark("hermes-aaa", 1790326000.0)
+        _stops("aaa\n", _m)                                 # listed whole, marker present
+        os.remove(_m)
+        _page = os.path.join(_ds.OUT, "a-distilled-page.md")
+        with open(_page, "w") as _fh:
+            _fh.write("---\ntitle: \"t\"\nsession_id: BBB\nsession_agent: claude\n---\nbody\n")
+        _stops("bbb\n", _page)                              # listed whole, a page but no marker
+        #  …and the stop names what was extracted from that page too, or the removed text comes back
+        #  as history under a page later written with the same name (review round 6)
+        _stops("bbb\n", "personal_sessions_claude_a-distilled-page")
+        os.remove(_page)
+        _m = _mark("ccc", 1790326000.0)                     # the bare legacy Claude marker
+        _stops("ccc\n", _m)
+        os.remove(_m)
+        #  A later session of a stitched conversation has no pages of its own —— they, and the
+        #  marker, carry the conversation's first id.
+        _m = _mark("hermes-root1", 1790326000.0)
+        _stops("m2\n", _m, known={"m2": "root1", "root1": "root1"})
+        os.remove(_m)
+        #  With a cutoff: a marker written at or after the cutoff means the pages may hold the text
+        #  it removes; one written before means they cannot —— a note, not a stop.
+        _m = _mark("claude-ddd", 1790326800.0)
+        _stops("ddd 2026-09-25T09:00:00Z\n", "distilled past its cutoff")
+        os.utime(_m, (1790326799.0, 1790326799.0))
+        with open(_lst, "w") as _fh:
+            _fh.write("ddd 2026-09-25T09:00:00Z\n")
+        _buf = io.StringIO()
+        with contextlib.redirect_stdout(_buf):
+            assert load_excluded(_lst, known=_K) == {"ddd": 1790326800.0}
+        assert "is distilled up to" in _buf.getvalue() and "--restart" not in _buf.getvalue(), \
+            f"a session distilled before its cutoff got no note, or one sending it to --restart: {_buf.getvalue()}"
+        os.remove(_m)
+        #  ⚠ **Distilled from the cut text itself is not "after its cutoff".**  The marker records how
+        #     far the text reached, and it and every page it lists are judged by that —— by their
+        #     mtimes (both newer than any cutoff), a cutoff stopped every run after the first
+        #     distillation, and following the stop's advice looped (impl round 5).  A page the
+        #     marker does not list still goes by its mtime, and stops.
+        with open(os.path.join(_ds.DONE, "claude-ddd"), "w") as _fh:
+            json.dump({"last_ts": "2026-09-25T08:59:00Z", "pages": ["ddd-cut"]}, _fh)
+        for _slug in ("ddd-cut", "ddd-older"):
+            with open(os.path.join(_ds.OUT, _slug + ".md"), "w") as _fh:
+                _fh.write("---\ntitle: \"t\"\nsession_id: ddd\n---\nbody\n")
+        _stops("ddd 2026-09-25T09:00:00Z\n", "ddd-older.md")
+        os.remove(os.path.join(_ds.OUT, "ddd-older.md"))
+        with open(_lst, "w") as _fh:
+            _fh.write("ddd 2026-09-25T09:00:00Z\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert load_excluded(_lst, known=_K) == {"ddd": 1790326800.0}, \
+                "a session distilled from its cut text reads as distilled after its cutoff —— every run stops"
+        os.remove(os.path.join(_ds.DONE, "claude-ddd"))
+        os.remove(os.path.join(_ds.OUT, "ddd-cut.md"))
+        #  Only a session's own markers vouch for its pages: another session's stale marker listing a
+        #  reused name approved a page holding text past the cutoff (review round 6).
+        with open(os.path.join(_ds.DONE, "claude-aaa"), "w") as _fh:
+            json.dump({"last_ts": "2026-09-25T08:00:00Z", "pages": ["shared-name"]}, _fh)
+        with open(os.path.join(_ds.OUT, "shared-name.md"), "w") as _fh:
+            _fh.write("---\ntitle: \"t\"\nsession_id: eee\n---\nbody\n")
+        _stops("eee 2026-09-25T09:00:00Z\n", "shared-name.md")
+        os.remove(os.path.join(_ds.DONE, "claude-aaa"))
+        os.remove(os.path.join(_ds.OUT, "shared-name.md"))
+
+        #  ⚠ An unreadable message time under a cutoff is dropped —— nothing shows it came first.
+        assert before_cutoff(None, None) and before_cutoff("unreadable", None), \
+            "without a cutoff nothing may be dropped"
+        for _ts in (None, "", "unreadable", "2026-09-25T08:00:00"):
+            assert not before_cutoff(_ts, 1790326800.0), \
+                f"{_ts!r} passed a cutoff —— an unreadable time must fail closed"
+
+        #  A cutoff keeps what came before it —— and a subagent report is cut with the record that
+        #  carries it, whenever the call that asked for it was made.
+        _proj = os.path.join(_d, "home", ".claude", "projects", "p")
+        os.makedirs(_proj)
+
+        def _write(sid, rows):
+            with open(os.path.join(_proj, sid + ".jsonl"), "w") as _fh:
+                _fh.write("".join(json.dumps(r) + "\n" for r in rows))
+            return os.path.join(_proj, sid + ".jsonl")
+
+        _p = _write("cut-me", [
+            {"type": "user",
+             "message": {"content": "CANARY-NO-TIMESTAMP a record whose time cannot be read at all"}},
+            {"type": "user", "timestamp": "2026-09-25T07:00:00.000Z",
+             "message": {"content": "A question asked well before the cutoff, long enough to keep"}},
+            {"type": "assistant", "timestamp": "2026-09-25T07:00:01.000Z",
+             "message": {"content": [{"type": "tool_use", "id": "toolu_early", "name": "Task", "input": {}},
+                                     {"type": "tool_use", "id": "toolu_late", "name": "Task", "input": {}}]}},
+            {"type": "user", "timestamp": "2026-09-25T08:59:59.999Z",
+             "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_early",
+                                      "content": "EARLY report from a subagent, delivered before the cutoff"}]}},
+            {"type": "user", "timestamp": "2026-09-25T09:00:00.000Z",
+             "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_late",
+                                      "content": "CANARY-LATE-REPORT delivered exactly at the cutoff instant"}]}},
+            {"type": "assistant", "timestamp": "2026-09-25T10:00:00.000Z",
+             "message": {"content": "CANARY-AFTER-CUTOFF an answer written after the cutoff instant"}},
+        ])
+        _full = parse_session(_p)["text"]
+        assert all(c in _full for c in ("CANARY-LATE-REPORT", "CANARY-AFTER-CUTOFF",
+                                        "CANARY-NO-TIMESTAMP")), "the cutoff canaries are not live"
+        _cut = parse_session(_p, 1790326800.0)                  # 2026-09-25T09:00:00Z
+        assert "well before the cutoff" in _cut["text"] and "EARLY report" in _cut["text"], \
+            "the cutoff took what came before it"
+        assert "CANARY-LATE-REPORT" not in _cut["text"], \
+            "a subagent report at the cutoff survived —— a report is cut with its record"
+        assert "CANARY-AFTER-CUTOFF" not in _cut["text"], "a message after the cutoff survived"
+        assert "CANARY-NO-TIMESTAMP" not in _cut["text"], \
+            "a record with no readable time survived a cutoff —— it must fail closed"
+        assert _cut["last_ts"] == "2026-09-25T08:59:59.999Z", _cut["last_ts"]
+
+        #  …and the command honours both kinds of line.  Run for real against a temp HOME, so it is
+        #  the call site that is tested —— a parser-only check stays green with the call deleted.
+        #  The other collectors' roots are temp dirs too, holding one session each, so the "known
+        #  to some collector" check has something of theirs to find.
+        _write("gone", [{"type": "user", "timestamp": "2026-09-25T07:00:00Z",
+                         "message": {"content": "CANARY-EXCLUDED-WHOLE a session listed whole in the list"}}])
+        _write("kept", [{"type": "user", "timestamp": "2026-09-25T07:00:00Z",
+                         "message": {"content": "An ordinary session that nobody asked to exclude at all"}}])
+        #  a file name in capitals, listed in lower case —— the lookup must fold case too
+        _write("Upper-Case", [{"type": "user", "timestamp": "2026-09-25T07:00:00Z",
+                               "message": {"content": "CANARY-UPPER-STEM a session whose file name has capitals"}}])
+        _codex = os.path.join(_d, "codex", "2026", "09", "25")
+        os.makedirs(_codex)
+        open(os.path.join(_codex, "rollout-2026-09-25T07-00-00-"
+                                  "019eccca-a239-7cc0-b56a-b1da0fff35b4.jsonl"), "w").close()
+        import sqlite3 as _sq, ingest_hermes_sessions as _H
+        os.makedirs(os.path.join(_d, "hermes", "profiles", "broken"))
+        _con = _sq.connect(os.path.join(_d, "hermes", "state.db"))
+        for _t, _cols in _H.REQUIRED.items():
+            _con.execute(f"CREATE TABLE {_t} ({', '.join(_cols)})")
+        _con.execute("INSERT INTO sessions (id, parent_session_id) VALUES ('herm-1', NULL)")
+        #  a stitched conversation: `herm-cont` continues `herm-root` after compaction
+        _con.execute("INSERT INTO sessions (id, end_reason) VALUES ('herm-root', 'compression')")
+        _con.execute("INSERT INTO sessions (id, parent_session_id) VALUES ('herm-cont', 'herm-root')")
+        _con.commit()
+        _con.close()
+        #  …and a store that is not a Hermes store at all: reported, and it must not take the
+        #  Claude collection down with it.
+        _sq.connect(os.path.join(_d, "hermes", "profiles", "broken", "state.db")).close()
+        _out = os.path.join(_d, "out")
+        os.makedirs(_out)
+        _json = os.path.join(_out, "session_docs.json")
+
+        def _run(listing):
+            with open(os.path.join(_out, "exclude.txt"), "w") as _fh:
+                _fh.write(listing)
+            return subprocess.run([sys.executable, os.path.abspath(__file__), "--min-chars", "1"],
+                                  env=dict(os.environ, HOME=os.path.join(_d, "home"),
+                                           KAL_HOME=os.path.join(_d, "kal"), KAL_SESSIONS=_out,
+                                           KAL_CODEX_SESSIONS=os.path.join(_d, "codex"),
+                                           KAL_HERMES_HOME=os.path.join(_d, "hermes"),
+                                           KAL_DISTILLED=_ds.OUT),
+                                  capture_output=True, text=True, timeout=120)
+
+        #  The last two ids are a Codex and a Hermes session's —— known elsewhere, left alone here.
+        _r = _run("gone\ncut-me 2026-09-25T09:00:00Z\nupper-case\n"
+                  "019eccca-a239-7cc0-b56a-b1da0fff35b4\nHERM-1\n")
+        assert _r.returncode == 0, _r.stdout + _r.stderr
+        with open(_json) as _fh:
+            _docs = {x["session_id"]: x["text"] for x in json.load(_fh)}
+        assert set(_docs) == {"cut-me", "kept"}, f"exclude.txt was not honoured: {sorted(_docs)}"
+        assert "EARLY report" in _docs["cut-me"] and "CANARY-AFTER-CUTOFF" not in _docs["cut-me"], \
+            "the cutoff did not reach the command"
+        assert "3 of 5 listed id(s) name a Claude session —— 2 left out whole · 1 cut at a timestamp" \
+            in _r.stdout, _r.stdout
+        assert "broken/state.db: not readable as a Hermes store" in _r.stdout, \
+            f"an unreadable Hermes store was not reported:\n{_r.stdout}"
+        #  A profile folder that cannot be read is reported and skipped the same way —— the
+        #  readable stores still answer (HERM-1), and the Claude collection goes on (impl round 4).
+        _locked = os.path.join(_d, "hermes", "profiles", "locked")
+        os.makedirs(_locked)
+        os.chmod(_locked, 0)
+        try:
+            _r = _run("gone\nHERM-1\n")
+        finally:
+            os.chmod(_locked, 0o700)
+        assert _r.returncode == 0 and ("profiles/locked: cannot be read" in _r.stdout or not os.geteuid()), \
+            f"an unreadable Hermes folder stopped the Claude collection, or went unreported:\n{_r.stdout}{_r.stderr}"
+        #  …while a Claude project folder that cannot be read stops the Claude collection itself:
+        #  glob skipped it without a word (review round 5).  (Root reads it anyway.)
+        _lockp = os.path.join(_d, "home", ".claude", "projects", "locked-project")
+        os.makedirs(_lockp)
+        os.chmod(_lockp, 0)
+        try:
+            _r = _run("gone\n")
+        finally:
+            os.chmod(_lockp, 0o700)
+            os.rmdir(_lockp)
+        if os.geteuid():
+            assert _r.returncode != 0 and "locked-project: cannot be read" in _r.stdout + _r.stderr, \
+                f"an unreadable Claude project folder was skipped quietly:\n{_r.stdout}{_r.stderr}"
+        #  …and a Codex folder that cannot be read is reported by the id lookup, which goes on ——
+        #  glob skipped it, and the line naming a session in it was told "delete the line if the
+        #  session is gone" (review round 5).
+        _lockc = os.path.join(_d, "codex", "locked-day")
+        os.makedirs(_lockc)
+        os.chmod(_lockc, 0)
+        try:
+            _r = _run("gone\n")
+        finally:
+            os.chmod(_lockc, 0o700)
+            os.rmdir(_lockc)
+        if os.geteuid():
+            assert _r.returncode == 0 and "locked-day: cannot be read" in _r.stdout, \
+                f"an unreadable Codex folder went unreported, or stopped the Claude collection:\n{_r.stdout}{_r.stderr}"
+        #  A project link whose target is gone, and a Claude store that cannot be read at all, stop the
+        #  Claude collection too —— glob made the second "0 sessions" and overwrote the corpus with []
+        #  (review round 6).
+        with open(_json) as _fh:
+            _before = _fh.read()
+        _dangle = os.path.join(_d, "home", ".claude", "projects", "gone-project")
+        os.symlink(os.path.join(_d, "nowhere"), _dangle)
+        try:
+            _r = _run("gone\n")
+        finally:
+            os.remove(_dangle)
+        assert _r.returncode != 0 and "gone-project: cannot be read" in _r.stdout + _r.stderr, \
+            f"a dangling project link was skipped quietly:\n{_r.stdout}{_r.stderr}"
+        if os.geteuid():
+            _claude = os.path.join(_d, "home", ".claude")
+            os.chmod(_claude, 0)
+            try:
+                _r = _run("gone\n")
+            finally:
+                os.chmod(_claude, 0o700)
+            with open(_json) as _fh:
+                assert _r.returncode != 0 and "cannot be read" in _r.stdout + _r.stderr and _fh.read() == _before, \
+                    f"an unreadable Claude store collected nothing and went on:\n{_r.stdout}{_r.stderr}"
+        #  A later session of a stitched Hermes conversation, listed whole after the conversation was
+        #  distilled: found through its first session's marker, from the Claude collector too.
+        _mk = os.path.join(_ds.DONE, "hermes-herm-root")
+        open(_mk, "w").close()
+        _r = _run("herm-cont\n")
+        assert _r.returncode != 0 and _mk in _r.stderr and "as part of herm-root" in _r.stderr, \
+            f"a distilled conversation was not found from its later session:\n{_r.stdout}{_r.stderr}"
+        os.remove(_mk)
+        #  ⚠ An abbreviated id, and an id no collector knows, stop the run before anything is written.
+        for _listing, _needle in (("gone\nkep\n", "'kep' is only the start of session kept"),
+                                  ("gone\nnever-seen-anywhere\n", "delete the line if the session is gone")):
+            if os.path.exists(_json):
+                os.remove(_json)
+            _r = _run(_listing)
+            assert _r.returncode != 0 and _needle in _r.stderr, \
+                f"exclude.txt was accepted ({_needle!r}):\n{_r.stdout}{_r.stderr}"
+            assert not os.path.exists(_json), "a run stopped by exclude.txt still wrote its output"
+    print("  ✅ exclude.txt —— a listed id is gone, a cutoff keeps what came before it (subagent "
+          "reports included; an unreadable time fails closed), a malformed line · an abbreviated "
+          "id · an id no collector knows · an already-distilled session stop the run, a BOM and "
+          "capitals are read, other collectors' ids are left alone and the matches are counted")
+
 
     print("  ✅ pipeline self-calls filtered —— marker · historical openings · a conversation "
           "quoting one survives")
@@ -530,16 +1169,27 @@ if __name__ == "__main__":
     a = ap.parse_args()
 
     os.makedirs(OUT, exist_ok=True)
-    files = sorted(glob.glob(f"{SESS}/*/*.jsonl"))
+    blocked = []
+    files = transcripts(blocked.append)     # an unreadable store, folder or transcript stops the run
+    if blocked:
+        raise SystemExit(f"❌ {blocked[0].filename}: cannot be read ({blocked[0].strerror}) —— the sessions "
+                         "in it would be left out without a word.  Fix its permissions.  Nothing is written.")
     if a.limit:
         files = files[:a.limit]
 
-    kept, dropped, machine, total_masked = [], 0, 0, collections.Counter()
+    excluded = load_excluded()
+    matched = len(excluded.keys() & {os.path.basename(f)[:-6].lower() for f in files})
+    kept, dropped, machine, n_excl, n_cut, total_masked = [], 0, 0, 0, 0, collections.Counter()
     raw_chars = out_chars = 0
     for f in files:
         proj = os.path.basename(os.path.dirname(f))
         sid = os.path.basename(f)[:-6]
-        d = parse_session(f)
+        key = sid.lower()                      # exclude.txt ids are lower-cased
+        if key in excluded and excluded[key] is None:
+            n_excl += 1
+            continue                           # listed whole in exclude.txt —— never read
+        n_cut += key in excluded
+        d = parse_session(f, excluded.get(key))
         if not d:
             dropped += 1
             continue
@@ -579,6 +1229,8 @@ if __name__ == "__main__":
     os.chmod(f"{OUT}/session_docs.json", 0o600)     # even in a 700 directory the file was created 644
     print(f"{len(files)} session(s) → {len(kept)} kept · {dropped} dropped · "
           f"{machine} were this pipeline's own LLM calls")
+    print(f"exclude list {EXCLUDE}: {matched} of {len(excluded)} listed id(s) name a Claude session "
+          f"—— {n_excl} left out whole · {n_cut} cut at a timestamp")
     print(f"body {raw_chars/1e6:.1f}M chars → {out_chars/1e6:.1f}M after removing noise and duplicates "
           f"({out_chars/max(1,raw_chars)*100:.0f}%)")
     print(f"\nsecrets masked, {sum(total_masked.values())}:")

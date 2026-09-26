@@ -201,8 +201,11 @@ def convert_links(body, idx, unresolved):
 #     **openwiki bundle** publishes exactly three, which is what its SPEC.md declares, so
 #     `openwiki_emit.py` passes the strict tuple.  Neither is more correct in the abstract —— what
 #     matters is that a bundle claiming "OKF plus three keys" does not quietly carry five.
-#     `origin: claude-session` is fully derivable from `sources[].resource`'s scheme, and
-#     `distilled_from` is already withheld from LLMs by `kal_mcp.DENY_FM`.
+#     Dropping `origin` loses nothing: distill writes `origin: claude-session` on **every** session
+#     page —— Codex and Hermes too —— as `promote_distilled`'s ownership mark (`OWN_MARK`), not as
+#     the agent.  "A session page, and whose" is `sources[].resource`'s scheme (`hermes-session://`
+#     …), which `schema_v3.session_agent()` reads.  `distilled_from` is already withheld from LLMs
+#     by `kal_mcp.DENY_FM`.
 EXT_ALL = ("doc_type", "origin", "why_captured", "distilled_from")
 EXT_OPENWIKI = ("doc_type", "why_captured")     # + `no_llm`, which is emitted at the head
 
@@ -248,7 +251,7 @@ def to_okf(fm, body, rel_path, idx, unresolved, extensions=EXT_ALL):
     #       · `schema_v3.doc_meta` matches `no_llm` against the **whole** frontmatter block with
     #         no character limit.  Measured: a 4,500-character frontmatter with `no_llm` last
     #         still reads True.  The `raw[:1200]` window is real but belongs to **`doc_type`**
-    #         (schema_v3.py:563) —— which this converter emits *last*.
+    #         (the `raw[:1200]` match in `schema_v3.scan_vault`) —— which this converter emits *last*.
     #     So head placement is defence in depth, not the load-bearing rule it claimed to be.
     #     What *is* load-bearing is the absence of quotes: `no_llm: "true"` fails the regex.
     if fm.get("no_llm"):
