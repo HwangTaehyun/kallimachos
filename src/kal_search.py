@@ -37,6 +37,7 @@ import lancedb
 
 DB = os.environ.get("KAL_PATH", os.path.join(KAL_HOME, "db"))
 _M = None
+_M_NAME = None      # which embedding model `_M` is —— kal_mcp compares it with a reopened index's meta
 
 # Candidate depth — measured by ablate_params.py ②.  300/300/30/40 is best at 0.776.
 # 120/120 (the old default) gives 0.769; growing entity/relation to 60/80 makes it worse, 0.756.
@@ -116,12 +117,13 @@ PRESETS = {                       # (bm25, chunk, entity, relation)
 #   auto vs the best fixed  Δ-0.017  p=0.0027  → the rule **does harm**
 # Even the oracle is only +0.033, so per-query mode switching is not a useful lever on this corpus.
 def model():
-    global _M
+    global _M, _M_NAME
     if _M is None:
         from sentence_transformers import SentenceTransformer
         db = lancedb.connect(DB)
         meta = {r["key"]: r["value"] for r in db.open_table("meta").search().limit(99).to_list()}
-        _M = SentenceTransformer(meta.get("embedding_model", "intfloat/multilingual-e5-small"))
+        _M_NAME = meta.get("embedding_model", "intfloat/multilingual-e5-small")
+        _M = SentenceTransformer(_M_NAME)
     return _M
 
 

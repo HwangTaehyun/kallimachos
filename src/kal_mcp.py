@@ -110,6 +110,14 @@ def db():
             if "not found" not in str(e).lower():
                 raise
             raise NotIndexed(_not_indexed_msg()) from e
+        #  A reopen after a rebuild can come with another embedding model (a web-UI setting).  The query model is
+        #  cached per process (`kal_search.model()`, and `encode_query` on top), so the new vectors would be
+        #  searched with the old model —— a dimension error, or a silent mix when the sizes match.  Before
+        #  fresh() dropped `_db`, a long-lived server kept the old index *and* the old model, so the two agreed;
+        #  reopening made the model the stale half (review round 4, 2026-09-27).
+        if K._M is not None and K._M_NAME != _db.meta.get("embedding_model", K._M_NAME):
+            K._M = None
+            K.encode_query.cache_clear()
     return _db
 
 
@@ -215,7 +223,14 @@ _STAMP = None         # the DB timestamp when the cache was built
 #  Cost: documents alone 0.83ms → these three 1.80ms (mean of 200 runs, measured).  fresh()
 #  runs on every tool call, so 1ms is affordable.  All 8 tables cost 5.10ms, which is too
 #  much (ix_postings has 2.1M rows and is expensive, and no cache holds it).
-STAMP_TABLES = ("meta", "documents", "lr_entities")
+#
+#  ⚠ 2026-09-27: `chunks` and `lr_relations` joined —— fresh() now also drops the search handle `_db`, and
+#     that handle holds them.  `sync_v3` writes `documents`, then `chunks` after encoding, and never `meta`:
+#     a call in between reopened `_db` on the old chunks and nothing moved the stamp again, so notes added by
+#     sync stayed unsearchable until the next index change (review round 4, reproduced on a throwaway DB).
+#     The static self-check now fails if KAL opens a table this tuple does not watch.
+#     Cost on the real index: 3 tables 0.13ms → these 5 0.22ms per call (mean of 300, 2026-09-27).
+STAMP_TABLES = ("meta", "documents", "lr_entities", "lr_relations", "chunks")
 
 
 def _db_stamp(db_dir=None):
@@ -1506,9 +1521,31 @@ def _selftest_static():
     finally:
         _g.update(_kept)
 
+    # ── the stamp watches every table the search handle holds (2026-09-27) ──────────────────────
+    #    fresh() can only drop `_db` when a table it holds moves the stamp.  Read what KAL actually opens.
+    import re as _re
+    _opened = set(_re.findall(r'open_table\("([a-z_]+)"\)', inspect.getsource(K.KAL.__init__)))
+    assert _opened and _opened <= set(STAMP_TABLES), \
+        f"the search handle holds {sorted(_opened - set(STAMP_TABLES))} that the stamp does not watch —— a write there is never seen"
+
+    # ── a reopen onto another embedding model drops the cached query model, and only then (2026-09-27) ──
+    _kept_k = (K.KAL, K._M, K._M_NAME, _g["_db"])
+    try:
+        class _Reopened:
+            meta = {"embedding_model": "model-b"}
+        K.KAL, K._M, K._M_NAME, _g["_db"] = _Reopened, object(), "model-a", None
+        db()
+        assert K._M is None, "a reopen onto another embedding model kept the old query model"
+        _same = object()
+        K._M, K._M_NAME, _g["_db"] = _same, "model-b", None
+        db()
+        assert K._M is _same, "a reopen onto the same embedding model dropped the query model —— it would reload for nothing"
+    finally:
+        K.KAL, K._M, K._M_NAME, _g["_db"] = _kept_k
+
     print("  ✅ kal_mcp static checks —— one reader (FIFO · /dev/stdin · links · siblings · O_NOFOLLOW window) · "
           "kal_doc and refs_of through it · kal_stats against known rows (and an index without the agent "
-          "column) · annotations · client-facing limits · fresh() in every tool · fresh() drops the search handle")
+          "column) · annotations · client-facing limits · fresh() in every tool · fresh() drops the search handle · the stamp covers every table the handle holds · a model change drops the query model")
 
 
 def _selftest():
