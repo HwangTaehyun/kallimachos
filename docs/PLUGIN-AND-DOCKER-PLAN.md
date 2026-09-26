@@ -152,7 +152,7 @@ Calling a tool against an empty DB **does not return empty; it dies**:
 
 ```
 KAL_PATH=<empty path> python src/kal_mcp.py
-  → ValueError: Table 'chunks' was not found      (src/kal_mcp.py:75, no guard)
+  → ValueError: Table 'chunks' was not found      (kal_search.KAL.__init__ via kal_mcp.db —— no guard then, §9)
 ```
 
 `docker run` does not hand you an indexed DB. So **bootstrapping has to be part of the install
@@ -286,13 +286,13 @@ Codex         ~/.agents/skills/<name>/SKILL.md          copy or symlink
 
 | Skill | What | Status |
 |---|---|---|
-| `kal-recall` | search and recall (the selection rules for the 5 tools) | exists |
+| `kal-recall` | search and recall (the selection rules for the 6 tools) | exists |
 | `kal-ingest` | outside documents into the vault | new |
 | `kal-maintain` | pipeline status and refresh | new |
 
 `Assumption —` one skill carrying the **selection rules** for several tools is better than one
 skill per tool. The evidence is the single `kal-recall` case, with no independent verification.
-Coverage is 5/5, but that does not mean "search is sufficient" — that would be a retrieval-quality
+Coverage is 6/6, but that does not mean "search is sufficient" — that would be a retrieval-quality
 judgement.
 
 **To clean up**: `~/.claude/skills/kal-search/` is alive as a **second installed surface**
@@ -307,7 +307,7 @@ judgement.
 | 2 | multi-arch build and push, `buildx --platform linux/amd64,linux/arm64` | both arch manifests present |
 | 3 | replace `.mcp.json` with §5.1 (keep the host-python form as a comment) | kal healthy in `claude mcp list` |
 | 4 | declare `mcpServers` and `skills` in `plugin.json` + `marketplace.json` | local install succeeds |
-| 5 | Codex `config.toml` example + `.agents/skills` distribution | 5 tools in Codex |
+| 5 | Codex `config.toml` example + `.agents/skills` distribution | 6 tools in Codex |
 | 6 | add 2 skills · retire `kal-search` | frontmatter `name` present |
 | 7 | `just dc selftest` · docker-only `just setup` path | self-checks pass in the container |
 | 8 | README install section · update the `justfile:7-8` scope statement | — |
@@ -320,8 +320,8 @@ judgement.
 **Version rule**: semver. `plugin.json`'s `version` == the image tag == the git tag.
 `plugin.json` says `0.1.0` today while there is **no git tag at all**.
 
-**Upgrade and removal**: `meta.schema_version` is written by `schema_v3.py:1321` but read only by
-`status.py:293` and the web display — **nobody enforces it.** Attaching a new image to an old DB
+**Upgrade and removal**: `meta.schema_version` is written by `schema_v3.py:1379` but read only by
+`status.py:349` and the web display — **nobody enforces it.** Attaching a new image to an old DB
 diverges silently. A startup gate goes in.
 
 ## 7. Remaining debt
@@ -332,12 +332,12 @@ diverges silently. A startup gate goes in.
 | 1' | whether `${user_config.*}` substitutes inside `args` | — | ✅ **settled by measurement** (§5.1 table) |
 | 2 | cold start (including pull), measured | can only be measured once it is on a registry | open |
 | 3 | the `ghcr.io/hwangtaehyun/kal` repository does not exist | has to be created. `kal_mcp.py`'s guidance text **already names this image to users** | open |
-| 4 | the `no_llm` gate ships effectively disabled | 0 documents in the vault have `no_llm: true` → `llm_gate` always passes (`schema_v3.py:915`) | **§6 step 11** |
+| 4 | the `no_llm` gate ships effectively disabled | 0 documents in the vault have `no_llm: true` → `llm_gate` always passes (`schema_v3.py:955`) | **§6 step 11** |
 | 5 | `SKIP` is coupled to this machine's folder name | substring matching (`schema_v3.py:205` — `SKIP_ANY` is at `:87`). Cloning as `kal/` gets it indexed and sent | **§6 step 12** |
 | 6 | the `CLAUDE_DIR` mount is credentials on Linux | currently **dev-compose only** — `.mcp.json` does not mount it | **§6 step 13** |
 | 7 | stdout contamination from `docker run` itself | 0 lines in our environment. Other docker versions and platforms unverified | open |
 | 8 | `required` prompt behaviour when loaded via `--plugin-dir` | in headless `-p` it **silently does not start the server** (measured). Interactive unverified | open |
-| 9 | personal absolute paths remain as defaults in 10 places in the source | `kal_mcp.py:44` · `kal_config.py:248` · `lr_extract.py:33` … harmless in a container but leaks the author's layout to host users | open |
+| 9 | personal absolute paths as defaults in the source (10 places when written) | the vault default is gone —— no module guesses the author's vault any more (`vault_path.vault()` stops rather than guessing). What remains is the `OPENWIKI_DIR` default in `openwiki_emit.py` and `openwiki_enrich.py`: harmless in a container but leaks the author's layout to host users | open (`OPENWIKI_DIR` only) |
 
 ## 8. Judgements deliberately left unverified
 

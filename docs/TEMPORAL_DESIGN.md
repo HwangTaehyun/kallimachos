@@ -13,7 +13,7 @@ Every basis is a measurement from this repository.  Estimates are marked `assump
 > ## ⚠ This design shipped. Read the present tense below as "at the time of writing."
 >
 > `doc_date` and `date_src` exist in the `documents` schema today
-> ([`schema_v3.py:407-408`](../src/schema_v3.py)), so §2.1's "there is nowhere to put a date"
+> ([`schema_v3.py:422-423`](../src/schema_v3.py)), so §2.1's "there is nowhere to put a date"
 > describes the state on 2026-08-20, not the state now.  The sentences are left standing rather
 > than rewritten: what makes a design document worth keeping is *why* the columns were added, and
 > editing the problem out of it leaves only the answer.  An adversarial review read §2.1 as a
@@ -120,7 +120,7 @@ deliberate:
 ### 2.1 Start at the storage layer — there is nowhere to put a date today
 
 **The `documents` schema had zero date columns** when this was written —— it has `doc_date`
-and `date_src` now ([`schema_v3.py:407-408`](../src/schema_v3.py)); see the banner at the top.
+and `date_src` now ([`schema_v3.py:422-423`](../src/schema_v3.py)); see the banner at the top.
 `mtime` exists but differs from the frontmatter date in **355/374 (94.9%)** (median 6 days, max
 132 —— `wiki/overview.md` is fm 2026-04-09 vs mtime 2026-08-19).  It is not a substitute.
 
@@ -133,7 +133,7 @@ documents  + doc_date   string   "2026-06-25"
 `refs` is **not** put into `documents` —— see §3.3 (it parses the body, which is a different matter).
 
 > ⚠ **Adding `sources` to `FM_KEEP` is a security decision.**
-> [`schema_v3.py:67-71`](../src/schema_v3.py) nails it down: this list is both "what gets
+> [`schema_v3.py:69-72`](../src/schema_v3.py) nails it down: this list is both "what gets
 > indexed locally" and **"what gets sent off the machine by `claude -p`"**.  `sources` holds
 > only internal slugs, so sending it is judged harmless —— **but that judgement is recorded here explicitly.**
 
@@ -155,8 +155,8 @@ Lines affected: `260 · 276 · 283 · 286 · 353-357 · 492` (`v.pop("descriptio
 ### 2.3 Merging happens **twice**
 
 After `lr_extract.group_nodes()`, [`entity_resolve.py:197 build_canon()`](../src/entity_resolve.py)
-merges again —— [`schema_v3.py:1093`](../src/schema_v3.py) `build_graph()` calls it at line 1104,
-and folded by `merged[k]["docs"] |= set(e["docs"])` at [`schema_v3.py:1141`](../src/schema_v3.py).
+merges again —— [`schema_v3.py:1133`](../src/schema_v3.py) `build_graph()` calls it at line 1162,
+and folded by `merged[k]["docs"] |= set(e["docs"])` at [`schema_v3.py:1181`](../src/schema_v3.py).
 
 Timeline combination rules in the second merge:
 
@@ -305,7 +305,7 @@ neighbors  limit 20 by default · doc_ids only, not docs[]
 > 🔒 **`refs[].url` is unverified user content.**  A model that follows it automatically turns
 > it into a prompt-injection path.  The response carries that warning with it.
 
-### 3.4 The 5 tools
+### 3.4 The 6 tools
 
 | Tool | When | Arguments |
 |---|---|---|
@@ -314,6 +314,7 @@ neighbors  limit 20 by default · doc_ids only, not docs[]
 | `kal_timeline` | every change | `name`, `since?`, `until?` |
 | `kal_neighbors` | one hop in the graph | `name`, `min_degree?`, `limit=20` |
 | `kal_doc` | citation checking — the source text | **`doc_id` only** (§3.6) |
+| `kal_stats` | what the graph holds and how old the index is (added 2026-09-25) | none |
 
 **`as_of` was removed from `kal_search`** —— it was ambiguous between a document-date filter and
 an entity-state filter (§4.5's example queries split across 3 tools), and state belongs to `entity`/`timeline`.

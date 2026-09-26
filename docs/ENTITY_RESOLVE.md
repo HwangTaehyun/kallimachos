@@ -47,9 +47,9 @@ entities that do not exist.
 | Location | What it does |
 |---|---|
 | [`lr_extract.py:495-498`](../src/lr_extract.py) | extraction — collecting per-chunk results into a whole document |
-| [`schema_v3.py:1104-1113`](../src/schema_v3.py) | graph build — building the canon dictionary across all document entities |
-| [`schema_v3.py:1182`](../src/schema_v3.py) | the relation pair key, `tuple(sorted([ks, kt]))` |
-| [`schema_v3.py:1204`](../src/schema_v3.py) | endpoint resolution, `name2id.get(v["s"])` |
+| [`schema_v3.py:1151-1162`](../src/schema_v3.py) | graph build — building the canon dictionary across all document entities, `build_canon(sorted(_names), _stats)` |
+| [`schema_v3.py:1222`](../src/schema_v3.py) | the relation pair key, `tuple(sorted([ks, kt]))` |
+| [`schema_v3.py:1244`](../src/schema_v3.py) | endpoint resolution, `name2id.get(v["s"])` |
 
 > ⚠ **Never change one side alone.** If the entity key and the relation endpoint key diverge,
 > relations point at entities that do not exist. HIGH-1 in the 2026-08-17 review was exactly that
@@ -441,7 +441,7 @@ Why checking search quality is mandatory: when degree changes, the candidate ord
 
 ## Evidence
 
-- Merge sites — [`lr_extract.py:131`](../src/lr_extract.py) · [`schema_v3.py:305`](../src/schema_v3.py) · [`schema_v3.py:331`](../src/schema_v3.py) · [`schema_v3.py:345`](../src/schema_v3.py)
+- Merge sites — the table in §1, [*Where the key lives now*](#where-the-key-lives-now). Kept in one place: a second copy of these citations here had drifted to comments and blank lines
 - The family of bugs a key mismatch creates — [`REVIEW-2026-08-17.md`](./REVIEW-2026-08-17.md) §HIGH-1 (ids and names disagreeing on 46% of relations)
 - Full measurement — 2026-08-17, against 8,121 entities · 12,369 relations. To reproduce: group by §2's `merge_key`, then apply §3's exclusion rules
 - The `NFKC` normalization form — [Unicode Standard Annex #15](https://www.unicode.org/reports/tr15/) — last updated 2025-08, retrieved 2026-08-17

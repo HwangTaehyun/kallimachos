@@ -74,6 +74,7 @@ entity "**documents**\n//1116 rows//" as documents {
   content_hash : string
   indexed_at : int64
   origin : string  // vault | session //
+  agent : string  // claude | codex | hermes · "" //
   doc_type : string
   ..the time axis..
   doc_date : string
@@ -276,6 +277,7 @@ The DB (`~/.kal/db`) is **regenerated from those three in 64 seconds**.  Not the
 | `title` | string | | frontmatter `title`, or the filename |
 | `folder` | string | BITMAP | the parent folder |
 | `origin` | string | BITMAP | `vault` \| `session` |
+| `agent` | string | | which agent a session came from (`SESSION_AGENTS`), `""` otherwise.  `session_agent()` is its one definition.  **An index built before 2026-09-25 lacks it** —— sync does not add a column, so readers tolerate its absence until the next `just index` |
 | `doc_type` | string | BITMAP | the brain-ingest classification.  `""` for vault notes |
 | `size` `mtime` | int64 | | |
 | `content_hash` | string | | the first 16 chars of sha256.  **The heart of rename detection** |

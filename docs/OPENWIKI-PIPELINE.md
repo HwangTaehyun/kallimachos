@@ -5,7 +5,7 @@ common:
 
 | | Source | What it needs | What it costs |
 |---|---|---|---|
-| **A** | Agent session logs — `~/.claude/projects/**/*.jsonl`, `~/.codex/sessions/**/rollout-*.jsonl` | an LLM, for hours | measured below |
+| **A** | Agent session logs — `~/.claude/projects/**/*.jsonl`, `~/.codex/sessions/**/rollout-*.jsonl`, `~/.hermes/state.db` | an LLM, for hours | measured below |
 | **B** | Markdown you already keep — an Obsidian vault, a docs folder, any tree of `.md` | nothing but the CPU | seconds |
 
 Both land in the same place: an **openwiki bundle** — [OKF v0.2](https://github.com/GoogleCloudPlatform/open-knowledge-format)
@@ -27,9 +27,10 @@ skinparam defaultTextAlignment center
 
 folder "Claude Code\n~/.claude/projects/**/*.jsonl" as CL
 folder "Codex\n~/.codex/sessions/**/rollout-*.jsonl" as CX
+folder "Hermes\n~/.hermes/state.db" as HX
 folder "Obsidian vault\n(any tree of .md)" as VA
 
-component "ingest_sessions.py\ningest_codex_sessions.py" as ING
+component "ingest_sessions.py\ningest_codex_sessions.py\ningest_hermes_sessions.py" as ING
 database "~/.kal/sessions/*.json" as SESS
 component "distill_sessions.py\n(opus · supersession rule)" as DIS
 folder "~/.kal/distilled/*.md" as DIST
@@ -43,6 +44,7 @@ component "CLI · MCP · web" as SURF
 
 CL --> ING : secret masking\ntranscript extraction
 CX --> ING
+HX --> ING
 ING --> SESS
 SESS --> DIS : one LLM call per session
 DIS --> DIST
@@ -104,14 +106,15 @@ you run after a day's sessions means the command stops being run.
 just openwiki-sessions
 ```
 
-Four programs, in order:
+Five programs, in order:
 
 | | | Produces |
 |---|---|---|
 | `ingest_sessions.py` | Claude Code transcripts, secrets masked | `~/.kal/sessions/session_docs.json` |
 | `ingest_codex_sessions.py` | Codex rollouts, same masking, imported never copied | `~/.kal/sessions/codex_session_docs.json` |
+| `ingest_hermes_sessions.py` | Hermes sessions from `state.db`, same masking. Only cli · tui · desktop by default —— any other platform carries other people's words and refuses to run until `just verify-extract-tools` has passed | `~/.kal/sessions/hermes_session_docs.json` |
 | `distill_sessions.py` | one LLM call per session → documents | `~/.kal/distilled/*.md` + `.done/` markers |
-| `openwiki_emit.py` | those documents → OKF pages | `personal/sessions/{claude,codex}/` |
+| `openwiki_emit.py` | those documents → OKF pages | `personal/sessions/{claude,codex,hermes}/` |
 
 ### What distillation is actually for
 

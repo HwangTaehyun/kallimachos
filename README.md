@@ -134,7 +134,7 @@ The decision note and the **conversation where the decision actually happened** 
 |---|---|---|
 | Index · hybrid search · CLI | Prebuilt image on GHCR (`docker pull`) | Multi-vault comparison |
 | Entity/relation extraction via your `claude` CLI | | Graph-aware note suggestions |
-| Claude Code **MCP plugin** (5 tools, containerised) | | |
+| Claude Code **MCP plugin** (6 tools, containerised) | | |
 | Hosted remote MCP at [kallimachos.dev](https://kallimachos.dev) | | |
 | Obsidian **galaxy view** plugin + web build | | |
 | Local web UI (Docker) | | |
@@ -291,6 +291,7 @@ KAL_VAULT=$PWD/docs/demo-vault KAL_HOME=/tmp/kal-demo .venv/bin/python src/kal_s
 | `kal_timeline(name, since?, until?)` | "When did this change, and how" — with original wording. | 20 events |
 | `kal_neighbors(name, min_degree?, limit?)` | One hop of the graph around an entity — the connected names and the relation text. | **20 relations, hard.** `neighbor_total` says how many exist |
 | `kal_doc(doc_id, max_chars?)` | Verify a citation — the original document. | `max_chars` 200–20,000, default 4,000 |
+| `kal_stats()` | What the graph holds: documents by source and by agent, date range, entities by type, and how old the index is. Call it first if you have not used kal before. | counts only |
 
 `kal_search` takes a **ranking mode**, and which one you pick changes what comes back:
 
@@ -319,7 +320,7 @@ tells you what is beyond it.
 Every entity/relation response carries its sources (`docs` — path, title, date). External references (`refs`) ride when the entity has any that resolve; `refs_status` says `none`, `unresolved` or `ok`, and `refs_unresolved` counts the ones recorded but not resolvable, which are omitted rather than handed over as dead citations. `kal_search` and `kal_doc` return `docs` but not `refs`. One rule for time arguments: `as_of` = the **state** at a moment; `since`/`until` = the **list of changes** in a range.
 
 ```bash
-python src/kal_mcp.py --selftest    # exercises all 5 tools + boundary checks
+python src/kal_mcp.py --selftest    # exercises all 6 tools + boundary checks
 ```
 
 > ⚠ **The installed plugin serves a pinned image, not your working tree.** `claude plugin
@@ -372,7 +373,7 @@ Two sources, one destination. Kallimachos gathers both into an **openwiki bundle
 
 ```
   agent session logs  ──distil (LLM)──┐
-  ~/.claude · ~/.codex                │
+  ~/.claude · ~/.codex · ~/.hermes    │
                                       ├──►  openwiki bundle  ──►  knowledge DB
   any tree of Markdown ──convert──────┘     personal/**            ~/.kal/db
   an Obsidian vault, a docs folder
@@ -423,7 +424,7 @@ Everything, unless you say otherwise. Two steps can send note content off your m
 - `KAL_NO_LLM=Private:work/Finance` blocks whole folders, matched as path components from the vault root. Since 2026-09-05 the path rule is resolved **at index time** into the same `no_llm` mark the frontmatter sets, so the local MCP, `just push` and the remote MCP all honour it —— before that only extraction did (an index built earlier needs `just run index` or a sync to pick it up).
 - The optional [hosted service](https://kallimachos.dev) exists for people who want the same graph on every device; the self-hosted pipeline is complete without it.
 
-  What actually differs — the tools are the same five either way:
+  What actually differs — the tools are the same six either way:
 
   | | Self-host | Hosted |
   |---|---|---|

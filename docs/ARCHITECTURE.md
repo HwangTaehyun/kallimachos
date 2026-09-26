@@ -68,7 +68,7 @@ node "docker compose" {
 node "host (macOS)" {
   component "claude-relay\n<<Python · 127.0.0.1:8791>>\nstands in for claude -p" as RELAY
   component "just / CLI\n<<Python>>\nthe same code without a container" as CLI
-  component "kal-mcp\n<<Python · stdio>>\n5 tools · no network listener" as MCP
+  component "kal-mcp\n<<Python · stdio>>\n6 tools · no network listener" as MCP
   database "LanceDB\n~/.kal/db · 8 tables" as LANCE
   folder "vault\n376 markdown documents" as VAULT
   folder "cache\nlr_cache.jsonl · lr_kg.json" as CACHE
@@ -200,7 +200,7 @@ CACHE --> EX : 873 hits · only 20 newly called
 loop for each new chunk (14 workers)
   EX -> RELAY : POST /run + X-Relay-Token
   RELAY -> RELAY : acquires the semaphore (8 at a time)
-  RELAY -> CLI : claude -p --disallowed-tools ...
+  RELAY -> CLI : claude -p --tools "" --disallowed-tools ... (NO_TOOLS)
   CLI -> AN : HTTPS (keychain authentication)
   AN --> CLI : the response
   CLI --> RELAY : text

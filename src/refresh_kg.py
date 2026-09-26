@@ -142,19 +142,20 @@ def _do_refresh(a):
     if a.aliases_only:
         # Aliases are applied by build_canon, and **both** lr_extract and schema_v3 call it.
         # For a newly written alias the two spellings are still separate in lr_kg.json, so
-        # schema_v3's call to build_canon (defined at entity_resolve.py:186, called inside
-        # schema_v3.build_graph() at schema_v3.py:550) merges them on its own —— extraction
+        # schema_v3's call to build_canon (defined in `entity_resolve.build_canon`, called inside
+        # `schema_v3.build_graph()`) merges them on its own —— extraction
         # need not run again.  (measured 2026-08-19: all 6 undeclared candidate pairs existed
         # in lr_kg.json under both spellings)
         #
         # What is lost instead: schema_v3 calls no LLM, so a newly merged entity's description
-        # becomes stitched fragments (schema_v3.py:590).  Running lr_extract has the LLM
+        # becomes stitched fragments (the `" ".join(...)` descriptions in `schema_v3.build_graph`).  Running lr_extract has the LLM
         # rewrite it as one paragraph (FORCE_LLM_SUMMARY_ON_MERGE).
         print("  aliases only — skipping extraction (①)\n")
     else:
         # ① LLM extraction — the cache is keyed on the chunk hash, so only changed chunks are really called
         run([PY, "lr_extract.py"], cwd=HERE)
-    # ② the graph build (global merge + vector regeneration).  Afterwards schema_v3 drops stale_docs
+    # ② the graph build (global merge + vector regeneration).  Afterwards schema_v3 clears the stale marks it
+    #    started with —— marks sync added during the build stay (docs/PIPELINE.md, step 5)
     run([PY, "schema_v3.py"], cwd=HERE)
 
     if a.aliases_only:

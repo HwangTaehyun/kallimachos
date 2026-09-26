@@ -35,7 +35,7 @@ re-run from where when something changes**.
    ┌─ reading ────────────────────────────────────────────────┐
    │  kal_search.py       a person, at the CLI                 │
    │  /kal-search skill    Claude, through the CLI             │
-   │  kal_mcp.py          Claude, **directly over MCP**  ← 5 tools │
+   │  kal_mcp.py          Claude, **directly over MCP**  ← 6 tools │
    └──────────────────────────────────────────────────────────┘
 ```
 
@@ -49,13 +49,14 @@ is needed (64 seconds); change reading and a restart is enough.
    kal_timeline    lr_entities → documents
    kal_neighbors   lr_entities + lr_relations → documents
    kal_doc         documents → vault files
+   kal_stats       documents + lr_entities + meta → counts, date range, index age
 ```
 
 Only `refs_of` and `kal_doc` read **files outside the DB**.  That is where a boundary is needed
 (`kal_doc` takes `doc_id` alone, and a `refs` slug is validated against `[\w-]{1,64}` —— both
 places were really breached once).
 
-**Only `kal_search` loads the embedding model.**  The other four do not —— `kal_entity` 150ms,
+**Only `kal_search` loads the embedding model.**  The other five do not —— `kal_entity` 150ms,
 `kal_timeline` 121ms, `kal_neighbors` 13ms, while `kal_search`'s first call alone takes 5.0
 seconds (470MB of model into memory).  It is **once per process**, so in a long-lived process
 like MCP it is 78ms after that.  The CLI is a new process per call and pays it every time.
@@ -164,9 +165,42 @@ tags: [performance-review, exceeds-criteria]
 session_id: d35ba5db-…  # for tracing back to the source
 ```
 
-### Cache ①  `~/.kal/distilled/.done/<session_id>`
+### Leaving sessions out  `~/.kal/sessions/exclude.txt`
 
-One empty file means "this session is done".  A rerun skips any session carrying the marker.
+One line per session, read by all three collectors —— Claude Code, Codex and Hermes Agent (see
+[Path A](OPENWIKI-PIPELINE.md#path-a--agent-sessions--bundle)) —— and by distillation.  The file
+lives outside any repository, and the reasons can stay in comments there:
+
+```
+<session-id>                        # the whole session stays out
+<session-id> 2026-09-25T09:20:00Z   # everything from that instant on stays out (an offset is required)
+```
+
+A line that cannot be read, an abbreviated id, an id no collector can see, and a session that was
+already distilled past the line all stop the run and say what to do.  Excluding is not retroactive:
+the stop lists the distilled files to remove, and copies already promoted or emitted stay until they
+are removed too.  So does what was already extracted from those pages —— the stop names their
+`~/.kal/lr_cache.jsonl` lines (`doc` keys `personal_sessions_<agent>_<slug>` and
+`raw_conversations_sessions_<slug>`); remove them, or run `just reset extract`.  Left there, a page
+later written under the same name brings the removed text back as history.
+
+The collectors look where each agent keeps its sessions: `~/.claude/projects`,
+`$CODEX_HOME/sessions` (else `~/.codex/sessions`) and `$HERMES_HOME` (else `~/.hermes`, resolved the
+way Hermes resolves a profile folder).  `KAL_CODEX_SESSIONS` and `KAL_HERMES_HOME` override the last
+two.  A folder that exists but cannot be read stops a collection instead of reading as empty.
+
+### Cache ①  `~/.kal/distilled/.done/<agent>-<session_id>`
+
+One marker per distilled session.  A rerun skips any session carrying one.  The marker records how
+far the conversation reached when it was distilled (`last_ts`) and the pages it made, as JSON —— the
+exclude.txt check reads it to tell pages made from cut text from older ones, and a name a marker
+lists is not given to a new page.  A marker written before
+2026-09-26 is an empty file (Claude's may carry the bare id) and still counts.
+
+**A conversation that grows after it was distilled is not distilled again.**  A Hermes conversation
+keeps its id while it grows, and so does a resumed session; a run counts them
+(`ⓘ N of them grew since they were distilled`).  Distilling one again in place would replace pages
+that the index and the knowledge graph still refer to, so it waits for an append-only design.
 
 **Why it is needed.**  464 sessions × an LLM call = 54 minutes.  Interrupted halfway means starting over, which is not tolerable.
 
@@ -824,12 +858,13 @@ during a read, and what needs blocking is writers colliding with each other.
 
 ### What decides that something is "stale"
 
-A `content_hash` comparison, and nothing else ([`schema_v3.py:882`](../src/schema_v3.py)).
+A `content_hash` comparison in `diff_vault()` ([`schema_v3.py:920`](../src/schema_v3.py)) ——
+plus a flipped `no_llm` gate, which changes no text but changes what may leave the machine.
 **Not mtime** — opening and closing a file leaves no mark.
 
 ```
    added      a new doc_id                                        → stale
-   modified   the same doc_id with a different content_hash        → stale
+   modified   the same doc_id, a different content_hash or no_llm  → stale
    renamed    the same content_hash on the deleted and added side  → stale (the path changed)
    deleted    a doc_id that vanished                               → not stale.  prune_kg only clears references
    unchanged  identical hash                                       → nothing happens
@@ -849,8 +884,10 @@ Three things to know:
    ① it accumulates     a row is added on every sync run
    ② duplicates appear  editing the same document twice makes two rows
                         → count **distinct doc_id**, not rows
-   ③ a rebuild empties it   schema_v3.py:1449 does drop_table("stale_docs")
-                        because doc_ids and the KG are both remade, making old marks false alarms
+   ③ a rebuild clears it   the marks it started with —— doc_ids and the KG are both remade,
+                        so those are false alarms.  A mark sync_v3 adds mid-rebuild survives,
+                        and a note edited since the extraction is marked anew.  With nothing
+                        left, schema_v3.py:1489 does drop_table("stale_docs")
 ```
 
 ### Clearing it — `refresh_kg.py`
@@ -874,7 +911,7 @@ What runs — matched against the Step numbers above:
                                     the profile summary happens here too (8+ description fragments only)
    Step 5  indexing                      ✔ schema_v3.py
                                     global merge → entity and relation vectors rebuilt → chunks and the inverted index
-                                    drops stale_docs when it finishes
+                                    clears the stale marks it started with (③ above)
    Step 6  parameter measurement         ✗ skipped   (the weights are already set.
                                              to measure again, run tune_alpha.py separately)
    Step 7  visualisation                 ✔ export_graph.py      graphml · graph3d · kg/ notes
@@ -882,7 +919,7 @@ What runs — matched against the Step numbers above:
                                     the plugin build       viewer/galaxy.html · the plugin
    ────────────────────────────────────────────────────────────────
    last    verify_docs.py                ✔ **only checks** that the documents' numbers match reality
-                                    (--fix is deliberately not called — refresh_kg.py:157)
+                                    (--fix is deliberately not called — refresh_kg.py:194)
 ```
 
 **So: from Step 4 onwards.**  Steps 1–3 (collecting, distilling and moving sessions) are needed
@@ -1176,7 +1213,7 @@ db.open_table("ix_postings").search().where("term_id = 12345").limit(20).to_list
 
 | Cache | Key | Invalidated by | Cost without it |
 |---|---|---|---|
-| `distilled/.done/` | `session_id` | `--restart` | 54 minutes |
+| `distilled/.done/` | `<agent>-<session_id>` | `--restart` | 54 minutes |
 | `lr_cache.jsonl` | `(document, chunk number, body hash)` | a change of chunk size or prompt | 3 hours |
 | `lr_summary_cache.jsonl` | `sha1(name + the sorted fragments)` | a change in the fragment set | 16 minutes |
 

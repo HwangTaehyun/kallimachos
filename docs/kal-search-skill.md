@@ -1,5 +1,5 @@
 > ⚠ **This is a copy from the CLI era.** The current canonical version is
-> [`skills/kal-recall/SKILL.md`](../skills/kal-recall/SKILL.md) (5 MCP tools). This document
+> [`skills/kal-recall/SKILL.md`](../skills/kal-recall/SKILL.md) (6 MCP tools). This document
 > pairs with the older version installed at `~/.claude/skills/kal-search/`, and is kept only as a
 > **fallback for environments that cannot use MCP**.
 >
