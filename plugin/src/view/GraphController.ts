@@ -192,9 +192,12 @@ export class GraphController {
 			onFlyToSelected: () => this.flyToSelected(),
 			onResetView: () => this.recenter(),
 		});
-		// The default framing elevation for a disc (the galaxy rework looks down on the disc by default)
-		const galaxyElev = STYLE_PRESETS.find((p) => p.id === 'galaxy')?.frameElevDeg;
-		if (galaxyElev !== undefined) this.director.setFramingElev(galaxyElev);
+		// The opening framing elevation comes from the active preset (a disc is looked down on, the round
+		// kallimachos cloud is seen nearly side-on); galaxy's is the fallback for custom and unset presets.
+		const elev =
+			STYLE_PRESETS.find((p) => p.id === this.settings.activePreset)?.frameElevDeg ??
+			STYLE_PRESETS.find((p) => p.id === 'galaxy')?.frameElevDeg;
+		if (elev !== undefined) this.director.setFramingElev(elev);
 
 		this.overlay = new OverlayManager(this.contentEl, this.app, renderer, {
 			openNote: (id) => this.openDoc(id),
@@ -1029,7 +1032,11 @@ export class GraphController {
 				const at = this.settings.customPresets.indexOf(target);
 				if (at < 0) return;
 				const removed = this.settings.customPresets.splice(at, 1)[0];
-				if (removed && this.settings.activePreset === removed.id) this.settings.activePreset = '';
+				if (removed && this.settings.activePreset === removed.id) {
+					this.settings.activePreset = '';
+					//  The glow belongs to the preset —— the deleted one's must not linger until a slider moves.
+					this.renderer?.setNodeBlending(presetGlow(this.settings.activePreset, this.settings.customPresets));
+				}
 				this.saveNow();
 				this.panel?.refreshPresets();
 				new Notice(t('mine.deleted', { name }));
@@ -1624,7 +1631,7 @@ export class GraphController {
 	}
 
 	/**
-	 * Resetting the look alone = the default "galaxy" preset (appearance, space, bloom, physics,
+	 * Resetting the look alone = the default preset, DEFAULT_SETTINGS.activePreset (appearance, space, bloom, physics,
 	 * starfield, palette) + automatic orbiting.
 	 *
 	 * It used to be called "reset everything", and it actually left quality, filters, tags,
@@ -1634,10 +1641,12 @@ export class GraphController {
 	 * like resetTags.
 	 */
 	private resetLook(): void {
-		const galaxy = STYLE_PRESETS.find((p) => p.id === 'galaxy');
+		//  The default preset, not a name written here —— the settings-tab reset goes through
+		//  mergeSettings to the same place, and the two drifted apart when the default changed.
+		const preset = STYLE_PRESETS.find((p) => p.id === DEFAULT_SETTINGS.activePreset);
 		this.settings.cruise = DEFAULT_SETTINGS.cruise;
 		this.settings.cruiseSpeed = DEFAULT_SETTINGS.cruiseSpeed;
-		if (galaxy) this.applyStylePreset(galaxy);
+		if (preset) this.applyStylePreset(preset);
 		if (this.director) {
 			this.director.cruiseEnabled = this.settings.cruise;
 			this.director.cruiseSpeed = this.settings.cruiseSpeed;

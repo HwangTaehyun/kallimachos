@@ -46,6 +46,8 @@ varying vec3 vColor;
 varying float vGhost;
 varying float vDim;
 uniform float uLightMode; // 0 = deep space (a white-hot core), 1 = daylight (an ink disc + a rim)
+uniform float uGlow;      // 1 = additive glow (the 'kallimachos' preset); only ever 1 in deep space
+uniform float uGlowGain;  // how much light one node adds —— see GLOW_GAIN
 
 void main() {
 	vec2 uv = gl_PointCoord - 0.5;
@@ -59,6 +61,17 @@ void main() {
 	col = mix(col, col * 0.72, rim * uLightMode);
 
 	float alpha = smoothstep(0.5, 0.42, d) * mix(1.0, 0.45, vGhost) * vDim;
+
+	// Additive glow: the landing hero's sprite (config/brand/galaxy.ts FS_POINT, the same curve, not
+	// copied code) —— a small hot core inside a soft halo.  The disc above is nearly opaque edge to
+	// edge, so under additive blending two or three overlaps already saturate to white; this falls
+	// off, so overlapping nodes add up to light instead (2026-09-26 review).
+	if (uGlow > 0.5) {
+		float r2 = 4.0 * d * d;
+		float hot = exp(-r2 * 16.0);
+		col = mix(vColor, vec3(1.0), hot * 0.35 * (1.0 - vGhost));
+		alpha = (hot + 0.42 * exp(-r2 * 3.5) * (1.0 - r2)) * uGlowGain * mix(1.0, 0.45, vGhost) * vDim;
+	}
 	if (alpha < 0.01) discard;
 	gl_FragColor = vec4(col, alpha);
 }

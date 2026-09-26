@@ -120,9 +120,9 @@ export interface GalaxySettings {
 // data.json already has, so this never overrides a save that predates this preset (which is every
 // save — activePreset was 'galaxy' before this change and stays 'galaxy' for anyone who has one).
 export const DEFAULT_SETTINGS: GalaxySettings = {
-	bloom: { strength: 0.32, radius: 0.4, threshold: 0.22 },
+	bloom: { strength: 0.35, radius: 0.5, threshold: 0.3 },
 	physics: { repel: 230, linkDistance: 80, linkStrength: 1, centerPull: 0.045, flatten: 0, coreGravity: 0, spiral: 0 },
-	look: { nodeSize: 0.85, linkOpacity: 0.1, linkCurve: 0, twinkle: 0, sizeBy: 'degree' },
+	look: { nodeSize: 0.85, linkOpacity: 0.015, linkCurve: 0, twinkle: 0, sizeBy: 'degree' },
 	space: { nebula: 0, fieldStars: 0, clusterClouds: 0 },
 	cruise: true,
 	cruiseSpeed: 1,

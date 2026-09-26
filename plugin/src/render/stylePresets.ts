@@ -105,15 +105,24 @@ export const STYLE_PRESETS: StylePreset[] = [
 		// data flag, not a second rendering pipeline (see AggregateRenderer.setNodeBlending). Real
 		// per-type colour comes from the data itself in KDB mode (loadKdbGraph → setExplicitColors);
 		// the 'kallimachos' theme below only covers the non-KDB fallback so the two modes match.
-		// physics matches 'minimal' almost exactly (proven to settle into an even round cloud on a
-		// real community-structured graph) —— coreGravity in particular stays at 0: a nonzero pull
-		// toward the global centre fights the natural per-community spacing and drags the layout into
-		// a hub-and-spoke lump instead of a filled sphere (measured while previewing this preset).
+		// ⚠ **The shape is the layout's, not the hero's.**  The hero places its points on a sphere by
+		// construction; here the force layout is left exactly as it is, and in KDB mode it seeds each
+		// entity type at its own anchor (GraphController.seedByGroup) —— so the real graph settles into
+		// one cluster per type joined by bundles of relations, not an even ball (measured 2026-09-26 on
+		// the author's graph; an earlier note here said "an even round cloud" and was never measured
+		// on real data).  What this preset carries over is the look: colour, glow, bare black, faint
+		// straight filaments.  coreGravity stays 0 and flatten/spiral stay 0 so the clusters are not
+		// pulled into a disc or a lump.
+		// ⚠ linkOpacity and bloom were measured on the author's real graph (2026-09-26, 24,640 entities,
+		// labels hidden): at 0.1 / bloom 0.32·0.4·0.22 the relations between the type clusters pile into
+		// ~45 bundles of ~800 lines each and the whole graph reads as one white crystal —— the white was
+		// the links, not the nodes (raising or lowering the node glow barely changed it).  At 0.015 with a
+		// higher bloom threshold the bundles keep their type colours and the clusters glow.
 		id: 'kallimachos', name: '卡利马科斯', nameEn: 'Kallimachos', starfield: false, additiveGlow: true, theme: 'kallimachos', frameElevDeg: 18,
 		space: { nebula: 0, fieldStars: 0, clusterClouds: 0 },
-		bloom: { strength: 0.32, radius: 0.4, threshold: 0.22 },
+		bloom: { strength: 0.35, radius: 0.5, threshold: 0.3 },
 		physics: { repel: 230, linkDistance: 80, linkStrength: 1, centerPull: 0.045, flatten: 0, coreGravity: 0, spiral: 0 },
-		look: { nodeSize: 0.85, linkOpacity: 0.1, linkCurve: 0, twinkle: 0, sizeBy: 'degree' },
+		look: { nodeSize: 0.85, linkOpacity: 0.015, linkCurve: 0, twinkle: 0, sizeBy: 'degree' },
 	},
 ];
 
@@ -125,4 +134,4 @@ export const STYLE_PRESETS: StylePreset[] = [
  * sliders do not —— so the active preset is always the right thing to ask.
  */
 export const presetGlow = (id: string, custom: readonly StylePreset[] = []): boolean =>
-	[...STYLE_PRESETS, ...custom].find((p) => p.id === id)?.additiveGlow ?? false;
+	[...STYLE_PRESETS, ...custom].find((p) => p.id === id)?.additiveGlow === true; // a saved custom preset is data from disk

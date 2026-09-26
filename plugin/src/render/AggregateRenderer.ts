@@ -44,6 +44,10 @@ import { DEEP_SPACE } from './presets';
 import { maxPositionRadius, revealScale } from './reveal';
 
 const FOCUS_FADE_S = 0.28;
+/** How much light one node adds in additive-glow mode (the 'kallimachos' preset).  Tuned by eye on a
+ *  synthetic graph at the author's density (25,476 entities · 35,318 relations): higher and the dense
+ *  cores fill in white, lower and the sparse edge of the cloud disappears. */
+const GLOW_GAIN = 0.5;
 
 /**
  * The aggregate renderer: every node in 1× Points, every link in 1× LineSegments, the starfield
@@ -217,12 +221,18 @@ export class AggregateRenderer {
 				uPixelScale: { value: this.pixelScale },
 				uSizeMul: { value: this.nodeScale },
 				uLightMode: { value: this.tokens.lightMode ? 1 : 0 },
+				uGlow: { value: 0 },
+				uGlowGain: { value: GLOW_GAIN },
 				uMaxPoint: { value: 110 * this.renderer.getPixelRatio() },
 				uRevealActive: this.revealActiveUniform,
 				uRevealProgress: this.revealProgressUniform,
 				uRevealMaxRadius: this.revealMaxRadiusUniform,
 			},
 		});
+		//  ⚠ A new material starts on normal blending.  Every open rebuilds the data once more after the
+		//    settings were applied, so without this the glow was gone the moment the view opened
+		//    (2026-09-26 review —— the preset looked applied, its flag said so, the pixels did not).
+		this.syncNodeBlending();
 		this.nodePoints = new Points(this.nodeGeometry, this.nodeMaterial);
 		this.nodePoints.renderOrder = 1; // nodes always cover the link mesh
 		this.nodePoints.frustumCulled = false;
@@ -904,7 +914,10 @@ export class AggregateRenderer {
 
 	private syncNodeBlending(): void {
 		if (!this.nodeMaterial) return;
-		this.nodeMaterial.blending = this.additiveGlowWanted && !this.tokens.lightMode ? AdditiveBlending : NormalBlending;
+		const glow = this.additiveGlowWanted && !this.tokens.lightMode;
+		this.nodeMaterial.blending = glow ? AdditiveBlending : NormalBlending;
+		const u = this.nodeMaterial.uniforms['uGlow'];
+		if (u) u.value = glow ? 1 : 0;
 	}
 
 	/** The starfield background switch (a user option); in deep-space mode it has the final say on starfield visibility */
