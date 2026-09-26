@@ -270,6 +270,8 @@ export function mergeSettings(saved: unknown): GalaxySettings {
 						...p,
 						//  From disk: only a real `true` glows —— every reader (hover preview, commit, presetGlow) then sees a boolean.
 						additiveGlow: (p as { additiveGlow?: unknown }).additiveGlow === true,
+						//  Same boundary for the camera angle: anything but a finite number would give setFramingElev a NaN camera.
+						frameElevDeg: Number.isFinite((p as { frameElevDeg?: unknown }).frameElevDeg) ? (p as { frameElevDeg: number }).frameElevDeg : undefined,
 						look: { ...p.look, linkCurve: num((p.look as { linkCurve?: unknown }).linkCurve, 0) },
 						space: {
 							nebula: num((p.space as { nebula?: unknown } | undefined)?.nebula, 0),

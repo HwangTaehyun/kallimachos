@@ -131,6 +131,11 @@ describe('link opacity in daylight', () => {
 		r.setLinkOpacity(0.02);
 		r.applyTokens(DAYLIGHT, 0);
 		expect(links(r).opacity).toBeGreaterThanOrEqual(0.045);
+		//  Focus still dims after the floor —— floor first, then ×0.25 (moving the floor after the dimming kept every other
+		//  test green and stopped daylight focus from dimming links for eight of nine presets, round-3 review).
+		r.setFocus(() => 1);
+		expect(links(r).opacity).toBeCloseTo(0.045 * 0.25, 5);
+		r.setFocus(null);
 		r.applyTokens(DEEP_SPACE, 0.3);
 		expect(links(r).opacity).toBeCloseTo(0.02, 5);
 		r.applyTokens(DAYLIGHT, 0);
@@ -145,8 +150,9 @@ describe('custom presets from disk', () => {
 		const base = { id: 'custom-x', name: 'x', starfield: false, theme: 'kallimachos', space: {}, bloom: { strength: 0, radius: 0, threshold: 0 },
 			physics: { repel: 1, linkDistance: 1, linkStrength: 1, centerPull: 0, flatten: 0, coreGravity: 0, spiral: 0 },
 			look: { nodeSize: 1, linkOpacity: 0.1, linkCurve: 0, twinkle: 0, sizeBy: 'degree' } };
-		const s = mergeSettings({ customPresets: [{ ...base, additiveGlow: 'yes' }, { ...base, id: 'custom-y', additiveGlow: true }] });
+		const s = mergeSettings({ customPresets: [{ ...base, additiveGlow: 'yes', frameElevDeg: 'x' }, { ...base, id: 'custom-y', additiveGlow: true, frameElevDeg: 18 }] });
 		expect(s.customPresets.map((p) => p.additiveGlow)).toEqual([false, true]);
+		expect(s.customPresets.map((p) => p.frameElevDeg)).toEqual([undefined, 18]);
 	});
 });
 
