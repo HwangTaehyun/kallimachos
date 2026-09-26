@@ -25,7 +25,7 @@ from schema_v3 import doc_meta, effective_date
 # slug -> document date.  The only ground for putting fragments in time order (docs/TEMPORAL_DESIGN.md §0).
 # Parsing reuses schema_v3.doc_meta —— parsing in two places drifts apart eventually.
 DOC_DATE = {}
-from claude_cli import run as claude_cli_run
+from claude_cli import run as claude_cli_run, ThirdPartyGateError
 
 
 # Where ~/.kal lives.  Mounted at /data/kal inside the container (see docker-compose).
@@ -439,6 +439,10 @@ def call(chunk):
                     "at": time.strftime("%Y-%m-%d"),
                     "entities": d["entities"],
                     "relationships": d["relationships"]}
+        except ThirdPartyGateError:
+            #  Not a transient failure: text other people wrote is collected and the no-tools
+            #  receipt is void.  Retrying marks every chunk "failed" in silence (impl round 2).
+            raise
         except Exception:
             time.sleep(2 * (attempt + 1))
     return {"doc": chunk["doc"], "idx": chunk["idx"], "h": chunk["h"],
@@ -772,6 +776,8 @@ def call_text(prompt, tries=3):
                 CALL_STATS["ok"] += 1
                 return re.sub(r"\s+", " ", out)
             last = "empty response"
+        except ThirdPartyGateError:
+            raise                          # a refusal to stop on, not a failure to retry
         except Exception as e:
             last = f"{type(e).__name__}: {e}"
         time.sleep(2 * (i + 1))
@@ -1204,6 +1210,25 @@ def _selftest():
             f"no response, yet counted as a shape failure too (double count): {dict(CALL_STATS)}"
         _n2 = CALL_STATS["ok"] + CALL_STATS["fail"]
         assert CALL_STATS["fail"] + CALL_STATS["shape"] <= _n2, "double count on the relay-down path"
+    finally:
+        time.sleep, globals()["claude_cli_run"] = _sleep_orig, _cli_orig
+        CALL_STATS.update(ok=0, fail=0, shape=0)
+
+    #  The third-party gate's refusal must stop the run, not become a retried "failure" —— in the
+    #  summary path and in chunk extraction alike (impl round 2: it was swallowed in both).
+    def _refuse(*a, **k):
+        raise ThirdPartyGateError("refused")
+    _sleep_orig, _cli_orig = time.sleep, globals()["claude_cli_run"]
+    try:
+        time.sleep = lambda *a: None
+        globals()["claude_cli_run"] = _refuse
+        for _what, _fn in (("call_text", lambda: call_text("x")),
+                           ("chunk extraction", lambda: call({"doc": "d", "idx": 0, "h": "h", "text": "t"}))):
+            try:
+                _fn()
+                raise AssertionError(f"{_what} swallowed the third-party gate's refusal")
+            except ThirdPartyGateError:
+                pass
     finally:
         time.sleep, globals()["claude_cli_run"] = _sleep_orig, _cli_orig
         CALL_STATS.update(ok=0, fail=0, shape=0)

@@ -38,6 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from claude_cli import NO_TOOLS, child_env  # noqa: E402,F401
+import claude_cli  # noqa: E402  —— the gate is looked up at call time, so the self-check can stand in for it
 
 # How many claude processes may run concurrently on the host.
 # lr_extract pushes with 14 workers —— unlimited, that many appear.
@@ -112,7 +113,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": "not found"})
         # Health needs no token —— the container has to ask "is the relay up", and the only
         # thing leaked here is "it is up".
-        self._json(200, {"ok": True, "inflight_max": MAX_INFLIGHT})
+        #  `third_party_gate` is how the container tells this relay from one started before the gate
+        #  existed —— with third-party text collected it will not call a relay that does not say so.
+        self._json(200, {"ok": True, "inflight_max": MAX_INFLIGHT, "third_party_gate": True})
 
     def do_POST(self):
         if self.path != "/run":
@@ -148,6 +151,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "prompt is empty"})
 
         job = body.get("job") or ""      # the container's run id.  A cancel finds it by this
+        #  The host is where the CLI runs, so the host is where the no-tools receipt can be
+        #  checked (`claude_cli.third_party_gate`).  412 rather than 200-with-empty: the caller reads
+        #  an empty answer as "retry", and this refusal must stop the run and say what to do.
+        try:
+            claude_cli.third_party_gate(collected=body.get("third_party"))
+        except claude_cli.ThirdPartyGateError as e:
+            return self._json(412, {"error": str(e)})
         with _sem:
             out = _run_tracked(job, model, prompt, timeout)
         # claude_cli.run reports failure as an empty string.  That distinction is passed through ——
@@ -270,13 +280,104 @@ def _selftest():
         st, body = call("DELETE", "/job/%EC%9E%91%EC%97%85%201")
         assert body["killed"] == 2, ("percent-decoding is not happening", body)
         assert p1.dead and p2.dead
+
+        # ── The third-party gate —— refused here, and the refusal reaches the caller as an error ──
+        import tempfile
+        saved = (claude_cli.THIRD_PARTY_MARK, claude_cli.NO_TOOLS_MARKER, claude_cli._claude_version,
+                 claude_cli.RELAY, claude_cli.RELAY_TOKEN)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                claude_cli.THIRD_PARTY_MARK = os.path.join(d, "third-party-corpus")
+                claude_cli.NO_TOOLS_MARKER = os.path.join(d, "extract-no-tools.ok")
+                claude_cli._claude_version = lambda: "9.9.9"
+                open(claude_cli.THIRD_PARTY_MARK, "w").close()
+                n = len(calls)
+                st, body = call("POST", "/run", {"prompt": "x"})
+                assert st == 412 and "verify-extract-tools" in body.get("error", ""), (st, body)
+                assert len(calls) == n, "the model was called although the gate refused"
+                claude_cli.RELAY, claude_cli.RELAY_TOKEN = f"http://127.0.0.1:{port}", TOKEN
+                claude_cli._RELAY_GATED = None
+                assert call("GET", "/health", token=None)[1].get("third_party_gate") is True, \
+                    "the relay no longer attests the gate —— a gated container will refuse it"
+                try:
+                    claude_cli._run_relay("haiku", "x", 5, False)
+                    raise AssertionError("the container side read a 412 refusal as an empty answer (retry)")
+                except claude_cli.ThirdPartyGateError:
+                    pass
+                #  A relay from before the gate: /health without the field, and **no gate on POST** ——
+                #  modelling it with today's POST let today's gate refuse for it, and a mutation that
+                #  dropped the container's check survived (2026-09-26).  No call may reach it.
+                _old_get, _old_gate = Handler.do_GET, claude_cli.third_party_gate
+                Handler.do_GET = lambda self: self._json(200, {"ok": True, "inflight_max": MAX_INFLIGHT})
+                claude_cli.third_party_gate = lambda: None
+                claude_cli._RELAY_GATED = None
+                n = len(calls)
+                try:
+                    claude_cli._run_relay("haiku", "x", 5, False)
+                    raise AssertionError("third-party text went to a relay that does not attest the gate")
+                except claude_cli.ThirdPartyGateError:
+                    pass
+                finally:
+                    Handler.do_GET, claude_cli.third_party_gate = _old_get, _old_gate
+                    claude_cli._RELAY_GATED = None
+                assert len(calls) == n, "the unattested relay was called"
+                #  A relay whose /health does not answer —— 404, not JSON —— attests nothing either.
+                #  (A probe failure returning "gated" survived the round-3 mutation audit.)
+                for _bad in (lambda self: self._json(404, {"error": "not found"}),
+                             lambda self: (self.send_response(200), self.send_header("Content-Length", "3"),
+                                           self.end_headers(), self.wfile.write(b"no!"))):
+                    Handler.do_GET, claude_cli.third_party_gate = _bad, (lambda **k: None)
+                    claude_cli._RELAY_GATED = None
+                    n = len(calls)
+                    try:
+                        claude_cli._run_relay("haiku", "x", 5, False)
+                        raise AssertionError("a relay whose /health fails was treated as gated")
+                    except claude_cli.ThirdPartyGateError:
+                        pass
+                    finally:
+                        Handler.do_GET, claude_cli.third_party_gate = _old_get, _old_gate
+                        claude_cli._RELAY_GATED = None
+                    assert len(calls) == n, "a relay whose /health fails was called"
+                #  …and the container must actually **send** its mark.  One process plays both sides
+                #  here, so the relay saw the caller's mark on its own and a mutation that sent
+                #  `third_party: False` survived (impl round 4).  Hide the mark from the relay only:
+                def _relay_home_without_mark(collected=None, _gate=_old_gate):
+                    mine, claude_cli.THIRD_PARTY_MARK = claude_cli.THIRD_PARTY_MARK, os.path.join(d, "absent")
+                    try:
+                        return _gate(collected=collected)
+                    finally:
+                        claude_cli.THIRD_PARTY_MARK = mine
+                claude_cli.third_party_gate = _relay_home_without_mark
+                claude_cli._RELAY_GATED = None
+                n = len(calls)
+                try:
+                    claude_cli._run_relay("haiku", "x", 5, False)
+                    raise AssertionError("the container held third-party text and did not tell the relay")
+                except claude_cli.ThirdPartyGateError:
+                    pass
+                finally:
+                    claude_cli.third_party_gate = _old_gate
+                    claude_cli._RELAY_GATED = None
+                assert len(calls) == n, "the relay ran the model for a container holding third-party text"
+                #  The caller's mark counts even when the relay's own KAL_HOME has none —— the two
+                #  homes can differ (impl round 3).  No mark here, a void receipt, and the flag set:
+                os.remove(claude_cli.THIRD_PARTY_MARK)
+                n = len(calls)
+                st, body = call("POST", "/run", {"prompt": "x", "third_party": True})
+                assert st == 412 and len(calls) == n, \
+                    f"the caller said third-party text is collected, yet the relay ran the model ({st})"
+                st, body = call("POST", "/run", {"prompt": "x"})
+                assert st == 200, f"with no mark anywhere the relay refused ({st})"
+        finally:
+            (claude_cli.THIRD_PARTY_MARK, claude_cli.NO_TOOLS_MARKER, claude_cli._claude_version,
+             claude_cli.RELAY, claude_cli.RELAY_TOKEN) = saved
     finally:
         srv.shutdown()
         globals()["_run_tracked"] = _orig
         _procs.clear()
         TOKEN = os.environ.get("KAL_RELAY_TOKEN", "")
 
-    print("  ✅ relay self-check passed — 4 auth · 7 input validation · 2 bounds · 4 cancel")
+    print("  ✅ relay self-check passed — 4 auth · 7 input validation · 2 bounds · 4 cancel · third-party gate")
 
 
 def main():
