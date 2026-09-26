@@ -244,11 +244,19 @@ def fresh():
     Without this, a re-index leaves the old document list in use **until the server restarts**.
     That is not merely slow —— **the `no_llm` gate goes stale**, and documents newly marked as
     excluded from transmission keep going out.  A security problem.
+
+    ⚠ The search handle `_db` goes too.  `K.KAL()` opens `chunks` once, and a LanceDB table object
+      held open never sees a version another process writes (measured 2026-09-27, lancedb 0.37.1:
+      the held table stayed at 1 row after an add and after an overwrite; a fresh open saw 2 and 3).
+      Clearing only the caches above left a server that lives as long as its client —— Hermes keeps
+      stdio servers for its whole run —— answering from the old index, then failing once the
+      index's 24-hour cleanup removed that version.  The embedding model is cached separately
+      (`kal_search.model()`), so reopening costs the tables, not the model.
     """
-    global _DOCS, _BLOCKED, _ENTS, _STAMP
+    global _DOCS, _BLOCKED, _ENTS, _STAMP, _db
     st = _db_stamp()
     if _STAMP is not None and st != _STAMP:
-        _DOCS = _BLOCKED = _ENTS = None
+        _DOCS = _BLOCKED = _ENTS = _db = None
     _STAMP = st
 
 
@@ -1481,9 +1489,26 @@ def _selftest_static():
             (f"{_t.name}: fresh() must be called once, as a statement ahead of every read (calls {_n}, "
              f"statement {_at}, after {sorted(map(str, _pre))}) —— it would serve a stale blocked set")
 
+    # ── fresh() drops the search handle on a re-index, and only then (2026-09-27) ──────────────
+    #    The full self-check's cache test needs the real DB, so CI never saw that `_db` survived a
+    #    re-index (see fresh()).  No DB here: the stamp is a stub and the handle a sentinel.
+    _g = globals()
+    _kept = {k: _g[k] for k in ("_db", "_STAMP", "_db_stamp", "_DOCS", "_BLOCKED", "_ENTS")}
+    try:
+        _held = object()
+        _g["_db"], _g["_STAMP"], _g["_db_stamp"] = _held, 2.0, (lambda db_dir=None: 2.0)
+        fresh()
+        assert _g["_db"] is _held, "fresh() dropped the search handle with the index unchanged —— every call would reopen it"
+        _g["_STAMP"] = 1.0
+        fresh()
+        assert _g["_db"] is None, ("fresh() kept the search handle across a re-index —— a server that lives as long as "
+                                   "its client answers from the old index, then fails once that version is cleaned up")
+    finally:
+        _g.update(_kept)
+
     print("  ✅ kal_mcp static checks —— one reader (FIFO · /dev/stdin · links · siblings · O_NOFOLLOW window) · "
           "kal_doc and refs_of through it · kal_stats against known rows (and an index without the agent "
-          "column) · annotations · client-facing limits · fresh() in every tool")
+          "column) · annotations · client-facing limits · fresh() in every tool · fresh() drops the search handle")
 
 
 def _selftest():
