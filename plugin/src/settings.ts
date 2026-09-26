@@ -114,12 +114,16 @@ export interface GalaxySettings {
 	positionCacheKey: string;
 }
 
-// The default = the reworked "galaxy" style preset: a dense bright core + a flattened disc + faint spiral arms (the v0.2 galaxy layout rework)
+// The default = the "kallimachos" style preset: the landing page's hero sphere reproduced on the
+// real entity graph —— bare black, a round cloud, straight faint filaments, additive glow (see
+// render/stylePresets.ts). Only the fresh-install default: mergeSettings keeps whatever an existing
+// data.json already has, so this never overrides a save that predates this preset (which is every
+// save — activePreset was 'galaxy' before this change and stays 'galaxy' for anyone who has one).
 export const DEFAULT_SETTINGS: GalaxySettings = {
-	bloom: { strength: 0.35, radius: 0.35, threshold: 0.22 },
-	physics: { repel: 170, linkDistance: 55, linkStrength: 1.1, centerPull: 0.05, flatten: 0.55, coreGravity: 0.1, spiral: 0.02 },
-	look: { nodeSize: 1, linkOpacity: 0.14, linkCurve: 0.35, twinkle: 0.5, sizeBy: 'degree' },
-	space: { nebula: 0.35, fieldStars: 0.25, clusterClouds: 0.3 },
+	bloom: { strength: 0.32, radius: 0.4, threshold: 0.22 },
+	physics: { repel: 230, linkDistance: 80, linkStrength: 1, centerPull: 0.045, flatten: 0, coreGravity: 0, spiral: 0 },
+	look: { nodeSize: 0.85, linkOpacity: 0.1, linkCurve: 0, twinkle: 0, sizeBy: 'degree' },
+	space: { nebula: 0, fieldStars: 0, clusterClouds: 0 },
 	cruise: true,
 	cruiseSpeed: 1,
 	showUnresolved: false,
@@ -134,11 +138,11 @@ export const DEFAULT_SETTINGS: GalaxySettings = {
 	filterQuery: '',
 	// Off by default: ghost edges depend on the Constellation companion plugin (not yet formally released), shipped with 0.4.0 but not bothering ordinary users yet
 	showGhostEdges: false,
-	showStarfield: true,
+	showStarfield: false,
 	colorTheme: 'imported',
 	qualityOverride: 'auto',
 	preset: 'deep-space',
-	activePreset: 'galaxy',
+	activePreset: 'kallimachos',
 	customPresets: [],
 	language: 'auto',
 	panelSections: {},

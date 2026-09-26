@@ -1,5 +1,6 @@
 import {
 	ACESFilmicToneMapping,
+	AdditiveBlending,
 	BufferAttribute,
 	BufferGeometry,
 	Color,
@@ -9,6 +10,7 @@ import {
 	LineDashedMaterial,
 	LineSegments,
 	NoToneMapping,
+	NormalBlending,
 	PerspectiveCamera,
 	Points,
 	PointsMaterial,
@@ -131,6 +133,8 @@ export class AggregateRenderer {
 	private ghostTargetVec = new Vector3();
 	private pixelScale = 1;
 	private nodeScale = 1;
+	/** The active style preset's additiveGlow flag; re-applied by syncNodeBlending whenever it or tokens.lightMode changes */
+	private additiveGlowWanted = false;
 
 	constructor(container: HTMLElement, graphRadiusEstimate: number) {
 		this.graphRadiusEstimate = graphRadiusEstimate;
@@ -676,6 +680,7 @@ export class AggregateRenderer {
 		if (tokens.motes && !this.motes) this.buildMotes();
 		if (this.motes) this.motes.visible = tokens.motes;
 		this.syncLinkOpacity();
+		this.syncNodeBlending(); // daylight always wins: an additive-glow preset must not wash white paper out
 		this.recolor();
 		this.buildSelLayer();
 	}
@@ -883,6 +888,23 @@ export class AggregateRenderer {
 		this.nodeScale = v;
 		const u = this.nodeMaterial?.uniforms['uSizeMul'];
 		if (u) u.value = v;
+	}
+
+	/**
+	 * The hero sphere's "light adding up" look (config/brand/galaxy.ts): additive blending on the
+	 * shared node material instead of the other presets' normal alpha blending. A material-level
+	 * flag flip, not a second material —— no extra GPU allocation, so preset switching and dispose()
+	 * need no special-casing here. Always re-derived from tokens.lightMode too (syncNodeBlending),
+	 * so a preset that wants this cannot leave the daylight visual direction blown out to white.
+	 */
+	setNodeBlending(additive: boolean): void {
+		this.additiveGlowWanted = additive;
+		this.syncNodeBlending();
+	}
+
+	private syncNodeBlending(): void {
+		if (!this.nodeMaterial) return;
+		this.nodeMaterial.blending = this.additiveGlowWanted && !this.tokens.lightMode ? AdditiveBlending : NormalBlending;
 	}
 
 	/** The starfield background switch (a user option); in deep-space mode it has the final say on starfield visibility */

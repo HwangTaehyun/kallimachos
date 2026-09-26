@@ -43,6 +43,7 @@ export const DE: Dict = {
 	'preset.sub.minimal': 'Kein Bloom · keine Sterne · zurückhaltend',
 	'preset.sub.fireworks': 'Berstender Bloom · Cyber',
 	'preset.sub.supernova': 'Explosiv · starker Bloom · Sonnenuntergang',
+	'preset.sub.kallimachos': 'Echte Typfarben · reines Schwarz · feine Fäden',
 	'sec.setBy': 'gesetzt von {n}',
 	'sec.customized': 'angepasst',
 	'sec.preview': 'Vorschau: {n}',

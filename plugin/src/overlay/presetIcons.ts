@@ -29,6 +29,12 @@ const ICONS: Record<string, Shape[]> = {
 		P('M12 3 L12 6'), P('M12 18 L12 21'), P('M3 12 L6 12'), P('M18 12 L21 12'),
 		P('M6 6 L8 8'), P('M16 16 L18 18'), P('M18 6 L16 8'), P('M8 16 L6 18'),
 	],
+	// A small type-coloured network: dots of varying size (degree) joined by straight filaments —— the
+	// real entity graph's sphere, not a spiral/orbit/burst shape (see stylePresets.ts 'kallimachos').
+	kallimachos: [
+		DOT(7, 8, 1.1), DOT(15, 6, 1.3), DOT(12, 13, 1.6), DOT(18, 15, 1), DOT(6, 16, 1),
+		P('M7 8 L12 13'), P('M15 6 L12 13'), P('M12 13 L18 15'), P('M12 13 L6 16'), P('M7 8 L15 6'),
+	],
 	custom: [{ tag: 'path', attr: { d: 'M12 4 L14.2 9.2 L20 9.7 L15.6 13.5 L17 19 L12 16 L7 19 L8.4 13.5 L4 9.7 L9.8 9.2 Z', fill: 'currentColor', 'fill-opacity': 0.28 } }],
 };
 

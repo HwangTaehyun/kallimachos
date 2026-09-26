@@ -24,7 +24,7 @@ import { CameraDirector } from '../interactions/CameraDirector';
 import { TourDirector } from '../tour/TourDirector';
 import { ControlPanel } from '../overlay/ControlPanel';
 import type { StylePreset } from '../render/stylePresets';
-import { STYLE_PRESETS } from '../render/stylePresets';
+import { STYLE_PRESETS, presetGlow } from '../render/stylePresets';
 import { OverlayManager } from '../overlay/OverlayManager';
 import { NodeSearchModal } from './SearchModal';
 import { PromptModal } from './PromptModal';
@@ -890,6 +890,7 @@ export class GraphController {
 		this.renderer?.setLinkCurve(s.look.linkCurve);
 		this.renderer?.setSizeMode(s.look.sizeBy);
 		this.renderer?.setStarfieldEnabled(s.showStarfield);
+		this.renderer?.setNodeBlending(presetGlow(s.activePreset, s.customPresets));
 		this.syncNebulaTint();
 		this.renderer?.setSpace(s.space);
 		if (this.renderer) this.renderer.twinkleFreq = s.look.twinkle;
@@ -935,6 +936,7 @@ export class GraphController {
 		r.twinkleFreq = p.look.twinkle;
 		r.setSizeMode(p.look.sizeBy);
 		r.setStarfieldEnabled(p.starfield);
+		r.setNodeBlending(p.additiveGlow ?? false);
 		r.setSpace(p.space); // the nebula tint reuses the already-baked texture (a hover does not re-bake; only a committed click changes the colour)
 		const theme = COLOR_THEMES.find((t) => t.id === p.theme);
 		if (theme && this.settings.colorGroups.length > 0) {
@@ -956,6 +958,7 @@ export class GraphController {
 		r.twinkleFreq = s.look.twinkle;
 		r.setSizeMode(s.look.sizeBy);
 		r.setStarfieldEnabled(s.showStarfield);
+		r.setNodeBlending(presetGlow(s.activePreset, s.customPresets));
 		r.setSpace(s.space);
 		this.applyColorFn();
 		r.recolor();
@@ -981,6 +984,7 @@ export class GraphController {
 					name,
 					nameEn: name,
 					starfield: this.settings.showStarfield,
+					additiveGlow: presetGlow(this.settings.activePreset, this.settings.customPresets),
 					space: { ...this.settings.space },
 					theme: this.settings.colorTheme,
 					bloom: { ...this.settings.bloom },

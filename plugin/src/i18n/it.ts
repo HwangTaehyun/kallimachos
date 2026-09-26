@@ -43,6 +43,7 @@ export const IT: Dict = {
 	'preset.sub.minimal': 'Nessun bagliore · niente stelle · sobrio',
 	'preset.sub.fireworks': 'Bagliore esplosivo · cyber',
 	'preset.sub.supernova': 'Esplosivo · bagliore intenso · tramonto',
+	'preset.sub.kallimachos': 'Colori reali per tipo · nero puro · filamenti sottili',
 	'sec.setBy': 'impostato da {n}',
 	'sec.customized': 'personalizzato',
 	'sec.preview': 'anteprima: {n}',

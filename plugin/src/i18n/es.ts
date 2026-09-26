@@ -43,6 +43,7 @@ export const ES: Dict = {
 	'preset.sub.minimal': 'Sin resplandor · sin estrellas · sobrio',
 	'preset.sub.fireworks': 'Resplandor estallante · ciber',
 	'preset.sub.supernova': 'Explosivo · resplandor intenso · atardecer',
+	'preset.sub.kallimachos': 'Colores reales por tipo · negro puro · filamentos finos',
 	'sec.setBy': 'según {n}',
 	'sec.customized': 'personalizado',
 	'sec.preview': 'vista previa: {n}',

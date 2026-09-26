@@ -51,6 +51,7 @@ export const EN = {
 	'preset.sub.minimal': 'No bloom · no stars · restrained',
 	'preset.sub.fireworks': 'Bursting bloom · cyber',
 	'preset.sub.supernova': 'Explosive · heavy bloom · sunset',
+	'preset.sub.kallimachos': 'True type colors · bare black · thin filaments',
 	'sec.setBy': 'set by {n}',
 	'sec.customized': 'customized',
 	'sec.preview': 'preview: {n}',

@@ -43,6 +43,7 @@ export const PT: Dict = {
 	'preset.sub.minimal': 'Sem brilho · sem estrelas · contido',
 	'preset.sub.fireworks': 'Brilho em explosão · ciber',
 	'preset.sub.supernova': 'Explosivo · brilho intenso · pôr do sol',
+	'preset.sub.kallimachos': 'Cores reais por tipo · preto puro · filamentos finos',
 	'sec.setBy': 'definido por {n}',
 	'sec.customized': 'personalizado',
 	'sec.preview': 'pré-visualizar: {n}',

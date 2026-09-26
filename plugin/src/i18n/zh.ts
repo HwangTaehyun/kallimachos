@@ -48,6 +48,7 @@ export const ZH: Dict = {
 	'preset.sub.minimal': '无辉光 · 无背景 · 克制',
 	'preset.sub.fireworks': '高辉光迸发 · 赛博',
 	'preset.sub.supernova': '向外爆发 · 重辉光 · 落日',
+	'preset.sub.kallimachos': '真实类型色 · 纯黑背景 · 细丝连线',
 	'sec.setBy': '由『{n}』设定',
 	'sec.customized': '已自定义',
 	'sec.preview': '预览：{n}',

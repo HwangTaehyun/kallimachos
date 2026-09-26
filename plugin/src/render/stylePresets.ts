@@ -19,6 +19,14 @@ export interface StylePreset {
 	nameEn?: string;
 	/** The starfield backdrop switch (the sphere-shell background stars) */
 	starfield: boolean;
+	/**
+	 * Additive point-sprite blending for the node material (default/undefined = the normal alpha
+	 * blending every other preset already uses). Deep-space only: AggregateRenderer forces normal
+	 * blending back on whenever the daylight visual direction is active, so a preset that turns
+	 * this on does not wash out to white the moment someone flips to the adaptive/light theme.
+	 * See AggregateRenderer.setNodeBlending.
+	 */
+	additiveGlow?: boolean;
 	/** The deep-space background shape layers (the nebula backdrop / floating field stars / cluster clouds, 0 = off) */
 	space: SpaceSettings;
 	/** The colour theme id (see colorThemes.ts) —— a preset applies it too */
@@ -88,4 +96,33 @@ export const STYLE_PRESETS: StylePreset[] = [
 		physics: { repel: 260, linkDistance: 62, linkStrength: 1.1, centerPull: 0.03, flatten: 0, coreGravity: -0.08, spiral: 0 },
 		look: { nodeSize: 1.3, linkOpacity: 0.24, linkCurve: 0.3, twinkle: 1.5, sizeBy: 'degree' },
 	},
+	{
+		// The landing page's hero sphere (config/brand/galaxy.ts), reproduced on the real entity graph.
+		// Bare and true to the data —— no starfield, no nebula/field-stars/cluster-clouds haze (all
+		// three space layers off, like minimal), a round cloud rather than a disc (flatten 0, no
+		// spiral, like deepfield), and straight faint filaments (linkCurve 0). additiveGlow gives the
+		// node sprites the hero's "light adding up" look on the shared node material —— a preset
+		// data flag, not a second rendering pipeline (see AggregateRenderer.setNodeBlending). Real
+		// per-type colour comes from the data itself in KDB mode (loadKdbGraph → setExplicitColors);
+		// the 'kallimachos' theme below only covers the non-KDB fallback so the two modes match.
+		// physics matches 'minimal' almost exactly (proven to settle into an even round cloud on a
+		// real community-structured graph) —— coreGravity in particular stays at 0: a nonzero pull
+		// toward the global centre fights the natural per-community spacing and drags the layout into
+		// a hub-and-spoke lump instead of a filled sphere (measured while previewing this preset).
+		id: 'kallimachos', name: '卡利马科斯', nameEn: 'Kallimachos', starfield: false, additiveGlow: true, theme: 'kallimachos', frameElevDeg: 18,
+		space: { nebula: 0, fieldStars: 0, clusterClouds: 0 },
+		bloom: { strength: 0.32, radius: 0.4, threshold: 0.22 },
+		physics: { repel: 230, linkDistance: 80, linkStrength: 1, centerPull: 0.045, flatten: 0, coreGravity: 0, spiral: 0 },
+		look: { nodeSize: 0.85, linkOpacity: 0.1, linkCurve: 0, twinkle: 0, sizeBy: 'degree' },
+	},
 ];
+
+/**
+ * Whether the preset with this id draws its nodes with additive glow. Derived from the preset, never
+ * stored in settings: a stored flag was filled with the new default (`true`) for every save written
+ * before it existed, so anyone still on 'galaxy' would have lost the normal blending they had
+ * (2026-09-26 review). Only applying, saving or deleting a preset changes activePreset —— the
+ * sliders do not —— so the active preset is always the right thing to ask.
+ */
+export const presetGlow = (id: string, custom: readonly StylePreset[] = []): boolean =>
+	[...STYLE_PRESETS, ...custom].find((p) => p.id === id)?.additiveGlow ?? false;

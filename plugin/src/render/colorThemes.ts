@@ -50,4 +50,16 @@ export const COLOR_THEMES: ColorTheme[] = [
 		// Spotify green + ice blue + violet —— a high-latitude night sky
 		colors: ['#1db954', '#00d4ff', '#7f5fff', '#38f0c0', '#4fa8ff', '#9f7fff', '#22e6a8', '#66c2ff', '#b08fff'],
 	},
+	{
+		id: 'kallimachos',
+		name: 'Kallimachos',
+		// kal's own per-entity-type palette —— the same hexes as the landing page's hero sphere
+		// (config/brand/galaxy.ts TYPE_COLOR, itself a copy of kal/src/schema_v3.py TYPE_COLOR
+		// minus 'other'). Order: artifact, method, concept, failure, tool, decision, metric, event,
+		// actor, project. In KDB mode this theme is never actually cycled through —— loadKdbGraph's
+		// groupColors already carries these exact hexes from the export and wins via
+		// setExplicitColors (palette.ts); this entry exists so an ordinary note vault previewing
+		// "Kallimachos" still reads in the same family of hues.
+		colors: ['#7FB3FF', '#FF6E8A', '#5AA9FF', '#FF5C5C', '#FFB454', '#3FD6C0', '#FFD84D', '#F79E4A', '#9BE564', '#B98CFF'],
+	},
 ];
