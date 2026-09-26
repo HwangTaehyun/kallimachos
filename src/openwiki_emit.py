@@ -675,7 +675,10 @@ def _selftest():
         ok.append("refuses to run outside a git repository")
 
         #  ④ Exactly three extension keys reach the bundle.
-        page = [f for f in glob.glob(os.path.join(cl, "*.md")) if os.path.basename(f) != "index.md"][0]
+        #  ⚠ One of the pages this tool wrote —— not "the first *.md": ① left a hand-written page (no doc_type) in
+        #    the same folder, and glob order is the filesystem's.  macOS returned a0.md first and passed; Linux CI
+        #    returned hand-written.md and failed "doc_type is missing" (2026-09-26).
+        page = sorted(owned(cl))[0]
         txt = open(page).read()
         for k in ("doc_type", "why_captured"):
             assert re.search(rf"^{k}:", txt, re.M), f"{k} is missing"

@@ -107,6 +107,11 @@ jobs:
       - name: Index → acceptance test
         run: |
           mkdir -p /tmp/vault/notes /tmp/kal
+          #  ⚠ The image runs as `USER kal` (uid 1000); the runner is uid 1001 and a bind mount keeps host ownership,
+          #    so the pipeline could not even create /data/.write.lock (PermissionError, every run since 2026-09-06).
+          #    Docker Desktop on a Mac does not enforce this, which is why it passed locally.  Not `--user`: the
+          #    image's caches assume uid 1000.
+          chmod 0777 /tmp/kal
           #  The body of this fixture stays Korean on purpose.  Real vaults are Korean, and
           #  this is the only place CI ever runs the image over CJK text —— chunking and
           #  embedding have to not choke on it.  No assertion reads the body: plugin_probe
@@ -122,6 +127,8 @@ jobs:
           MD
           echo '{"entities":[],"relationships":[],"doc_hashes":{}}' > /tmp/kal/lr_kg.json
           docker run --rm -v /tmp/kal:/data -v /tmp/vault:/vault:ro kal:local src/schema_v3.py
+          #  …and what the container wrote as uid 1000 is the runner's to read (and lock) next.
+          sudo chmod -R a+rwX /tmp/kal
           python src/plugin_probe.py --kal /tmp/kal --vault /tmp/vault
 
   # Baked for both arches.  Pushing amd64 only means **an exec format error on one side**.
