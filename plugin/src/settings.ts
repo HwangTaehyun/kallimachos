@@ -115,14 +115,14 @@ export interface GalaxySettings {
 }
 
 // The default = the "kallimachos" style preset: the landing page's hero sphere reproduced on the
-// real entity graph —— bare black, a round cloud, straight faint filaments, additive glow (see
+// real entity graph —— bare black, one cluster per entity type, straight faint filaments, additive glow (see
 // render/stylePresets.ts). Only the fresh-install default: mergeSettings keeps whatever an existing
 // data.json already has, so this never overrides a save that predates this preset (which is every
 // save — activePreset was 'galaxy' before this change and stays 'galaxy' for anyone who has one).
 export const DEFAULT_SETTINGS: GalaxySettings = {
 	bloom: { strength: 0.35, radius: 0.5, threshold: 0.3 },
 	physics: { repel: 230, linkDistance: 80, linkStrength: 1, centerPull: 0.045, flatten: 0, coreGravity: 0, spiral: 0 },
-	look: { nodeSize: 0.85, linkOpacity: 0.015, linkCurve: 0, twinkle: 0, sizeBy: 'degree' },
+	look: { nodeSize: 0.85, linkOpacity: 0.02, linkCurve: 0, twinkle: 0, sizeBy: 'degree' },
 	space: { nebula: 0, fieldStars: 0, clusterClouds: 0 },
 	cruise: true,
 	cruiseSpeed: 1,
@@ -268,6 +268,8 @@ export function mergeSettings(saved: unknown): GalaxySettings {
 					// Presets saved before v0.4 have no linkCurve/space: filled with 0 = keeping the straight-line, no-background look of when they were saved
 					.map((p) => ({
 						...p,
+						//  From disk: only a real `true` glows —— every reader (hover preview, commit, presetGlow) then sees a boolean.
+						additiveGlow: (p as { additiveGlow?: unknown }).additiveGlow === true,
 						look: { ...p.look, linkCurve: num((p.look as { linkCurve?: unknown }).linkCurve, 0) },
 						space: {
 							nebula: num((p.space as { nebula?: unknown } | undefined)?.nebula, 0),

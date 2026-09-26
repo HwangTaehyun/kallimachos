@@ -192,10 +192,10 @@ export class GraphController {
 			onFlyToSelected: () => this.flyToSelected(),
 			onResetView: () => this.recenter(),
 		});
-		// The opening framing elevation comes from the active preset (a disc is looked down on, the round
-		// kallimachos cloud is seen nearly side-on); galaxy's is the fallback for custom and unset presets.
+		// The opening framing elevation comes from the active preset, custom ones included (a disc is looked down on;
+		// kallimachos is seen nearly side-on); galaxy's is the fallback for presets that carry none.
 		const elev =
-			STYLE_PRESETS.find((p) => p.id === this.settings.activePreset)?.frameElevDeg ??
+			[...STYLE_PRESETS, ...this.settings.customPresets].find((p) => p.id === this.settings.activePreset)?.frameElevDeg ??
 			STYLE_PRESETS.find((p) => p.id === 'galaxy')?.frameElevDeg;
 		if (elev !== undefined) this.director.setFramingElev(elev);
 
@@ -939,7 +939,7 @@ export class GraphController {
 		r.twinkleFreq = p.look.twinkle;
 		r.setSizeMode(p.look.sizeBy);
 		r.setStarfieldEnabled(p.starfield);
-		r.setNodeBlending(p.additiveGlow ?? false);
+		r.setNodeBlending(p.additiveGlow === true);
 		r.setSpace(p.space); // the nebula tint reuses the already-baked texture (a hover does not re-bake; only a committed click changes the colour)
 		const theme = COLOR_THEMES.find((t) => t.id === p.theme);
 		if (theme && this.settings.colorGroups.length > 0) {
@@ -988,6 +988,8 @@ export class GraphController {
 					nameEn: name,
 					starfield: this.settings.showStarfield,
 					additiveGlow: presetGlow(this.settings.activePreset, this.settings.customPresets),
+					//  The camera angle of the look it was saved from —— without it a preset saved from kallimachos opened at 50°.
+					frameElevDeg: [...STYLE_PRESETS, ...this.settings.customPresets].find((x) => x.id === this.settings.activePreset)?.frameElevDeg,
 					space: { ...this.settings.space },
 					theme: this.settings.colorTheme,
 					bloom: { ...this.settings.bloom },

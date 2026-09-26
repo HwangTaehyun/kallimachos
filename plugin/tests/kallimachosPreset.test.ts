@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { STYLE_PRESETS, presetGlow } from '../src/render/stylePresets';
 import { COLOR_THEMES } from '../src/render/colorThemes';
-import { AggregateRenderer } from '../src/render/AggregateRenderer';
 import { DEFAULT_SETTINGS, mergeSettings, toLayoutParams } from '../src/settings';
 import { DE } from '../src/i18n/de';
 import { EN } from '../src/i18n/en';
@@ -36,11 +35,6 @@ describe('the kallimachos preset (the landing page hero, reproduced on the real 
 		expect(theme).toBeDefined();
 		// A drift here would silently break colour parity with the hero sphere (or with schema_v3.py).
 		expect(theme?.colors).toEqual(TYPE_COLOR_HEXES);
-	});
-
-	it('AggregateRenderer exposes the additive-blending hook the preset drives', () => {
-		// Instantiating needs a live WebGL context; the method existing on the prototype does not.
-		expect(typeof AggregateRenderer.prototype.setNodeBlending).toBe('function');
 	});
 
 	it('leaves the other 8 presets\' material untouched (additiveGlow stays undefined = normal blending)', () => {

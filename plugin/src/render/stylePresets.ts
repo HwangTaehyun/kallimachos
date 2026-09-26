@@ -99,7 +99,7 @@ export const STYLE_PRESETS: StylePreset[] = [
 	{
 		// The landing page's hero sphere (config/brand/galaxy.ts), reproduced on the real entity graph.
 		// Bare and true to the data —— no starfield, no nebula/field-stars/cluster-clouds haze (all
-		// three space layers off, like minimal), a round cloud rather than a disc (flatten 0, no
+		// three space layers off, like minimal), no disc (flatten 0, no
 		// spiral, like deepfield), and straight faint filaments (linkCurve 0). additiveGlow gives the
 		// node sprites the hero's "light adding up" look on the shared node material —— a preset
 		// data flag, not a second rendering pipeline (see AggregateRenderer.setNodeBlending). Real
@@ -117,12 +117,14 @@ export const STYLE_PRESETS: StylePreset[] = [
 		// labels hidden): at 0.1 / bloom 0.32·0.4·0.22 the relations between the type clusters pile into
 		// ~45 bundles of ~800 lines each and the whole graph reads as one white crystal —— the white was
 		// the links, not the nodes (raising or lowering the node glow barely changed it).  At 0.015 with a
-		// higher bloom threshold the bundles keep their type colours and the clusters glow.
+		// higher bloom threshold the bundles keep their type colours and the clusters glow.  0.02, not the measured
+		// 0.015: the link-opacity slider steps by 0.01, so 0.015 showed as "0.01" and one drag landed on 0.02 (review).
+		// In daylight a floor keeps the relations visible (AggregateRenderer DAYLIGHT_LINK_FLOOR) —— there is no bloom there.
 		id: 'kallimachos', name: '卡利马科斯', nameEn: 'Kallimachos', starfield: false, additiveGlow: true, theme: 'kallimachos', frameElevDeg: 18,
 		space: { nebula: 0, fieldStars: 0, clusterClouds: 0 },
 		bloom: { strength: 0.35, radius: 0.5, threshold: 0.3 },
 		physics: { repel: 230, linkDistance: 80, linkStrength: 1, centerPull: 0.045, flatten: 0, coreGravity: 0, spiral: 0 },
-		look: { nodeSize: 0.85, linkOpacity: 0.015, linkCurve: 0, twinkle: 0, sizeBy: 'degree' },
+		look: { nodeSize: 0.85, linkOpacity: 0.02, linkCurve: 0, twinkle: 0, sizeBy: 'degree' },
 	},
 ];
 

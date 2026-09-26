@@ -47,12 +47,14 @@ vi.mock('three/examples/jsm/postprocessing/RenderPass.js', () => ({ RenderPass: 
 vi.mock('three/examples/jsm/postprocessing/UnrealBloomPass.js', () => ({ UnrealBloomPass: stubs.Pass }));
 vi.mock('three/examples/jsm/postprocessing/OutputPass.js', () => ({ OutputPass: stubs.Pass }));
 
-import { AdditiveBlending, NormalBlending, type ShaderMaterial } from 'three';
+import { AdditiveBlending, NormalBlending, type Material, type ShaderMaterial } from 'three';
 import { AggregateRenderer } from '../src/render/AggregateRenderer';
 import { DAYLIGHT, DEEP_SPACE } from '../src/render/presets';
+import { NODE_FRAGMENT_SHADER, NODE_VERTEX_SHADER } from '../src/render/shaders';
+import { mergeSettings } from '../src/settings';
 import type { GraphData, GraphNode } from '../src/types';
 
-(globalThis as { window?: unknown }).window ??= { devicePixelRatio: 1 };
+vi.stubGlobal('window', { devicePixelRatio: 1 });
 
 const node = (id: string): GraphNode => ({
 	id, name: id, folderTop: 'concept', degree: 1, inDegree: 1, outDegree: 0, fileSize: 0, tags: [], unresolved: false, tag: false,
@@ -62,6 +64,7 @@ const positions = new Float32Array([0, 0, 0, 10, 0, 0]);
 const make = () => new AggregateRenderer({ appendChild(): void {} } as unknown as HTMLElement, 50);
 const material = (r: AggregateRenderer) => (r as unknown as { nodeMaterial: ShaderMaterial }).nodeMaterial;
 const glow = (r: AggregateRenderer) => material(r).uniforms['uGlow']?.value as number | undefined;
+const links = (r: AggregateRenderer) => (r as unknown as { linkMaterial: Material }).linkMaterial;
 
 describe('additive glow on the node material', () => {
 	//  Every open rebuilds the data once more, after the settings were applied —— GraphStore's first
@@ -107,3 +110,43 @@ describe('additive glow on the node material', () => {
 		expect(glow(r)).toBe(0);
 	});
 });
+
+//  A uniform the shader never declares is silently ignored by WebGL —— renaming `uGlow` in the GLSL alone kept every
+//  test above green while the glow path went dead (2026-09-26 round-2 review).  Every uniform the material sets must
+//  appear in the shader source.
+describe('node material uniforms', () => {
+	it('every uniform the material sets is declared in the shaders', () => {
+		const r = make();
+		r.setData(graph, positions);
+		const src = NODE_VERTEX_SHADER + NODE_FRAGMENT_SHADER;
+		for (const k of Object.keys(material(r).uniforms)) expect(src, k).toMatch(new RegExp(`uniform\\s+\\w+\\s+${k}\\b`));
+	});
+});
+
+//  Daylight has no bloom: the kallimachos preset's faint links need a floor there, and a slider at 0 must still mean none.
+describe('link opacity in daylight', () => {
+	it('never drops below the floor, unless the links are switched off', () => {
+		const r = make();
+		r.setData(graph, positions);
+		r.setLinkOpacity(0.02);
+		r.applyTokens(DAYLIGHT, 0);
+		expect(links(r).opacity).toBeGreaterThanOrEqual(0.045);
+		r.applyTokens(DEEP_SPACE, 0.3);
+		expect(links(r).opacity).toBeCloseTo(0.02, 5);
+		r.applyTokens(DAYLIGHT, 0);
+		r.setLinkOpacity(0);
+		expect(links(r).opacity).toBe(0);
+	});
+});
+
+//  Custom presets come from disk: anything but a real `true` is no glow, for every reader.
+describe('custom presets from disk', () => {
+	it('normalise additiveGlow to a boolean', () => {
+		const base = { id: 'custom-x', name: 'x', starfield: false, theme: 'kallimachos', space: {}, bloom: { strength: 0, radius: 0, threshold: 0 },
+			physics: { repel: 1, linkDistance: 1, linkStrength: 1, centerPull: 0, flatten: 0, coreGravity: 0, spiral: 0 },
+			look: { nodeSize: 1, linkOpacity: 0.1, linkCurve: 0, twinkle: 0, sizeBy: 'degree' } };
+		const s = mergeSettings({ customPresets: [{ ...base, additiveGlow: 'yes' }, { ...base, id: 'custom-y', additiveGlow: true }] });
+		expect(s.customPresets.map((p) => p.additiveGlow)).toEqual([false, true]);
+	});
+});
+

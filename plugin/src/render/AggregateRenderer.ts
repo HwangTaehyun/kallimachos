@@ -48,6 +48,8 @@ const FOCUS_FADE_S = 0.28;
  *  synthetic graph at the author's density (25,476 entities · 35,318 relations): higher and the dense
  *  cores fill in white, lower and the sparse edge of the cloud disappears. */
 const GLOW_GAIN = 0.5;
+/** The faintest link opacity daylight shows (see effectiveLinkOpacity). */
+const DAYLIGHT_LINK_FLOOR = 0.045;
 
 /**
  * The aggregate renderer: every node in 1× Points, every link in 1× LineSegments, the starfield
@@ -664,7 +666,11 @@ export class AggregateRenderer {
 	}
 
 	private effectiveLinkOpacity(): number {
-		const base = this.baseLinkOpacity * this.tokens.linkOpacityScale;
+		let base = this.baseLinkOpacity * this.tokens.linkOpacityScale;
+		//  Daylight has no bloom to carry a faint line: the kallimachos preset's 0.02 × 0.65 left one relation 1/255 off the
+		//  paper (2026-09-26 review, measured through the composer).  The floor is the faintest any other preset already
+		//  reaches there (minimal 0.07 × 0.65), so none of them change.  A slider set to 0 still means no lines.
+		if (this.tokens.lightMode && this.baseLinkOpacity > 0) base = Math.max(base, DAYLIGHT_LINK_FLOOR);
 		return this.focusActive ? base * 0.25 : base;
 	}
 
