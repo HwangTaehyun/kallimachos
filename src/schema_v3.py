@@ -256,15 +256,24 @@ def is_skipped(path):
 SKIP = SKIP_ANY + tuple(f"/{x}/" for x in SKIP_ROOT)
 
 SESSION_DIR = "raw/conversations/sessions/"   # distill_sessions.py output → origin='session'
+#  **The agents whose sessions become documents —— the one list.**  `SESSION_URI` below and
+#  `openwiki_emit.OWNED_LINE` are both built from it.  Each used to spell `claude|codex` itself, so
+#  a third agent had to be added in two places, and missing this one classifies every session of
+#  that agent as `vault` with nothing said —— the URI is well-formed either way.  (2026-09-25)
+#  ⚠ An allowlist, not a pattern.  `[a-z]+-session://` would make any note that writes
+#     `resource: evil-session://x` a session, and put `evil` into `documents.agent`.
+SESSION_AGENTS = ("claude", "codex", "hermes")
 #  The openwiki bundle records the same provenance as a URI in `sources[]` instead of a path.
 #  Matching it means the classification follows the document, not the directory it happens to sit in.
+#  Group 1 is the agent —— `session_agent()` reads it from there.
 #  ⚠ The `-` prefix matters.  `sources:` entries are equally valid as
 #     `  - resource: …` (the item starting on the same line) or as
 #     `  - id: …` / `    resource: …`.  This tool emits the second, so a regex
 #     anchored on `^\s*resource:` matched our own pages and would have missed any
 #     bundle written the other way —— a self-check written for this guard caught it
 #     before it mattered (2026-09-02).
-SESSION_URI = re.compile(r"^[ \t]*(?:-[ \t]+)?resource:[ \t]*\"?(?:claude|codex)-session://", re.M)
+SESSION_URI = re.compile(r"^[ \t]*(?:-[ \t]+)?resource:[ \t]*\"?(%s)-session://"
+                         % "|".join(map(re.escape, SESSION_AGENTS)), re.M)
 
 # ④ The types declared in the prompt.  Anything else the LLM invents folds in here.
 #    **Must match `lr_extract.ENTITY_TYPES`** —— a type missing here becomes "other".
@@ -400,6 +409,12 @@ def schemas(dim):
             pa.field("indexed_at", pa.int64()),
             # Curated notes vs documents distilled from sessions.  Searched together, trusted apart.
             pa.field("origin", pa.string()),         # vault | session
+            #  Which agent a session document came from —— one of `SESSION_AGENTS`, "" otherwise
+            #  (`session_agent()`).  It lived only in the note text, so "how many sessions of each
+            #  agent" had no answer short of re-reading every file.  (2026-09-25)
+            #  ⚠ An index built before this has no such column, and `sync_v3` only appends rows ——
+            #     it does not add one.  The next full build does.  Readers must tolerate its absence.
+            pa.field("agent", pa.string()),
             pa.field("doc_type", pa.string()),       # brain-ingest frontmatter ("" when absent)
             # ── Time axis (docs/TEMPORAL_DESIGN.md §2.1) ──
             # Why not mtime: it **differs from the frontmatter date in 355/374 cases (94.9%)**
@@ -564,10 +579,34 @@ def classify_origin(rel, raw):
        pipeline, so it fires in practice.  Same body-vs-frontmatter class as `owned()` in
        openwiki_emit and promote_distilled, which were both fixed for it.
     """
-    if rel.startswith(SESSION_DIR):
-        return "session"                       # the vault layout, kept for anything predating the bundle
+    #  The path arm stays unconditional —— the vault layout, kept for anything predating the bundle.
+    #  A page there is a session even when its agent is one `SESSION_AGENTS` does not name.
+    return "session" if rel.startswith(SESSION_DIR) or session_agent(rel, raw) else "vault"
+
+
+def session_agent(rel, raw):
+    """Which agent a session document came from —— one of `SESSION_AGENTS`, or `""`.
+
+    **The one definition of `documents.agent`.**  The full build and `sync_v3` both take their rows
+    from `scan_vault`, which calls this, and `classify_origin` rests on it, so "a session" and "a
+    session of agent X" cannot disagree.  (2026-09-25)
+
+    The frontmatter's session URI names the agent.  A page in the older vault layout
+    (`SESSION_DIR`, written by `promote_distilled`) has no URI —— only the flat `session_agent:`
+    key, and not even that before a second agent existed, when every session was Claude's (the
+    same default `okf_convert` writes).  Reading the URI alone would have counted every session
+    of such a vault under no agent at all.  A name outside the list is `""`, never a guess.
+    """
     m = FM_RE.match(raw)
-    return "session" if (m and SESSION_URI.search(m.group(1))) else "vault"
+    fm = m.group(1) if m else ""
+    u = SESSION_URI.search(fm)
+    if u:
+        return u.group(1)
+    if not rel.startswith(SESSION_DIR):
+        return ""
+    k = re.search(r"^session_agent:[ \t]*[\"']?([\w-]+)", fm, re.M)
+    a = k.group(1).lower() if k else "claude"
+    return a if a in SESSION_AGENTS else ""
 
 
 #  **The transmission gate, in one place.**  This exact regex was copied into six modules
@@ -864,7 +903,8 @@ def scan_vault(with_unreadable=False):
                     "size": st.st_size, "mtime": int(st.st_mtime),
                     "content_hash": hashlib.sha256(raw.encode()).hexdigest()[:16],
                     "indexed_at": int(time.time()),
-                    "origin": origin, "doc_type": m.group(1) if m else "",
+                    "origin": origin, "agent": session_agent(rel, raw),
+                    "doc_type": m.group(1) if m else "",
                     "doc_date": ddate, "date_src": dsrc, "no_llm": no_llm,
                     "doc_updated": dupd,
                     "_body": body}
@@ -1420,8 +1460,12 @@ def _main_index():
                                    "reason": "modified", "marked_at": now_ts})
             missing = [p_ for p_ in _snap if p_ not in {d["path"] for d in docs.values()}]
             if _drift or missing:
-                print(f"⚠ {len(_drift)} documents changed since extraction · {len(missing)} gone "
-                      f"— marking them stale (the next refresh_kg re-extracts them)")
+                #  Only the changed ones are marked: a gone page has nothing to re-extract, and its facts
+                #  stay until its lr_cache lines go (`just reset extract`) —— the old message said both
+                #  were marked (review round 6; the purge itself is a follow-up).
+                print(f"⚠ {len(_drift)} documents changed since extraction —— marked stale (the next "
+                      f"refresh_kg re-extracts them) · {len(missing)} gone —— not marked; their facts stay "
+                      f"until their lr_cache lines are removed (`just reset extract`)")
         else:
             #  Saying only "an old lr_kg.json" makes a new-vault user who has **not yet run**
             #  the extraction read it as "are my files stale".  The two cases are said apart.
@@ -1839,6 +1883,33 @@ def _selftest():
     assert classify_origin("personal/wiki/x.md", "---\ntitle: t\n---\n" + "x" * 3000
                            + "\nresource: claude-session://z\n") == "vault"
 
+    #  ── which agent: one list, an allowlist, and `session_agent` is its only reader ──────────
+    #  The alternation knew `claude|codex` only, so a Hermes session page was indexed as `vault`
+    #  and nothing said so.  Every agent, in both `sources[]` spellings.  (2026-09-25)
+    #  Spelled out rather than `SESSION_AGENTS` —— looping over the list under test cannot notice
+    #  an agent dropped from it.
+    for _a in ("claude", "codex", "hermes"):
+        for _src in ('  - resource: "%s-session://abc"\n', '  - id: "s1"\n    resource: "%s-session://abc"\n'):
+            _d = "---\ntitle: s\nsources:\n" + _src % _a + "---\nb\n"
+            assert classify_origin("personal/sessions/x.md", _d) == "session", f"a {_a} session is called vault"
+            assert session_agent("personal/sessions/x.md", _d) == _a, \
+                f"a {_a} session got agent {session_agent('personal/sessions/x.md', _d)!r}"
+    #  …and a scheme outside the list is not a session, whatever it looks like.
+    _evil = '---\ntitle: n\nsources:\n  - resource: "evil-session://x"\n---\nb\n'
+    assert classify_origin("personal/wiki/x.md", _evil) == "vault", "an unknown scheme made a session"
+    assert session_agent("personal/wiki/x.md", _evil) == "", "an unknown scheme became an agent"
+    #  The older layout has no URI: the flat key, absent = Claude, unknown = "" (still a session).
+    _leg = "raw/conversations/sessions/x.md"
+    assert session_agent(_leg, "---\ntitle: t\nsession_agent: codex\n---\nb") == "codex", \
+        "an older-layout page lost the agent its session_agent key names"
+    assert session_agent(_leg, "---\ntitle: t\n---\nb") == "claude", "a pre-Codex page lost its agent"
+    assert session_agent(_leg, "---\ntitle: t\nsession_agent: evil\n---\nb") == "", "the key bypassed the list"
+    assert classify_origin(_leg, "---\ntitle: t\nsession_agent: evil\n---\nb") == "session", \
+        "an older-layout page stopped being a session because its agent is unknown"
+    #  …and outside that layout the key alone is not provenance, the same as for origin.
+    assert session_agent("personal/wiki/x.md", "---\ntitle: t\nsession_agent: codex\n---\nb") == "", \
+        "a session_agent key outside the older layout was taken for provenance"
+
     # ── The rebuild must refuse to replace a populated DB with nothing ──────────────────
     #  ⚠ Run as a **subprocess against the real entry point**, not by calling the comparison.
     #     `promote_distilled`'s shrink guard was tested by calling the predicate, and replacing
@@ -1959,6 +2030,32 @@ def _selftest():
         assert _rows["open.md"]["no_llm"] is False, "an open document must not be gated by the path rule"
     globals()["SKIP_EXTRA"], _lx.NO_LLM, globals()["VAULT"] = _keep
     print("  ✅ KAL_NO_LLM reaches documents.no_llm at index time (the one gate every reader uses)")
+    # ── `agent` reaches the row, and the row is exactly the schema ──────────────────────────
+    #  `scan_vault` is the one row builder: the full build writes its rows, `sync_v3` appends them.
+    with _tf.TemporaryDirectory() as _sd:
+        os.makedirs(os.path.join(_sd, SESSION_DIR))
+        for _name, _fm in (("h.md", 'sources:\n  - id: "s1"\n    resource: "hermes-session://abc"\n'),
+                           ("e.md", 'sources:\n  - resource: "evil-session://x"\n'),
+                           (SESSION_DIR + "l.md", "session_agent: codex\n"),
+                           ("n.md", "")):
+            open(os.path.join(_sd, _name), "w", encoding="utf-8").write(
+                "---\ntitle: t\n" + _fm + "---\n" + "body " * 40 + "\n")
+        globals()["VAULT"] = _sd
+        globals()["SKIP_EXTRA"] = _clean_pathspec("")
+        _lx.NO_LLM = _clean_pathspec("")
+        _rows = {r["path"]: r for r in scan_vault().values()}
+    globals()["SKIP_EXTRA"], _lx.NO_LLM, globals()["VAULT"] = _keep
+    for _p, _want in (("h.md", ("session", "hermes")), ("e.md", ("vault", "")),
+                      (SESSION_DIR + "l.md", ("session", "codex")), ("n.md", ("vault", ""))):
+        assert (_rows[_p]["origin"], _rows[_p].get("agent")) == _want, \
+            f"{_p}: origin/agent {(_rows[_p]['origin'], _rows[_p].get('agent'))} ≠ {_want}"
+    #  lancedb refuses a row that disagrees with the table in either direction, but only in a real
+    #  build (the full build dies, sync dies after it has deleted).  This says so without one.
+    _cols = {f.name for f in schemas(4)["documents"]}
+    assert set(_rows["h.md"]) - {"_body"} == _cols, \
+        f"scan_vault rows and the documents schema disagree: {sorted((set(_rows['h.md']) - {'_body'}) ^ _cols)}"
+    print("  ✅ documents.agent —— claude · codex · hermes from the URI, the older layout's key, "
+          "an unknown scheme is vault, and the row is exactly the schema")
 
     print("  ✅ present-but-unreadable counts as not indexable, and is counted separately")
 

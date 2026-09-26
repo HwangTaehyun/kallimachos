@@ -49,7 +49,9 @@ import pyarrow.compute as pc
 #  Columns of a gated `documents` row that are blanked (strings) or zeroed (numbers).  Anything not
 #  listed —— `doc_id`, `no_llm`, and any column added later —— is kept, so a new column that carries
 #  text would leak until it is added here.  The self-check below pins the set against the live schema.
-GATED_BLANK = ("path", "abs_path", "title", "folder", "content_hash", "origin", "doc_type",
+#  `agent` says what `origin` says —— that a gated document is a session, and whose —— so it is
+#  blanked with it.  (2026-09-25)
+GATED_BLANK = ("path", "abs_path", "title", "folder", "content_hash", "origin", "agent", "doc_type",
                "doc_date", "date_src", "doc_updated")
 GATED_ZERO = ("size", "mtime", "indexed_at")
 GATED_KEEP = ("doc_id", "no_llm")
@@ -165,13 +167,14 @@ def _selftest():
         "doc_id": pa.array([1, 2], pa.int64()), "path": ["ok.md", "Private/secret.md"],
         "abs_path": ["/home/u/v/ok.md", "/home/u/v/Private/secret.md"], "title": ["ok", "SECRET TITLE"],
         "folder": [".", "Private"], "size": pa.array([10, 20], pa.int64()), "mtime": pa.array([1, 2], pa.int64()),
-        "content_hash": ["h1", "h2"], "indexed_at": pa.array([1, 2], pa.int64()), "origin": ["vault", "vault"],
+        "content_hash": ["h1", "h2"], "indexed_at": pa.array([1, 2], pa.int64()), "origin": ["session", "session"],
+        "agent": ["claude", "hermes"],
         "doc_type": ["", "diary"], "doc_date": ["", "2026-01-01"], "date_src": ["none", "fm"],
         "no_llm": [False, True], "doc_updated": ["", "2026-01-02"]}))
     db.create_table("chunks", data=pa.table({
         "chunk_id": pa.array([10000, 20000, 20001], pa.int64()), "doc_id": pa.array([1, 2, 2], pa.int64()),
         "seq": pa.array([0, 0, 1], pa.int32()), "char_start": pa.array([0, 0, 500], pa.int32()),
-        "text": ["public text", "SECRET BODY ONE", "SECRET BODY TWO"], "origin": ["vault"] * 3,
+        "text": ["public text", "SECRET BODY ONE", "SECRET BODY TWO"], "origin": ["session"] * 3,
         "vector": pa.array([[0.1] * 4] * 3, vec)}))
     db.create_table("ix_doclen", data=pa.table({"chunk_id": pa.array([10000, 20000, 20001], pa.int64()),
                                                   "num_tokens": pa.array([2, 3, 3], pa.int32())}))
@@ -183,8 +186,8 @@ def _selftest():
     db.open_table("documents").add(pa.table({
         "doc_id": pa.array([3], pa.int64()), "path": ["Finance/tax.md"], "abs_path": ["/home/u/v/Finance/tax.md"], "title": ["TAX"],
         "folder": ["Finance"], "size": pa.array([5], pa.int64()), "mtime": pa.array([3], pa.int64()), "content_hash": ["h3"],
-        "indexed_at": pa.array([3], pa.int64()), "origin": ["vault"], "doc_type": [""], "doc_date": [""], "date_src": ["none"],
-        "no_llm": [False], "doc_updated": [""]}))
+        "indexed_at": pa.array([3], pa.int64()), "origin": ["vault"], "agent": [""], "doc_type": [""], "doc_date": [""],
+        "date_src": ["none"], "no_llm": [False], "doc_updated": [""]}))
     db.open_table("chunks").add(pa.table({
         "chunk_id": pa.array([30000], pa.int64()), "doc_id": pa.array([3], pa.int64()), "seq": pa.array([0], pa.int32()),
         "char_start": pa.array([0], pa.int32()), "text": ["TAX BODY"], "origin": ["vault"], "vector": pa.array([[0.1] * 4], vec)}))
@@ -205,6 +208,10 @@ def _selftest():
         and d[2]["doc_date"] == "" and d[2]["folder"] == "", f"gated row not scrubbed: {d[2]}"
     assert d[1]["abs_path"] == "" and d[2]["abs_path"] == "", "abs_path must be blank for every row"
     assert d[1]["path"] == "ok.md" and d[1]["title"] == "ok", "a normal row must be untouched"
+    #  Which agent a gated document came from is the same kind of fact as its origin —— both go.
+    #  And an open row keeps its own, or blanking the column everywhere would pass.  (2026-09-25)
+    assert d[2]["agent"] == "" and d[2]["origin"] == "", f"a gated row still says whose session it was: {d[2]}"
+    assert d[1]["agent"] == "claude", f"an open row lost its agent: {d[1]}"
     chunks = out.open_table("chunks").to_arrow().to_pylist()
     assert [c["chunk_id"] for c in chunks] == [10000], f"gated chunks must be gone: {chunks}"
     assert "SECRET" not in " ".join(c["text"] for c in chunks) and "TAX" not in " ".join(c["text"] for c in chunks)
@@ -231,7 +238,7 @@ def _selftest():
     except SystemExit as e:
         assert "not empty" in str(e)
     shutil.rmtree(t)
-    print("  ✅ export_cloud self-check —— gated row kept but scrubbed · its chunks/postings gone · abs_path blank · "
+    print("  ✅ export_cloud self-check —— gated row kept but scrubbed (origin · agent too) · its chunks/postings gone · abs_path blank · "
           "vault_path gone · FTS rebuilt · schema columns all classified · non-empty destination refused")
 
 

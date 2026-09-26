@@ -234,21 +234,72 @@ def _selftest():
     #  The shape an Obsidian rename leaves behind.
     os.remove(os.path.join(_v, "victim.md"))
     os.symlink(os.path.join(_v, "moved-away.md"), os.path.join(_v, "victim.md"))
+    #  Session documents arriving through **this** path, which writes its own rows —— `agent` must
+    #  come out the same as in the full build (`schema_v3.session_agent`).  (2026-09-25)
+    _sess = {"h.md": ('sources:\n  - id: "s1"\n    resource: "hermes-session://abc"\n', ("session", "hermes")),
+             "c.md": ('sources:\n  - resource: "codex-session://abc"\n', ("session", "codex")),
+             "e.md": ('sources:\n  - resource: "evil-session://x"\n', ("vault", "")),
+             "raw/conversations/sessions/l.md": ("", ("session", "claude"))}
+    os.makedirs(os.path.join(_v, "raw", "conversations", "sessions"))
+    for _n, (_fm, _) in _sess.items():
+        open(os.path.join(_v, _n), "w", encoding="utf-8").write(
+            f"---\ntitle: {_n}\n{_fm}---\n" + "본문 " * 40 + "\n")
     _r2 = _sp.run([sys.executable, os.path.join(_here, "sync_v3.py")],
                   env=_env, capture_output=True, text=True)
-    _left = _lc2.connect(_dbp).open_table("documents").count_rows()
-    assert _left == 2, (
-        f"sync deleted a document whose file is present but unreadable —— {_left} left of 2.\n"
-        f"{_r2.stdout[-400:]}")
+    _docs = {r["path"]: r for r in _lc2.connect(_dbp).open_table("documents").search().limit(99).to_list()}
+    assert "victim.md" in _docs, (
+        f"sync deleted a document whose file is present but unreadable.\n{_r2.stdout[-400:]}")
+    assert set(_docs) == {"keep.md", "victim.md", *_sess}, \
+        f"sync did not add the new documents: {sorted(_docs)}\n{(_r2.stdout + _r2.stderr)[-400:]}"
+    for _n, (_, _want) in _sess.items():
+        assert (_docs[_n]["origin"], _docs[_n].get("agent")) == _want, \
+            f"sync wrote {_n} as origin/agent {(_docs[_n]['origin'], _docs[_n].get('agent'))} ≠ {_want}"
     #  …and it has to **say so**, or the rescue is itself a silent behaviour.
     assert "could not be read" in _r2.stdout, \
         f"the unreadable file was rescued without a word: {_r2.stdout[-300:]}"
+
+    #  ── An index built before `documents.agent` existed ──────────────────────────────────
+    #  Sync appends and does not add a column, and lancedb refused the whole batch **after** the delete
+    #  —— the new document never landed and the touched ones vanished (measured 2026-09-25).  It must
+    #  carry on without the column, and say the full build is what adds it.
+    _lc2.connect(_dbp).open_table("documents").drop_columns(["agent"])
+    open(os.path.join(_v, "h2.md"), "w", encoding="utf-8").write(
+        '---\ntitle: h2\nsources:\n  - resource: "hermes-session://def"\n---\n' + "본문 " * 40 + "\n")
+    #  …and an edited one, which is the row the old order deleted and never put back.
+    open(os.path.join(_v, "c.md"), "w", encoding="utf-8").write(
+        f"---\ntitle: c.md\n{_sess['c.md'][0]}---\n" + "바뀐 본문 " * 40 + "\n")
+    _r3 = _sp.run([sys.executable, os.path.join(_here, "sync_v3.py")],
+                  env=_env, capture_output=True, text=True)
+    _docs3 = {r["path"] for r in _lc2.connect(_dbp).open_table("documents").search().limit(99).to_list()}
+    assert _r3.returncode == 0 and {"h2.md", "victim.md", *_sess} <= _docs3, (
+        f"sync on an index without documents.agent refused or lost documents (exit {_r3.returncode}, "
+        f"{sorted(_docs3)}):\n{(_r3.stdout + _r3.stderr)[-400:]}")
+    assert "documents.agent" in _r3.stdout and "just index" in _r3.stdout, \
+        f"the missing column was tolerated without a word: {_r3.stdout[-300:]}"
+    #  …but only `agent`.  Any other missing column stops the sync before a single row is deleted.
+    _lc2.connect(_dbp).open_table("documents").drop_columns(["no_llm"])
+    _before = sorted(r["path"] for r in _lc2.connect(_dbp).open_table("documents").search().limit(99).to_list())
+    open(os.path.join(_v, "c.md"), "w", encoding="utf-8").write(
+        f"---\ntitle: c.md\n{_sess['c.md'][0]}---\n" + "또 바뀐 본문 " * 40 + "\n")
+    _r4 = _sp.run([sys.executable, os.path.join(_here, "sync_v3.py")],
+                  env=_env, capture_output=True, text=True)
+    _after = sorted(r["path"] for r in _lc2.connect(_dbp).open_table("documents").search().limit(99).to_list())
+    assert _r4.returncode != 0 and "documents.no_llm" in (_r4.stdout + _r4.stderr), \
+        f"a sync wrote rows without the no_llm column (exit {_r4.returncode}): {(_r4.stdout + _r4.stderr)[-300:]}"
+    assert _after == _before, f"the refused sync still deleted rows: {sorted(set(_before) - set(_after))}"
     _sh2 = __import__("shutil")
     _sh2.rmtree(_v, ignore_errors=True)
     _sh2.rmtree(_h, ignore_errors=True)
     print("  ✅ sync_v3 self-check —— a dangling symlink is not a deletion (and it says so)")
+    print("  ✅ sync_v3 self-check —— documents.agent as the full build writes it (claude · codex · "
+          "hermes · an unknown scheme is vault), and an index without the column still syncs, saying so "
+          "—— any other missing column stops it before a row is deleted")
 
     print("  ✅ sync_v3 self-check —— a different model stops the incremental path (no space mixing)")
+
+
+#  The columns a sync may find missing and still write around —— see the note in `sync()`.
+LATE_COLUMNS_TOLERATED = {"agent"}
 
 
 def sync(dry_run=False):
@@ -321,11 +372,31 @@ def sync(dry_run=False):
     t0 = time.time()
     # 1) documents
     T = db.open_table("documents")
+    #  ⚠ **Only the columns this table has.**  Sync deletes and appends rows in the table the last full
+    #     build wrote and never rewrites it, so it does not add a column (lancedb could —— `add_columns`
+    #     —— but a column filled for touched rows only would be a half-truth) —— and lancedb refuses the whole batch when a row
+    #     carries one the table lacks (`ValueError: … field 'agent' does not exist in table schema`,
+    #     lancedb 0.37.1).  That refusal came **after** the delete below: the touched documents dropped
+    #     out of the index, and every later sync hit the same wall until a full build.  Measured
+    #     2026-09-25 when `documents.agent` was added —— every index built before it was one such table.
+    #     The new column is left out, and said so; the next full build writes it for every row.
+    #  ⚠ **Only `agent` may be missing** (impl round 1, 2026-09-26).  It is the one column added after
+    #     indexes already existed, and readers treat its absence as "unknown".  Any other missing column
+    #     could be a gate (`no_llm`) or a field a reader relies on, and writing the row without it would
+    #     be a fail-open —— so that stops here, **before** the delete below touches anything.
+    have = set(T.schema.names)
+    late = sorted({k for x in touched for k in docs[x]} - have - {"_body"})
+    if set(late) - LATE_COLUMNS_TOLERATED:
+        raise SystemExit(f"  ❌ this index lacks documents.{', documents.'.join(sorted(set(late) - LATE_COLUMNS_TOLERATED))} "
+                         f"—— sync does not add columns.  Run a full build first: `just index`")
+    if late:
+        print(f"  ⚠ this index predates documents.{', documents.'.join(late)} —— sync does not add a "
+              f"column, so it stays missing until a full build (`just index`)")
     if gone:
         T.delete(f"doc_id IN ({','.join(str(x) for x in gone)})")
     if touched:
         T.delete(f"doc_id IN ({','.join(str(x) for x in touched)})")
-        T.add([{k: v for k, v in docs[x].items() if k != "_body"} for x in touched])
+        T.add([{k: v for k, v in docs[x].items() if k in have} for x in touched])
     print(f"  documents     deleted {len(gone)} · upserted {len(touched)}   {time.time()-t0:.1f}s")
 
     # 2) chunks — only the targets are re-chunked and re-embedded

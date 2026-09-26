@@ -64,7 +64,10 @@ def vault():
     except OSError:
         pass
 
-    if "--selftest" in sys.argv:
+    #  Any self-test flag —— `--selftest`, and the `--selftest-static` that CI runs.  Matching the
+    #  one spelling exactly let `kal_mcp.py --selftest-static` die here on any machine without a
+    #  vault configured, CI included, and `just` stops at the first failure (impl round 2).
+    if any(a.startswith("--selftest") for a in sys.argv[1:]):
         #  ⚠ It must be **the same value within one process**.  Handing out a fresh temporary
         #     folder each time makes `lr_extract` and `schema_v3` look at different vaults and
         #     breaks the "extraction scope == indexing scope" assertion (measured 2026-08-25:

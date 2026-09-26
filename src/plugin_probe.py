@@ -28,8 +28,8 @@ import sys
 import time
 from frontmatter import FM_RE
 
-#  The 5 MCP tools.  Missing one breaks the selection rules of the skill (`skills/kal-recall`).
-EXPECT_TOOLS = {"kal_search", "kal_entity", "kal_timeline", "kal_neighbors", "kal_doc"}
+#  The 6 MCP tools.  Missing one breaks the selection rules of the skill (`skills/kal-recall`).
+EXPECT_TOOLS = {"kal_search", "kal_entity", "kal_timeline", "kal_neighbors", "kal_doc", "kal_stats"}
 PROTOCOL = "2025-06-18"
 
 

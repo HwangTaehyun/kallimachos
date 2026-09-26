@@ -16,7 +16,7 @@ description: |
 
 ## What it is
 
-Searches a personal knowledge base through the five tools the `kal` MCP server exposes. What
+Searches a personal knowledge base through the six tools the `kal` MCP server exposes. What
 makes it different from a web search is that **the sources always ride along in the response** —
 you never have to look them up separately in order to cite.
 
@@ -28,6 +28,7 @@ know the name, want to confirm what it is  →  kal_entity(name)
 "when did it change"                   →  kal_timeline(name)
 "what is it connected to"              →  kal_neighbors(name)
 going to the source to verify a quote  →  kal_doc(doc_id)
+what is in here, and how fresh is it    →  kal_stats()
 ```
 
 If `kal_search` and `kal_entity` blur together, split on **do you know the exact name**. If not,

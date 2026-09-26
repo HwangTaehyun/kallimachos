@@ -811,5 +811,10 @@ if __name__ == "__main__":
     #  result the user should see.  (refresh_kg's `--check` is the opposite: cron uses it as a
     #   probe in `--check || refresh_kg`, so recording a failure there would be a false alarm.)
     from run_log import record
-    with record("verify"):
+    #  A self-test is not a run of this step —— recording it put fake successes in the user's run
+    #  history, shown by the web UI as real runs (independent mutation audit, 2026-09-26).
+    if "--selftest" in sys.argv:
         _main_verify()
+    else:
+        with record("verify"):
+            _main_verify()

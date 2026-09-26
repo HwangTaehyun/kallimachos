@@ -27,7 +27,7 @@ Undo:  git -C <vault> revert --no-edit <sha>
        (reset --hard is deliberately not suggested —— it destroys unstaged work too)
 """
 import vault_path
-import os, re, glob, shutil, argparse, collections, datetime, subprocess
+import os, re, sys, glob, shutil, argparse, collections, datetime, subprocess
 from frontmatter import FM_RE
 
 
@@ -572,5 +572,10 @@ if __name__ == "__main__":
     # Record the run under ~/.kal/runs/ —— the web screen's "last run" only knew about runs
     # started from the web UI, so a CLI success still showed yesterday's failure as the last.
     from run_log import record
-    with record("promote"):
+    #  A self-test is not a run of this step —— recording it put fake successes in the user's run
+    #  history, shown by the web UI as real runs (independent mutation audit, 2026-09-26).
+    if "--selftest" in sys.argv:
         _main_promote()
+    else:
+        with record("promote"):
+            _main_promote()
