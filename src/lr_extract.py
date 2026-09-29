@@ -17,7 +17,7 @@ Running it: there are no API credits, so calls go through the claude CLI (subscr
 """
 import vault_path
 import unicodedata
-import collections, hashlib, json, os, re, subprocess, sys, threading, time
+import argparse, collections, hashlib, json, os, re, subprocess, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from entity_resolve import build_canon, name_stats, split_sense
 from schema_v3 import doc_meta, effective_date
@@ -423,7 +423,7 @@ def call(chunk):
             #   document stayed entity-less forever.  It did not show in the failed-chunk count
             #   either.  An empty array is legitimate (some chunks have no entities) —— only a
             #   missing key counts as failure.  (adversarial review 2026-08-18, BLOCKER)
-            if not isinstance(d.get("entities"), list) or not isinstance(d.get("relationships"), list):
+            if not valid_shape(d):
                 continue
             return {"doc": chunk["doc"], "idx": chunk["idx"], "h": chunk["h"],
                     # Which prompt produced this.  Part of the reuse key —— edit the prompt and
@@ -970,57 +970,250 @@ def check_scope():
     return 1
 
 
-def _main_extract():
-    if "--check-scope" in sys.argv:
-        raise SystemExit(check_scope())
-    import threading
-    restart = "--restart" in sys.argv
-    args = [x for x in sys.argv[1:] if not x.startswith("--")]
+def _load_cache_lines():
+    """Load lr_cache.jsonl as [(seq, row), ...] in file order (append order).
+
+    `seq` is the line's position in the file — pick_current() needs it to pick the
+    **most-recently-appended** line for a (doc, idx, h, pv) group.  dict insertion order keeps
+    the *first*-seen key, not the last write, so building a plain dict here would silently
+    prefer the wrong line whenever the same chunk has been (re-)extracted by more than one
+    model (§4 BLOCKER, round 4 review).
+    """
+    lines = []
+    if not os.path.exists(CACHE):
+        return lines
+    for seq, line in enumerate(open(CACHE, encoding="utf-8")):
+        try:
+            r = json.loads(line)
+            if "h" not in r:      # old cache lines with no h → not trusted
+                continue
+            r.setdefault("pv", "")
+            r.setdefault("model", "haiku")
+            if _valid_cache_row(r):
+                lines.append((seq, r))
+        except Exception:
+            pass
+    return lines
+
+
+def _done_key(chunk):
+    """pending-check identity — leaves model out on purpose.  cache_key() (the **storage** key,
+    §7) still includes model so haiku and agent:* lines never overwrite each other in the cache
+    file; this only asks "has this chunk been extracted, by *any* model, under the current
+    prompt version".
+    """
+    return (chunk["doc"], chunk["idx"], chunk["h"], PROMPT_VERSION)
+
+
+def _valid_cache_row(row):
+    return (valid_shape(row) and not row.get("failed")
+            and isinstance(row.get("doc"), str) and bool(row["doc"])
+            and type(row.get("idx")) is int and row["idx"] >= 0
+            and isinstance(row.get("h"), str) and bool(row["h"])
+            and isinstance(row.get("pv", ""), str)
+            and isinstance(row.get("model", "haiku"), str)
+            and bool(row.get("model", "haiku")))
+
+
+def pick_current(lines):
+    """Given _load_cache_lines() output, pick one row per (doc, idx, h, pv) group — the row with
+    the largest `seq` (the most recently appended one).  All consumers that need "the current
+    line for this chunk" (CLI `results`, `finish()`, `group_nodes` merge) call this one function
+    so they agree —— see §4 for why dict-insertion-order picking silently chose the wrong model's
+    line when several models wrote lines for the same chunk.
+    """
+    best = {}
+    for seq, r in lines:
+        if not _valid_cache_row(r):
+            continue
+        g = (r["doc"], r["idx"], r["h"], r.get("pv", ""))
+        if g not in best or seq > best[g][0]:
+            best[g] = (seq, r)
+    return {g: r for g, (seq, r) in best.items()}
+
+
+def pending_extraction(reextract_model=None):
+    """The list of chunks still awaiting extraction.  All of collect()'s chunks, minus the ones
+    that already have a cache line from **any** model (unless reextract_model narrows that).
+
+    status.py ④ · refresh_kg.py · kal_extract_begin (kal_mcp.py) all call this **one** function —
+    three separate "is it pending" judgements is how this codebase's new-document gap happened
+    in the first place (see DESIGN-EXTRACT-MCP.md §1).
+
+    reextract_model: if given, only that model's lines count as "done" — every other model's
+        line is treated as absent, forcing a full re-extraction under that model.
+        `lr_extract.py --reextract-model <name>` sets this.  None (default) is model-agnostic —
+        any model's line finishes the chunk.
+    """
     cs = collect()
-    limit = int(args[0]) if args else len(cs)
+    cached = _load_cache_lines()
+    if reextract_model is not None:
+        cached = [(seq, row) for seq, row in cached
+                  if isinstance(row, dict) and row.get("model", "haiku") == reextract_model]
+    done = set(pick_current(cached))
+    todo = [c for c in cs if _done_key(c) not in done]
+    return {"total_chunks": len(cs), "pending_chunks": todo,
+            "pending_count": len(todo), "doc_count": len({c["doc"] for c in cs})}
+
+
+def valid_shape(d):
+    """The shape check `call()` already does inline — pulled out so kal_mcp's submit tool can
+    reuse the exact same rule instead of re-implementing it (§8 — two shape checks drifting
+    apart is this repo's recurring failure mode).
+
+    Beyond "entities/relationships are lists": every item must be a dict with its required
+    fields as strings — an agent (unlike the CLI's own `claude_cli_run` -> json.loads path)
+    can submit anything JSON-serializable, and group_nodes()/cap_shape() call `.get()`/index
+    on each item, so a bare `1` or `"x"` in the list crashes finish() instead of failing shape
+    (code review round 1, MAJOR)."""
+    if not (isinstance(d, dict) and isinstance(d.get("entities"), list) and isinstance(d.get("relationships"), list)):
+        return False
+    for e in d["entities"]:
+        if not isinstance(e, dict) or not isinstance(e.get("name"), str):
+            return False
+    for x in d["relationships"]:
+        if not (isinstance(x, dict) and isinstance(x.get("source"), str) and isinstance(x.get("target"), str)):
+            return False
+    return True
+
+
+def cap_shape(d):
+    """Enforce SYS rule 10 (<=20 entities, <=25 relationships) by force.  Extra items are
+    dropped, not treated as a failure — the response just did not follow the prompt's own cap,
+    it is not unusable.
+
+    Also drops any non-dict item outright rather than caching it — defense in depth alongside
+    valid_shape() (code review round 1, MAJOR): a caller that skips valid_shape() must not be
+    able to poison lr_cache.jsonl with something group_nodes() cannot read back."""
+    ents = [_cap_item(e) for e in d["entities"] if isinstance(e, dict)][:20]
+    rels = [_cap_item(x) for x in d["relationships"] if isinstance(x, dict)][:25]
+    return {**d, "entities": ents, "relationships": rels}
+
+
+#  ⚠ Size, not just count.  Capping to 20/25 items still let one agent submit 50MB strings: a single
+#     kal_extract_submit appended 1,000,001,166 bytes to lr_cache.jsonl in 4.3 s (code review round 2,
+#     2026-09-27).  Scalars only, bounded length, bounded key count —— the worst case per chunk is now
+#     45 items x 12 keys x 2,000 chars ≈ 1 MB, and a real haiku line is a few KB.
+_ITEM_KEYS = 12
+_FIELD_CHARS = 2000
+
+
+def ledger_source_of(doc):
+    """Best-effort (source_type, source_id) for a vault-relative path, for the extraction
+    ledger row (DESIGN-GITHUB-SYNC.md §3.2/§3.3 — the "extract" writer, shared by this file's own
+    CLI `main()` and kal_extract_mcp.kal_extract_finish so the two extraction paths do not each
+    guess origin their own way).  Reuses schema_v3's own origin classification; falls back to
+    "obsidian" (never raises) if the file cannot be re-read at write time."""
+    try:
+        import schema_v3
+        raw = open(os.path.join(VAULT, doc), encoding="utf-8", errors="ignore").read()
+        origin = schema_v3.classify_origin(doc, raw)
+        if origin == "session":
+            return f"{schema_v3.session_agent(doc, raw) or 'claude'}_session", doc
+        return schema_v3.LEDGER_SOURCE_TYPE.get(origin, "obsidian"), doc
+    except Exception:
+        return "obsidian", doc
+
+
+def _cap_item(item):
+    out = {}
+    for k, v in list(item.items())[:_ITEM_KEYS]:
+        if isinstance(v, str):
+            out[str(k)[:64]] = v[:_FIELD_CHARS]
+        elif isinstance(v, (int, float, bool)) or v is None:
+            out[str(k)[:64]] = v
+    return out
+
+
+def write_kg(ents, rels, allow_shrink=False, extra=None):
+    """The shrink-guarded writer of lr_kg.json — pulled out of _main_extract so kal_mcp's
+    kal_extract_finish tool calls the **same** function instead of re-implementing the guard
+    (§5 finish).  Raises SystemExit on refusal, same as the CLI always has.
+
+    extra: additional top-level fields to merge into the written record (the CLI adds
+    "chunks"/"failed"; kal_extract_finish leaves it out — those counts belong to its own
+    job-file stats, §5).
+
+    Returns the record actually written.
+    """
+    _prior = 0
+    if os.path.exists(OUT):
+        try:
+            _prior = len(json.load(open(OUT, encoding="utf-8")).get("entities") or [])
+        except Exception as e:
+            raise SystemExit(f"❌ cannot read the existing {OUT} to compare, so refusing to "
+                             f"overwrite it: {e}\n   Move it aside if it is corrupt.")
+    if _prior and len(ents) < _prior * KG_SHRINK_RATIO and not allow_shrink:
+        raise SystemExit(
+            f"❌ this run produced {len(ents):,} entities but {OUT} holds {_prior:,} —— "
+            f"writing it would throw away {_prior - len(ents):,}.\n"
+            f"   VAULT={VAULT}\n"
+            f"   If the vault really shrank, pass --allow-shrink.  If it looks empty, check "
+            f"KAL_VAULT before anything else —— that is what this has always been.")
+    record = {"entities": ents, "relationships": rels,
+              "doc_hashes": dict(DOC_HASHES),
+              "extracted_at": int(time.time())}
+    if extra:
+        record.update(extra)
+    json.dump(record, open(OUT, "w"), ensure_ascii=False, indent=1)
+    return record
+
+
+def _main_extract():
+    parser = argparse.ArgumentParser(description="Extract the vault's knowledge graph")
+    parser.add_argument("limit", nargs="?", type=int)
+    parser.add_argument("--check-scope", action="store_true")
+    parser.add_argument("--restart", action="store_true")
+    parser.add_argument("--reextract-model")
+    parser.add_argument("--no-summary", action="store_true")
+    parser.add_argument("--allow-shrink", action="store_true")
+    args = parser.parse_args()
+    if args.limit is not None and args.limit < 0:
+        parser.error("limit must be nonnegative")
+    if args.reextract_model is not None and not args.reextract_model.strip():
+        parser.error("--reextract-model requires a nonempty model name")
+    if args.check_scope:
+        raise SystemExit(check_scope())
+    global MODEL
+    previous_model = MODEL
+    try:
+        if args.reextract_model is not None:
+            MODEL = args.reextract_model
+        return _run_extract(args)
+    finally:
+        MODEL = previous_model
+
+
+def _run_extract(args):
+    import threading
+    restart = args.restart
+    cs = collect()
+    limit = args.limit if args.limit is not None else len(cs)
     cs = cs[:limit]
 
     # Resume — a per-chunk cache.  Restarting a 2-hour run from scratch is not affordable.
     # Keyed on (document, chunk index).  When a document's content changes, --restart clears it.
-    cached, results = {}, []
     if restart and os.path.exists(CACHE):
         os.remove(CACHE)
-    if os.path.exists(CACHE):
-        for line in open(CACHE, encoding="utf-8"):
-            try:
-                r = json.loads(line)
-                # Old cache lines have no h → not trusted, re-extracted
-                if "h" in r:
-                    # Lines with a different prompt version are **not reused** (see key below).
-                    # They still go into the dict —— the history calculation below reads them.
-                    #  ⚠ **This must have the same shape as `cache_key()`.**  It stored a
-                    #     4-tuple while lookups used a 5-tuple —— tuples of different length
-                    #     are never equal, so **the hit rate was 0**.
-                    #     Measured (2026-08-28): 0 hits out of 905 chunks; the cache's 2,773
-                    #     lines and 17.4MB were dead weight.  An extraction meant to be
-                    #     incremental called the LLM 905 times a run —— 89 minutes by the log.
-                    #     I added MODEL to `cache_key` (929b109) and never fixed this side,
-                    #     and the self-check passed because it only looked for `MODEL in _k`.
-                    #     **There was no round-trip (write then read) test.**
-                    #
-                    #  ⚠ Old lines carry no `model`.  `MODEL` is the single hardcoded constant
-                    #     `"haiku"` with no environment override, so those lines are certainly
-                    #     haiku output too.  Hence they are filled with the current value ——
-                    #     invalidating here would burn 89 minutes of the user's quota for no
-                    #     information.  On the day models actually diverge the lines will carry
-                    #     `model`, and invalidation will work normally.
-                    cached[(r["doc"], r["idx"], r["h"],
-                            r.get("pv", ""), r.get("model", MODEL))] = r
-            except Exception:
-                pass
+    lines = _load_cache_lines()   # [(seq, row), ...] — every model's lines, file order
+
+    # --reextract-model <name>: force a full re-extraction against a specific model, explicitly
+    # (§4 — changing MODEL no longer implicitly invalidates anything; this flag is now required).
+    reextract_model = args.reextract_model
+
+    current = pick_current(lines)   # (doc, idx, h, pv) -> most-recently-appended row, any model
+    if reextract_model is not None:
+        current = pick_current([(seq, row) for seq, row in lines
+                                if row.get("model", "haiku") == reextract_model])
+    done = set(current)
+
     # ⚠ The prompt version is **part of the key.**  Editing the prompt must re-extract even
     #   an unchanged chunk, and the only route used to be `--restart` —— which **deletes** the
     #   cache file, taking the superseded revisions with it.  That means the document
     #   revision history vanishes from events entirely (813 rows measured).  The cache is
     #   append-only, so re-extracting while keeping the old lines is possible, and correct.
-    key = cache_key
-    todo = [c for c in cs if key(c) not in cached]
-    results = [cached[key(c)] for c in cs if key(c) in cached]
+    todo = [c for c in cs if _done_key(c) not in done]
+    results = [current[_done_key(c)] for c in cs if _done_key(c) in current]
     #  estimate.py learns "seconds per LLM call" from this count.
     try:
         import run_log; run_log.count(len(todo))
@@ -1038,18 +1231,25 @@ def _main_extract():
     #   prompt bump, doubling the size of events.
     live = {(c["doc"], c["idx"], c["h"]) for c in cs}
     same_chunk = {(c["doc"], c["idx"]) for c in cs}
-    seen_hist = set()
-    history = []
-    for r in cached.values():
+    # Dedupe by (doc, idx, h) across models — the **most recently appended** line wins (by file
+    # order `seq`), not dict insertion order.  dict keeps the *first*-seen key; if haiku wrote a
+    # line, then agent:sonnet wrote the same (doc,idx,h) later, dict order would still yield the
+    # haiku line here. (§4 BLOCKER, round 4 review)
+    hist_best = {}
+    for seq, r in lines:
         k3 = (r["doc"], r["idx"], r["h"])
-        if k3 in live or (r["doc"], r["idx"]) not in same_chunk or k3 in seen_hist:
+        if k3 in hist_best and seq <= hist_best[k3][0]:
             continue
-        seen_hist.add(k3)        # the same old revision across several versions counts once
+        hist_best[k3] = (seq, r)
+    history = []
+    for k3, (_seq, r) in hist_best.items():
+        if k3 in live or (r["doc"], r["idx"]) not in same_chunk:
+            continue
         history.append(r)
     if history:
         print(f"  {len(history)} older revisions —— carried as events only (never in the summary)",
               flush=True)
-    if cached:
+    if lines:
         print(f"resume — reusing {len(results)} cached chunks, {len(todo)} left", flush=True)
 
     # Match the worker count **to the relay's concurrency cap.**
@@ -1089,7 +1289,7 @@ def _main_extract():
                       f"({el/done*(len(todo)-done)/60:.0f} min left)", flush=True)
     fh.close()
     ents, rels = group_nodes(results, history=history)
-    if "--no-summary" not in sys.argv:
+    if not args.no_summary:
         n_all, n_new = summarize_all(ents, rels, workers)
     for v in ents + rels:            # the fragment list lives in the cache, not the output
         # Fragments are **promoted to events** and carried.  They used to be dropped here.
@@ -1111,28 +1311,27 @@ def _main_extract():
     #     never pass through it, and `just extract` on the host never touches Go at all.  Same
     #     lesson as `schema_v3`'s shrink guard: the check belongs where the write happens.
     #     (codex adversarial review 2026-09-04, finding #1)
-    _prior = 0
-    if os.path.exists(OUT):
-        try:
-            _prior = len(json.load(open(OUT, encoding="utf-8")).get("entities") or [])
-        except Exception as e:
-            #  Not knowing is not permission —— the same rule as the DB guard.
-            raise SystemExit(f"❌ cannot read the existing {OUT} to compare, so refusing to "
-                             f"overwrite it: {e}\n   Move it aside if it is corrupt.")
-    if _prior and len(ents) < _prior * KG_SHRINK_RATIO and "--allow-shrink" not in sys.argv:
-        raise SystemExit(
-            f"❌ this run produced {len(ents):,} entities but {OUT} holds {_prior:,} —— "
-            f"writing it would throw away {_prior - len(ents):,}.\n"
-            f"   VAULT={VAULT}  ({len(cs):,} chunk(s) this run)\n"
-            f"   If the vault really shrank, pass --allow-shrink.  If it looks empty, check "
-            f"KAL_VAULT before anything else —— that is what this has always been.")
-
-    json.dump({"entities": ents, "relationships": rels,
-               "chunks": len(cs), "failed": fail,
-               # The vault state this extraction saw.  schema_v3 checks it against its own scan.
-               "doc_hashes": dict(DOC_HASHES),
-               "extracted_at": int(time.time())},
-              open(OUT, "w"), ensure_ascii=False, indent=1)
+    # write_kg() carries the shrink guard — the same function kal_extract_finish (kal_mcp.py)
+    # calls, so the CLI and the MCP path cannot drift apart on this check (§5 finish).
+    write_kg(ents, rels, allow_shrink=args.allow_shrink,
+             extra={"chunks": len(cs), "failed": fail})
+    #  Best-effort ledger row per document this run actually touched (DESIGN-GITHUB-SYNC.md
+    #  §3.2/§3.3 — the CLI half of the "extract" writer; kal_extract_mcp.kal_extract_finish is
+    #  the other).  Scoped to `todo` (what this run processed), not the whole corpus — a full
+    #  pending re-scan to get a corpus-wide done/total per doc is not worth a second walk here.
+    #  Never raises, never affects exit code: a device with no bundle configured (KAL_VAULT
+    #  unset) runs exactly as it did before the ledger existed.
+    try:
+        import ledger, collections as _lcoll
+        total_by_doc = _lcoll.Counter(c["doc"] for c in todo)
+        done_by_doc = _lcoll.Counter(r["doc"] for r in results if not r.get("failed"))
+        for doc, total in total_by_doc.items():
+            st, sid = ledger_source_of(doc)
+            ledger.append({"source_type": st, "source_id": sid,
+                            "extracted_chunks_done": done_by_doc.get(doc, 0),
+                            "extracted_chunks_total": total, "prompt_version": PROMPT_VERSION})
+    except Exception:
+        pass
     print(f"\n{len(ents)} entities · {len(rels)} relations · {fail} failed chunks · {time.time()-t0:.0f}s")
 
     # ⚠ Failures are **reported through the exit code.**
@@ -1456,10 +1655,123 @@ def _selftest():
     assert scope_gap({"a"}, {"a", "z"}, {"z"}) == (set(), {"z"}), \
         "a deliberate exclusion also wipes extra"
 
+    # ── pending_extraction() / pick_current() — DESIGN-EXTRACT-MCP.md §4, §14 ──────────────
+    # pick_current must pick the line with the **largest seq**, not the first-seen key (dict
+    # insertion order).  Three lines for the same (doc, idx, h, pv): haiku, then agent:sonnet,
+    # then haiku again (a --reextract-model run) — dict order would yield the sonnet line
+    # (2nd key inserted), the correct answer is the 3rd (last-written) haiku line.
+    _lines = [
+        (0, {"doc": "x.md", "idx": 0, "h": "hh", "pv": PROMPT_VERSION, "model": "haiku",
+             "entities": [{"name": "haiku-1"}], "relationships": []}),
+        (1, {"doc": "x.md", "idx": 0, "h": "hh", "pv": PROMPT_VERSION, "model": "agent:sonnet",
+             "entities": [{"name": "sonnet"}], "relationships": []}),
+        (2, {"doc": "x.md", "idx": 0, "h": "hh", "pv": PROMPT_VERSION, "model": "haiku",
+             "entities": [{"name": "haiku-2"}], "relationships": []}),
+    ]
+    _picked = pick_current(_lines)
+    _g = ("x.md", 0, "hh", PROMPT_VERSION)
+    assert _picked[_g]["entities"][0]["name"] == "haiku-2", (
+        f"pick_current picked the wrong line — got {_picked[_g]['entities']}, "
+        f"expected the seq=2 line (last-written), not dict insertion order")
 
+    # pending is model-agnostic: a chunk with an agent:* line only must not show as pending.
+    assert _done_key(_lines[1][1]) not in {_done_key(c) for c in []}  # sanity: helper works
+    _done = {_done_key(r) for _, r in [_lines[1]]}
+    _chunk = {"doc": "x.md", "idx": 0, "h": "hh"}
+    assert _done_key(_chunk) in _done, \
+        "an agent:*-only line does not satisfy pending —— it would loop forever as 'pending'"
+    #  Mutation check (the real §4 BLOCKER, reproduced against pending_extraction() further
+    #  below with a temp vault): the *storage* key (cache_key, always model=MODEL="haiku" no
+    #  matter what the row's own "model" field says) is not the *done* identity — a row stored
+    #  as model="agent:sonnet" would never equal a haiku-computed cache_key() for that same
+    #  chunk, so treating pending as "cache_key(c) not in cached" leaves it pending forever.
+    assert cache_key(_chunk) != (_chunk["doc"], _chunk["idx"], _chunk["h"], PROMPT_VERSION), \
+        "cache_key() and _done_key() must stay different shapes (storage key vs. done check)"
+
+    # --reextract-model: only that model's lines count as done; a haiku-only chunk must show as
+    # pending again once we ask "is this done under sonnet".
+    _sonnet_done = {_done_key(r) for _, r in _lines if r.get("model") == "sonnet"}
+    assert _done_key(_chunk) not in _sonnet_done, \
+        "--reextract-model sonnet must treat a haiku-only chunk as NOT done — otherwise a " \
+        "model upgrade run re-extracts nothing (§4)"
+
+    # pending_extraction() itself, against a temp KAL_HOME/vault so this never touches the
+    # user's real ~/.kal (verification requirement — read-only on ~/.kal).
+    import tempfile as _tf4
+    with _tf4.TemporaryDirectory() as _d4:
+        _home4, _vault4 = os.path.join(_d4, "home"), os.path.join(_d4, "vault")
+        os.makedirs(_home4); os.makedirs(_vault4)
+        open(os.path.join(_vault4, "note.md"), "w", encoding="utf-8").write(
+            "# note\n\n" + ("hello world. " * 20))
+        _oh, _ov = os.environ.get("KAL_HOME"), os.environ.get("KAL_VAULT")
+        _og = globals()
+        _oKH, _oCACHE, _oOUT, _oVAULT = _og["KAL_HOME"], _og["CACHE"], _og["OUT"], _og["VAULT"]
+        try:
+            os.environ["KAL_HOME"], os.environ["KAL_VAULT"] = _home4, _vault4
+            _og["KAL_HOME"], _og["VAULT"] = _home4, _vault4
+            _og["CACHE"] = os.path.join(_home4, "lr_cache.jsonl")
+            _og["OUT"] = os.path.join(_home4, "lr_kg.json")
+            _p1 = pending_extraction()
+            assert _p1["pending_count"] == _p1["total_chunks"] > 0, \
+                f"a fresh vault with no cache must be all-pending: {_p1}"
+            _chunk0 = _p1["pending_chunks"][0]
+            with open(_og["CACHE"], "a", encoding="utf-8") as _fh4:
+                _fh4.write(json.dumps({**_chunk0, "pv": PROMPT_VERSION, "model": "agent:sonnet",
+                                        "entities": [], "relationships": []}) + "\n")
+            _p2 = pending_extraction()
+            assert _p2["pending_count"] == _p1["pending_count"] - 1, \
+                "an agent:sonnet cache line did not clear the chunk from pending (§4 BLOCKER)"
+            _p3 = pending_extraction(reextract_model="haiku")
+            assert _p3["pending_count"] == _p1["pending_count"], \
+                "--reextract-model haiku must not count the agent:sonnet line as done"
+        finally:
+            _og["KAL_HOME"], _og["CACHE"], _og["OUT"], _og["VAULT"] = _oKH, _oCACHE, _oOUT, _oVAULT
+            if _oh is None: os.environ.pop("KAL_HOME", None)
+            else: os.environ["KAL_HOME"] = _oh
+            if _ov is None: os.environ.pop("KAL_VAULT", None)
+            else: os.environ["KAL_VAULT"] = _ov
+    print("  ✅ pending_extraction()/pick_current() — model-agnostic pending · seq (not dict "
+          "order) picks the current line · --reextract-model narrows 'done'")
+
+    # ── valid_shape / cap_shape (§8, feeding kal_mcp's submit) ─────────────────────────────
+    assert valid_shape({"entities": [], "relationships": []})
+    assert not valid_shape({"entities": "x", "relationships": []}), "a string entities list passes"
+    assert not valid_shape({"entities": []}), "a missing relationships key passes"
+    _capped = cap_shape({"entities": [{"name": f"e{i}"} for i in range(25)],
+                          "relationships": [{"x": i} for i in range(30)]})
+    assert len(_capped["entities"]) == 20 and len(_capped["relationships"]) == 25, \
+        f"cap_shape did not enforce the 20/25 cap: {len(_capped['entities'])}/{len(_capped['relationships'])}"
+    #  Size bound (code review round 2): 30 entities with 1 MB descriptions and nested junk.
+    _big = cap_shape({"entities": [{"name": "n" * 5000, "description": "d" * 1_000_000,
+                                    "nested": {"a": ["b"] * 1000}, **{f"k{i}": "v" for i in range(40)}}
+                                   for _ in range(30)],
+                      "relationships": []})
+    _bytes = len(json.dumps(_big))
+    assert _bytes < 1_000_000, f"cap_shape let {_bytes:,} bytes through for one chunk"
+    assert all("nested" not in e and len(e) <= _ITEM_KEYS and len(e["name"]) <= _FIELD_CHARS
+               for e in _big["entities"]), "cap_shape kept a nested value or an unbounded field"
 
     print(f"  ✅ lr_extract self-check —— shape-failure counting · gate formula · "
           f"cache key ({PROMPT_VERSION}) · fallbacks not cached · early abort")
+
+    #  ── ledger_source_of: the "extract" writer's origin lookup (§3.2/§3.3), shared with
+    #     kal_extract_mcp.kal_extract_finish so the two extraction paths agree on one guess ──
+    import tempfile as _tfL
+    _oldV = VAULT
+    globals()["VAULT"] = _tfL.mkdtemp()
+    try:
+        open(os.path.join(VAULT, "plain.md"), "w").write("# plain\n\nno frontmatter here.\n")
+        open(os.path.join(VAULT, "sess.md"), "w").write(
+            '---\ntitle: s\nsources:\n  - resource: "codex-session://x"\n---\nbody\n')
+        assert ledger_source_of("plain.md") == ("obsidian", "plain.md"), ledger_source_of("plain.md")
+        assert ledger_source_of("sess.md") == ("codex_session", "sess.md"), \
+            f"a session-provenance page must map to its agent's *_session type: {ledger_source_of('sess.md')}"
+        assert ledger_source_of("missing.md") == ("obsidian", "missing.md"), \
+            "an unreadable path must fall back, not raise"
+    finally:
+        globals()["VAULT"] = _oldV
+    print("  ✅ ledger_source_of —— vault note → obsidian, session-provenance page → its agent's "
+          "*_session type, an unreadable path falls back rather than raising")
 
 
 if __name__ == "__main__":

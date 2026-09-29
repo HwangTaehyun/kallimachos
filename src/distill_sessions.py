@@ -32,7 +32,7 @@ Usage:
   python distill_sessions.py --limit 5       # a taste
   python distill_sessions.py --workers 6
 """
-import os, re, json, time, argparse, subprocess, datetime
+import os, re, json, time, argparse, subprocess, datetime, hashlib
 import sys
 import concurrent.futures as cf
 
@@ -45,6 +45,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 #      It has to go through the host relay (KAL_CLAUDE_RELAY), and a direct call bypasses that.
 # claude_cli.run decides between relay and local itself.  (pipeline check, 2026-08-19)
 from claude_cli import run as claude_run, ThirdPartyGateError  # noqa: E402
+import ledger  # DESIGN-GITHUB-SYNC.md §3 —— the one progress-ledger writer/reader.  Best-effort:
+                # every call site below wraps ledger.append() in try/except so a device with no
+                # bundle configured (KAL_VAULT unset — most tests, and any pre-sync install)
+                # distils exactly as it did before this file learned about the ledger.
 
 
 # Where ~/.kal lives.  Mounted at /data/kal inside the container (see docker-compose).
@@ -382,14 +386,19 @@ def should_abort(recent):
     return sum(1 for x in w if x == "fail") / len(w) >= ABORT_RATE
 
 
-def write(rec, docs, seen):
+def write(rec, docs, seen, continues=None, no_llm=False, privacy=None):
+    """continues: an original page's slug — set only for a continuation page (§4.2 step 2-3), which
+    gets ` (continued)` appended to its title and a `continues:` frontmatter key pointing back.
+    no_llm: inherited from the original page(s) via no_llm_of_pages(), never re-derived by path."""
     day = (rec.get("first_ts") or "")[:10]      # '2026-07-14T07:32:19.318Z' → '2026-07-14'
+    no_llm = no_llm or no_llm_of_pages([continues] if continues else (), rec, privacy)
     made = []
     for d in docs:
-        slug = next_slug(d["title"], seen)
+        title = d["title"] + " (continued)" if continues else d["title"]
+        slug = next_slug(title, seen)
         fm = [
             "---",
-            f'title: "{d["title"]}"',
+            f'title: "{title}"',
             "type: conversation",
             f"captured: {day}",
             "origin: claude-session",
@@ -413,10 +422,19 @@ def write(rec, docs, seen):
             # pipeline run.  (2026-08-19, the same vocabulary as fm_migrate.py)
             "generated_by: distill_sessions.py (LLM, needs review afterwards)",
             f"generated_at: {day}",
-            "---", "",
+        ]
+        if continues:
+            #  §4.2 step 3 —— an openwiki extension key beyond the three named in the comment
+            #  above; whether OKF's schema accepts an arbitrary extra key is DESIGN-GITHUB-SYNC.md's
+            #  own open question (§9), left open here too rather than guessed at.
+            fm.append(f"continues: {continues}")
+        if no_llm:
+            fm.append("no_llm: true")
+        fm += ["---", "",
         ]
         path = os.path.join(OUT, slug + ".md")
-        open(path, "w", encoding="utf-8").write("\n".join(fm) + d["body"] + "\n")
+        with open(path, "w", encoding="utf-8") as out:
+            out.write("\n".join(fm) + d["body"] + "\n")
         made.append((slug, d["title"], d["doc_type"], rec["session_id"]))
     return made
 
@@ -492,7 +510,78 @@ def is_done(r):
        history, and the full build does not purge a gone page's facts.  Distilling again waits for an
        append-only design; `grew` counts what is left behind so a run can say so.
     """
-    return _marker_of(r) is not None
+    #  A crash between the staged ledger row and the marker leaves the row only in the pending file:
+    #  without counting it, the session is paid for twice and review_pending keeps refusing.
+    key = (f"{r.get('agent', 'claude')}_session", r["session_id"])
+    return _marker_of(r) is not None or _ledger_row(r) is not None or key in ledger.pending_keys()
+
+
+def _ledger_row(r):
+    """The synced ledger's latest row for `r` (any device), or None (DESIGN-GITHUB-SYNC.md §3.3).
+
+    ⚠ A device with no local marker — a reinstall, or a session file also visible from a second
+       device — is still done when the bundle's ledger says some device finished it: without this a
+       reinstall re-distils everything (paid model calls again) and two devices publish one session
+       twice.  Best-effort like every ledger touch: an unreadable ledger reads as "no row".
+    """
+    key = (f"{r.get('agent', 'claude')}_session", r["session_id"])
+    try:
+        return ledger.status_of(*key) if _LEDGER_INDEX is None else _LEDGER_INDEX.get(key)
+    except Exception as error:
+        return _ledger_unreadable(error)
+
+
+#  One `ledger.read_all` per run instead of one per record (O(records × rows)); set by
+#  _main_distill, None elsewhere so direct callers (tests, other scripts) always read fresh.
+_LEDGER_INDEX = None
+_LEDGER_WARNED = False
+
+
+def _ledger_unreadable(error):
+    """A ledger that cannot be read reads as "no row" — but say so once, and never in sync's
+    staged mode, where a silent "no row" means a second paid distillation of a done session."""
+    global _LEDGER_WARNED
+    if os.environ.get("KAL_LEDGER_STAGE"):
+        raise error
+    if not _LEDGER_WARNED:
+        _LEDGER_WARNED = True
+        print(f"warning: synced ledger unreadable ({type(error).__name__}); treating sessions as not done "
+              "by it", file=sys.stderr)
+    return None
+
+
+def _prior_pages(r):
+    """The page slugs already published for `r`: the local marker's, else the synced ledger row's
+    (a session done on another device has no local marker but its row lists the pages)."""
+    m = _marker_of(r)
+    pages = (marker_info(m) or {}).get("pages") if m else None
+    if not pages:
+        row = _ledger_row(r)
+        pages = row.get("pages") if row else None
+        if row and not pages:                 # the newest row may be a page-less one; an earlier row has them
+            pages = ledger.pages_of(f"{r.get('agent', 'claude')}_session", r["session_id"])
+    return _valid_pages(pages)
+
+
+#  What `slugify` can produce (plus a `-vN` suffix).  Another device's ledger row is data from outside
+#  this machine: a page name with a newline, `..` or `:` must never reach a `continues:` frontmatter line.
+_PAGE_RE = re.compile(r"[\w-]{1,80}")
+
+
+def _valid_pages(pages):
+    return [p for p in pages if isinstance(p, str) and _PAGE_RE.fullmatch(p)] if isinstance(pages, list) else []
+
+
+def _done_ts(r):
+    """How far `r` was distilled, as an epoch: the newest of the local marker's `last_ts` and the
+    ledger row's `distilled_through_last_ts`.  None when neither recorded one."""
+    import ingest_sessions as I
+    m = _marker_of(r)
+    seen = [I.epoch((marker_info(m) or {}).get("last_ts")) if m else None]
+    row = _ledger_row(r)
+    seen.append(row.get("distilled_through_last_ts") if row else None)
+    seen = [t for t in seen if isinstance(t, (int, float))]
+    return max(seen) if seen else None
 
 
 def _marker_of(r):
@@ -524,19 +613,323 @@ def marker_info(path):
 
 
 def grew(r):
-    """Distilled before, and holding turns from after what its marker recorded?  Reported, not
-    acted on (see is_done).  An empty, older marker recorded nothing, so it cannot tell."""
+    """Distilled before, and holding turns from after what its marker recorded?  Acted on since
+    DESIGN-GITHUB-SYNC.md §4.2 — see continuation_candidates()/write_continuation() — but the old
+    docstring's warning still holds for the *marked* pages themselves: they are never rewritten,
+    only a new page beside them.  An empty, older marker recorded nothing, so it cannot tell."""
     import ingest_sessions as I
-    m = _marker_of(r)
     now = I.epoch(r.get("last_ts"))
-    was = I.epoch((marker_info(m) or {}).get("last_ts")) if m else None
+    was = _done_ts(r)
     return now is not None and was is not None and now > was
 
 
+#  ── settle rule (DESIGN-GITHUB-SYNC.md §4.2) ───────────────────────────────────────────────────
+#  A session still being talked to is not a distillation candidate yet: distilling mid-conversation
+#  makes a half-cut page, and that page's `last_ts` becomes the next "did it grow" baseline —
+#  colliding with §4.1's "never re-distil a completed session" sooner than it should.
+SETTLE_HOURS = float(os.environ.get("KAL_SETTLE_HOURS", "6"))
+
+
+def settled(r, hours=None, now=None):
+    """Has `r` gone quiet for `hours` (default SETTLE_HOURS) since its last turn?
+
+    ⚠ **Fails open, not closed.**  A record with no readable `last_ts` cannot be timed at all —
+       refusing to distil it would silently strand it forever (nothing later makes the timestamp
+       readable).  This only adds a *reason to wait*, never a permanent exclusion; `wanted()` and
+       `is_done()` already carry the exclusions that are meant to stick.
+    """
+    import ingest_sessions as I
+    ts = I.epoch(r.get("last_ts"))
+    if ts is None:
+        return True
+    hrs = SETTLE_HOURS if hours is None else hours
+    return ((time.time() if now is None else now) - ts) >= hrs * 3600
+
+
+def _ledger_row_of(r, made, continues=None, no_llm=False, pages=None):
+    import ingest_sessions as I
+    agent = r.get("agent", "claude")
+    row = {
+        "source_type": f"{agent}_session",
+        "source_id": r["session_id"],
+        "content_hash": hashlib.sha256((r.get("text") or "").encode("utf-8")).hexdigest(),
+        "source_updated_at": r.get("last_ts"),
+        "distilled_through_last_ts": I.epoch(r.get("last_ts")),
+        "no_llm": bool(no_llm),
+    }
+    if continues:
+        row["continues"] = continues
+    pages = [m[0] for m in made] if pages is None else pages
+    if pages:
+        row["pages"] = pages
+    return row
+
+
+def _ledger_record(r, made, continues=None, no_llm=False, pages=None):
+    """Best-effort ledger row (DESIGN-GITHUB-SYNC.md §3.2) for a completed distillation pass,
+    first or continuation.  Never raises — a device with no bundle configured (KAL_VAULT unset,
+    true of most tests and any pre-sync install) must distil exactly as it did before the ledger
+    existed; ledger.append() already no-ops in that case, this is defence for anything else.
+
+    Sync's explicit pending-ledger mode is strict instead: staging errors must propagate
+    before a completion marker is written.
+    """
+    try:
+        ledger.append(_ledger_row_of(r, made, continues, no_llm, pages))
+    except Exception:
+        if os.environ.get("KAL_LEDGER_STAGE"):
+            raise
+        pass
+
+
 def mark_done(r, made=()):
-    """The completion marker, recording how far `r` was distilled and the pages it made (`write`)."""
+    """The completion marker, recording how far `r` was distilled and the pages it made (`write`).
+    Also appends a best-effort ledger row (§3.2, see _ledger_record)."""
+    if os.environ.get("KAL_LEDGER_STAGE"):
+        _ledger_record(r, made)
     with open(os.path.join(DONE, f"{r.get('agent', 'claude')}-{r['session_id']}"), "w") as fh:
         json.dump({"last_ts": r.get("last_ts"), "pages": [m[0] for m in made]}, fh)
+    if not os.environ.get("KAL_LEDGER_STAGE"):
+        _ledger_record(r, made)
+
+
+def privacy_snapshot():
+    from pathlib import Path
+    from source_links import load_frontmatter
+    import schema_v3 as S
+
+    def unreadable(error):
+        raise error
+
+    entries, links, blocked = [], [], set()
+    roots = [Path(OUT)]
+    if os.environ.get("KAL_VAULT"):
+        roots.append(Path(os.environ["KAL_VAULT"]))
+    for root in roots:
+        if not root.exists():
+            continue
+        for directory, dirs, files in os.walk(root, onerror=unreadable):
+            dirs[:] = [name for name in dirs if name != ".git"]
+            for name in files:
+                if not name.endswith(".md"):
+                    continue
+                path = Path(directory) / name
+                raw = path.read_text(encoding="utf-8")
+                try:
+                    data = load_frontmatter(raw)
+                except ValueError as error:
+                    raise ValueError(f"cannot resolve privacy: {error}: {path}") from None
+                if not data:
+                    continue
+                keys = {("page", path.stem)} if root == Path(OUT) else set()
+                if data.get("session_id"):
+                    keys.add((str(data.get("session_agent", "claude")), str(data["session_id"]).lower()))
+                sources = data.get("sources")
+                for source in sources if isinstance(sources, list) else []:
+                    resource = source.get("resource") if isinstance(source, dict) else None
+                    if isinstance(resource, str):
+                        agent, sep, sid = resource.partition("-session://")
+                        if sep and agent in S.SESSION_AGENTS and sid:
+                            keys.add((agent, sid.lower()))
+                if isinstance(data.get("continues"), str):
+                    keys.add(("page", Path(data["continues"]).stem))
+                links.append(keys)
+                entries.append((path, raw, keys, root == Path(OUT)))
+                if S.doc_meta(raw)[2]:
+                    blocked.update(keys)
+    for path in Path(DONE).glob("*"):
+        info = marker_info(path) or {}
+        agent, sep, sid = path.name.partition("-")
+        if not sep or agent not in S.SESSION_AGENTS:
+            agent, sid = "claude", path.name
+        links.append({(agent, sid.lower()), *(("page", slug) for slug in info.get("pages", []))})
+    while True:
+        before = len(blocked)
+        for keys in links:
+            if keys & blocked:
+                blocked.update(keys)
+        if len(blocked) == before:
+            break
+    return blocked, entries
+
+
+def carry_privacy(snapshot):
+    import schema_v3 as S
+    from frontmatter import FM_RE
+
+    blocked, entries = snapshot
+    for path, raw, keys, local in entries:
+        if not local or not keys & blocked or S.doc_meta(raw)[2]:
+            continue
+        match = FM_RE.match(raw)
+        head = re.sub(r'''(?im)^["']?no_llm["']?\s*:[^\n]*\n?''', "", match.group(1))
+        path.write_text(raw[:match.start(1)] + "no_llm: true\n" + head + raw[match.end(1):], encoding="utf-8")
+
+
+def _ledger_no_llm(r):
+    """Does the latest synced ledger row for `r` say `no_llm`?  Its pages may be on another device."""
+    row = _ledger_row(r)
+    return bool(row and row.get("no_llm"))
+
+
+def no_llm_of_pages(pages, rec=None, snapshot=None):
+    """Does any already-written page of a session carry `no_llm: true` in its own frontmatter —
+    a human's later correction, which the corpus record never carries (§4.3)?  Looked up by the
+    page's own content, not by re-deriving anything from a path or title: §4.3 exists precisely
+    because a path/title-keyed lookup lost this flag once already when a title changed."""
+    blocked, _ = snapshot if snapshot is not None else privacy_snapshot()
+    keys = {("page", slug) for slug in pages or ()}
+    if rec is not None:
+        keys.update((rec.get("agent", "claude"), str(sid).lower())
+                    for sid in rec.get("members") or [rec["session_id"]])
+    return bool(keys & blocked)
+
+
+def mark_continued(r, made):
+    """Extend an existing completion marker after a continuation page was written (§4.2 step 4):
+    `last_ts` advances to `r`'s current last_ts, and the new pages are APPENDED to (never replace)
+    the ones already on record — they must stay discoverable by the exclusion check
+    (`ingest_sessions._check_listed`) and by the next `grew()` comparison.  The marker must already
+    exist: this is only ever called on a session `is_done()` already reports true for.
+    """
+    path = _marker_of(r) or os.path.join(DONE, f"{r.get('agent', 'claude')}-{r['session_id']}")
+    prior = _prior_pages(r)               # a ledger-only "done" has no local marker: its row has the pages
+    pages = prior + [m[0] for m in made]
+    row = dict(continues=prior[0] if prior else None, no_llm=no_llm_of_pages(prior, r) or _ledger_no_llm(r), pages=pages)
+    if os.environ.get("KAL_LEDGER_STAGE"):
+        _ledger_record(r, made, **row)
+    with open(path, "w") as fh:
+        json.dump({"last_ts": r.get("last_ts"), "pages": pages}, fh)
+    if not os.environ.get("KAL_LEDGER_STAGE"):
+        _ledger_record(r, made, **row)
+
+
+def tail_since(abs_path, since_epoch, *, through=None, cutoff=None):
+    """Re-parse a raw session log (a corpus record's `abs_path`) for only the turns strictly after
+    `since_epoch` — the continuation page's input (§4.2 step 1).  {"text", "n_msg", "last_ts"} or
+    None if nothing qualifies, the file cannot be read, or the tail looks like a pipeline call.
+
+    Mirrors `ingest_sessions.parse_session`'s per-line walk (block extraction, noise filtering,
+    secret masking, machine-call detection) rather than a second implementation of it — a session
+    tail is exactly as sensitive as a whole session, and every one of those checks exists because
+    skipping it once already leaked something into this pipeline.
+
+    ⚠ **`agent_ids` is collected over the WHOLE file, not just the tail.**  A subagent's `Task`
+       tool_use can precede the settle boundary while its `tool_result` arrives after it —
+       `parse_session`'s single forward pass gets this right only because its cutoff is an upper
+       bound (both members of a pair are on the same side of it); a lower bound has no such
+       guarantee, so the id has to be known before the boundary is applied.
+    """
+    import ingest_sessions as I
+    parts, seen, agent_ids = [], set(), set()
+    n_msg = 0
+    last_ts = None
+    try:
+        fh = open(abs_path, encoding="utf-8", errors="ignore")
+    except (OSError, TypeError):
+        return None
+    with fh:
+        for ln in fh:
+            try:
+                rec = json.loads(ln)
+            except Exception:
+                continue
+            if rec.get("type") not in ("user", "assistant"):
+                continue
+            c = (rec.get("message") or {}).get("content")
+            if isinstance(c, list):
+                for b in c:
+                    if (isinstance(b, dict) and b.get("type") == "tool_use"
+                            and b.get("name") in I.AGENT_TOOLS and b.get("id")):
+                        agent_ids.add(b["id"])
+            e = I.epoch(rec.get("timestamp"))
+            if e is None or e <= since_epoch:
+                continue
+            if (through is not None and e > through) or not I.before_cutoff(e, cutoff):
+                continue
+            last_ts = rec.get("timestamp")
+            for t in I.blocks_of(rec.get("message"), agent_ids):
+                if I.is_noise(t):
+                    continue
+                h = hashlib.md5(t[:400].encode()).hexdigest()
+                if h in seen:
+                    continue
+                seen.add(h)
+                role = "Me" if rec["type"] == "user" else "Claude"
+                parts.append(f"**{role}**: {t.strip()[:I.TURN_MAX]}")
+                n_msg += 1
+    if not parts:
+        return None
+    text = "\n\n".join(parts)
+    if I.is_pipeline_call(text):
+        return None
+    text, _masked = I.mask(text)
+    if I.find_leaks(text):
+        return None            # fail closed —— never hand a continuation with an unmasked secret to the LLM
+    return {"text": text, "n_msg": n_msg, "last_ts": last_ts}
+
+
+def continuation_tail(rec, since):
+    import ingest_sessions as I
+
+    agent = rec.get("agent", "claude")
+    through = I.epoch(rec.get("last_ts"))
+    if through is None:
+        raise ValueError("continuation has no readable upper timestamp")
+    members = rec.get("members") or [rec["session_id"]]
+    excluded = I.load_excluded(known={sid.lower(): rec["session_id"].lower() for sid in members}, strict=False)
+    cuts = [excluded[sid.lower()] for sid in members if sid.lower() in excluded]
+    if None in cuts:
+        raise ValueError("continuation session is excluded")
+    cutoff = min(cuts) if cuts else None
+    if agent == "claude":
+        tail = tail_since(rec.get("abs_path"), since, through=through, cutoff=cutoff)
+    elif agent == "codex":
+        import ingest_codex_sessions as C
+        tail = C.parse_rollout(rec["abs_path"], cutoff, since=since, through=through)
+    elif agent == "hermes":
+        import ingest_hermes_sessions as H
+        path, sep, sid = rec["abs_path"].rpartition("#")
+        if not sep or sid != rec["session_id"]:
+            raise ValueError("invalid Hermes continuation locator")
+        sources = tuple(s.strip() for s in os.environ.get("KAL_HERMES_SOURCES", "").split(",") if s.strip()) or H.DEFAULT_SOURCES
+        if any(s not in H.DEFAULT_SOURCES for s in sources) and not H.claude_cli.no_tools_verified():
+            raise ThirdPartyGateError("Hermes continuation requires verify-extract-tools before reading opted-in sources")
+        conversations, _, _, _ = H.read_store(path, sources=sources, excluded=excluded)
+        conversation = next((c for c in conversations if c["id"] == sid), None)
+        if conversation is None:
+            raise ValueError("Hermes continuation is unavailable under current collection policy")
+        turns = [turn for turn in conversation["turns"]
+                 if I.epoch(turn[2]) is not None and since < I.epoch(turn[2]) <= through]
+        tail = {"text": H.render(turns), "n_msg": len(turns),
+                "last_ts": H._iso(max(I.epoch(t[2]) for t in turns))} if turns else None
+    else:
+        raise ValueError(f"unsupported continuation agent: {agent}")
+    if not tail or not tail["text"]:
+        raise ValueError(f"{agent} continuation could not be read as eligible turns")
+    if I.is_pipeline_call(tail["text"]):
+        raise ValueError("continuation is a pipeline call")
+    text, _ = I.mask(tail["text"])
+    if I.find_leaks(text):
+        raise ValueError("continuation failed masking verification")
+    return {**tail, "text": text}
+
+
+def continuation_candidates(recs):
+    """Of `recs`, the ones that are done, settled, grew, and can actually be sliced (an `abs_path`
+    to re-parse and a marker with a readable `last_ts`) — → [(rec, since_epoch), …]."""
+    import ingest_sessions as I
+    out = []
+    for r in recs:
+        if not (is_done(r) and settled(r) and grew(r)) or _ledger_no_llm(r):
+            continue
+        if not r.get("abs_path"):
+            continue
+        since = _done_ts(r)
+        if since is None:
+            continue
+        out.append((r, since))
+    return out
 
 
 def _selftest():
@@ -704,7 +1097,7 @@ def _selftest():
                 return {"session_id": sid, "project": "p", "agent": "hermes", "n_msg": 2, "first_ts": at,
                         "last_ts": last_ts, "text": "**Me**: a question\n\n**Hermes**: an answer"}
 
-            def run(recs, reply):
+            def run(recs, reply, expect_failure=False):
                 with open(corpus, "w") as fh:
                     json.dump(recs, fh)
                 buf = io.StringIO()
@@ -714,10 +1107,12 @@ def _selftest():
                         mock.patch.object(D, "call", reply), \
                         mock.patch.object(sys, "argv", ["distill_sessions.py", "--workers", "1"]), \
                         contextlib.redirect_stdout(buf):
+                    code = 0
                     try:
                         D._main_distill()
                     except SystemExit as e:
-                        assert not e.code, f"distillation stopped: {e.code}"
+                        code = e.code
+                    assert bool(code) == expect_failure, f"unexpected distillation exit: {code}"
                 return buf.getvalue()
 
             def pages():
@@ -729,7 +1124,7 @@ def _selftest():
             out = run([rec("h9", "2026-09-25T10:00:00Z")], doc)
             assert "1 of them grew since they were distilled" in out and pages() == ["marker-check.md"], \
                 f"a conversation that grew was redone, or went unreported: {pages()}\n{out}"
-            run([rec("hfail", at)], lambda *a, **k: "")
+            run([rec("hfail", at)], lambda *a, **k: "", expect_failure=True)
             assert not os.path.exists(os.path.join(done, "hermes-hfail")), \
                 "a failed session was marked done —— it is never retried"
             #  A page removed by hand leaves its name taken while a marker lists it (review round 6).
@@ -756,6 +1151,92 @@ def _selftest():
             assert buf.getvalue() == "", f"estimate printed ahead of its JSON: {buf.getvalue()!r}"
     print("  ✅ the marker records how far it distilled and the pages it made; a grown conversation is "
           "reported, a failure retried, a SKIP marked done")
+
+    #  ── settle rule (DESIGN-GITHUB-SYNC.md §4.2) ─────────────────────────────────────────────
+    assert not D.settled({"last_ts": datetime.datetime.now(datetime.timezone.utc).isoformat()}), \
+        "a session mid-conversation right now was called settled"
+    assert D.settled({"last_ts": "2020-01-01T00:00:00Z"}), "an old session was called unsettled"
+    assert D.settled({}), "a record with no readable last_ts must fail OPEN, not strand forever"
+    old_ts = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(hours=1)).isoformat()
+    assert not D.settled({"last_ts": old_ts}, hours=6), "1h old is not settled under a 6h rule"
+    assert D.settled({"last_ts": old_ts}, hours=0.5), "1h old IS settled under a 30min rule"
+    print("  ✅ settled() —— fails open on an unreadable last_ts, respects an explicit hours override")
+
+    #  ── continuation pages (§4.2) — a session that grew gets a NEW page for the new turns only,
+    #     never a rewrite of the original.  End to end: a synthetic raw transcript (abs_path),
+    #     mark_done() at turn 2, the session grows to turn 4, and a second distil run must produce
+    #     exactly one continuation page holding only turns 3-4, with the marker extended (not
+    #     replaced) and continues: pointing at the original.  No LLM: `call` is a fake.
+    with tempfile.TemporaryDirectory() as d:
+        raw = os.path.join(d, "session.jsonl")
+
+        def turn(role, text, ts):
+            return json.dumps({"type": role, "timestamp": ts,
+                                "message": {"content": [{"type": "text", "text": text}]}})
+        t0, t1, t2, t3 = ("2026-09-01T00:00:0%dZ" % i for i in range(4))
+        with open(raw, "w") as fh:
+            fh.write("\n".join([
+                turn("user", "EARLY-TURN-ONE this is well over forty characters long for sure", t0),
+                turn("assistant", "EARLY-TURN-TWO also comfortably over the forty char noise floor", t1),
+                turn("user", "LATE-TURN-THREE this one arrives after the settle marker was written", t2),
+                turn("assistant", "LATE-TURN-FOUR the continuation page must hold only this and #3", t3),
+            ]) + "\n")
+
+        # tail_since: only turns strictly after t1's epoch survive
+        since = I.epoch(t1)
+        tail = D.tail_since(raw, since)
+        assert tail is not None and "LATE-TURN-THREE" in tail["text"] and "LATE-TURN-FOUR" in tail["text"], tail
+        assert "EARLY-TURN-ONE" not in tail["text"] and "EARLY-TURN-TWO" not in tail["text"], \
+            f"a turn at or before the cutoff leaked into the continuation: {tail['text']!r}"
+        assert tail["last_ts"] == t3, tail
+
+        # a secret in the tail must never reach distill() unmasked
+        with open(raw + ".secret", "w") as fh:
+            fh.write("\n".join([
+                turn("user", "EARLY well over forty characters so it is not dropped as noise here", t0),
+                turn("assistant",
+                     "sk-ant-api03-" + "x" * 95 + " this leaks an anthropic key in the tail text",
+                     t2),
+            ]) + "\n")
+        leaked = D.tail_since(raw + ".secret", since)
+        assert leaked is None or "sk-ant-api03-" not in leaked["text"], \
+            "an unmasked secret in a continuation tail was handed to distill()"
+
+        done = os.path.join(d, ".done")
+        os.makedirs(done)
+        rec4 = {"session_id": "grows", "agent": "hermes", "project": "p", "abs_path": raw,
+                "n_msg": 2, "first_ts": t0, "last_ts": t1,
+                "text": "**Me**: EARLY-TURN-ONE\n\n**Hermes**: EARLY-TURN-TWO"}
+        with mock.patch.object(D, "DONE", done), mock.patch.object(D, "OUT", d):
+            D.mark_done(rec4, [("original-page", "Original", "decision", "grows")])
+            with open(os.path.join(d, "original-page.md"), "w") as fh:
+                fh.write("---\ntitle: \"Original\"\nsession_id: grows\nsession_agent: hermes\n---\nbody\n")
+
+            grown_rec = {**rec4, "last_ts": t3}
+            cands = D.continuation_candidates([grown_rec])
+            assert len(cands) == 1 and cands[0][0]["session_id"] == "grows", cands
+
+            cont_doc = lambda *a, **k: ("<<<DOC>>>\ntitle: Late turns\ndoc_type: decision\n"
+                                        "why_captured: w\ntags: a\n---\nlate body\n<<<END>>>")
+            with mock.patch.object(D, "call", cont_doc):
+                docs, status = D.distill({"text": tail["text"], "n_msg": tail["n_msg"]})
+            assert status == "ok" and docs, (status, docs)
+            seen = {"original-page": 1}
+            made = D.write(grown_rec, docs, seen, continues="original-page")
+            assert made and made[0][0] == "late-turns-continued", made
+            cont_path = os.path.join(d, made[0][0] + ".md")
+            head = open(cont_path).read()
+            assert "(continued)" in head and "continues: original-page" in head, head
+            D.mark_continued(grown_rec, made)
+            info = D.marker_info(os.path.join(done, "hermes-grows"))
+            assert info == {"last_ts": t3, "pages": ["original-page", "late-turns-continued"]}, \
+                f"the marker must gain the new page, keeping the original — not replace it: {info}"
+            #  the original page's own file is untouched (§4.1 — never rewritten)
+            assert open(os.path.join(d, "original-page.md")).read() == \
+                "---\ntitle: \"Original\"\nsession_id: grows\nsession_agent: hermes\n---\nbody\n"
+    print("  ✅ continuation pages —— tail_since cuts exactly at the marker, masks a secret in the tail, "
+          "the new page never replaces the original, and the marker gains a page rather than losing one")
 
     #  ── exclude.txt at distil time, not only at collection (2026-09-26) ────────────────────
     #  `just distill`, the web screen's distil step and rebuild_all.sh start from the corpus as it
@@ -873,7 +1354,39 @@ def _selftest():
     print("  ✅ distill_sessions —— slug collisions · a partial window failure is not finalised")
 
 
+def _backfill_ledger(recs):
+    """Sessions marked done locally but absent from the synced ledger (its file was reset to a
+    remote that lacks them) get their row back, from the marker — without it other devices would
+    distil them again.  Only markers that recorded how far they reached (`last_ts`)."""
+    staged = ledger.pending_keys()        # rows an interrupted sync already staged are not missing
+    rows = []
+    for r in recs:
+        m = _marker_of(r)
+        info = marker_info(m) if m else None
+        key = (f"{r.get('agent', 'claude')}_session", r["session_id"])
+        if info and info.get("last_ts") and _ledger_row(r) is None and key not in staged:
+            rows.append(_ledger_row_of({**r, "last_ts": info["last_ts"]}, (), pages=info.get("pages") or []))
+    try:
+        ledger.append_many(rows)
+    except Exception:
+        if os.environ.get("KAL_LEDGER_STAGE"):
+            raise
+
+
 def _main_distill():
+    global _LEDGER_INDEX
+    _LEDGER_INDEX = None
+    try:
+        _LEDGER_INDEX = ledger.latest_rows()
+    except Exception as error:
+        _ledger_unreadable(error)
+    try:
+        _run_distill()
+    finally:
+        _LEDGER_INDEX = None
+
+
+def _run_distill():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int)
     ap.add_argument("--workers", type=int, default=10)
@@ -893,28 +1406,54 @@ def _main_distill():
         print(f"  {_agent}: {_n} session(s) from {_file}"
               + (f" · {_gone} left out by exclude.txt" if _gone else ""))
     if not recs:
-        print("❌ no session corpus found — run ingest_sessions.py / ingest_codex_sessions.py / "
-              "ingest_hermes_sessions.py first")
-        raise SystemExit(1)
+        #  A device may hold no agent session corpus at all (a fresh sync device; github_sync.run_distill sets KAL_DEVICE): nothing to distil
+        #  is a no-op, not a failure — but a plain local run still says "run the collectors first".
+        sync = bool(os.environ.get("KAL_LEDGER_STAGE") or os.environ.get("KAL_DEVICE"))
+        print("no session corpus found — run ingest_sessions.py / ingest_codex_sessions.py / "
+              "ingest_hermes_sessions.py first", file=sys.stderr)
+        raise SystemExit(0 if sync else 1)
     if EXCLUDE_PROJECTS:
         n0 = len(recs)
         recs = [r for r in recs if wanted(r)]
         if n0 != len(recs):
             print(f"excluded — skipped {n0-len(recs)} session(s) from {'/'.join(EXCLUDE_PROJECTS)}")
+    try:
+        privacy = privacy_snapshot()
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+    carry_privacy(privacy)
+    n0 = len(recs)
+    recs = [r for r in recs if not (no_llm_of_pages((), r, privacy) or _ledger_no_llm(r))]
+    if n0 != len(recs):
+        print(f"privacy: skipped {n0 - len(recs)} no_llm session(s) before model calls")
     if a.limit:
         recs = recs[:a.limit]
+    # Settle rule (§4.2) — a session still being talked to is not a candidate yet.  Checked before
+    # the resume/continuation split below so neither one ever acts on a still-growing session.
+    n0 = len(recs)
+    recs = [r for r in recs if settled(r)]
+    if n0 != len(recs):
+        print(f"ⓘ {n0 - len(recs)} session(s) skipped —— active within the last "
+              f"{SETTLE_HOURS:g}h (settle rule; KAL_SETTLE_HOURS to change)")
     # Resume — sessions with a completion marker are skipped.  464 sessions × an LLM call
     # means starting over after an interruption is not affordable.
+    continuations = []
     if not a.restart:
+        _backfill_ledger(recs)
         n0 = len(recs)
-        grown = sum(1 for r in recs if grew(r))
+        grown_recs = [r for r in recs if is_done(r) and settled(r) and grew(r)]
+        continuations = continuation_candidates(grown_recs)
         recs = [r for r in recs if not is_done(r)]
         if n0 != len(recs):
             print(f"resuming — skipped {n0 - len(recs)} completed")
-        if grown:
-            print(f"ⓘ {grown} of them grew since they were distilled —— the later turns are not distilled "
-                  "yet (distilling a conversation again in place is not supported; see is_done)")
-    if not recs:
+        if grown_recs:
+            unsliceable = len(grown_recs) - len(continuations)
+            print(f"ⓘ {len(grown_recs)} of them grew since they were distilled —— {len(continuations)} "
+                  "will get a continuation page for the turns after their last marker (§4.2; the "
+                  "original pages are never rewritten)"
+                  + (f", {unsliceable} could not be sliced (no abs_path or unreadable marker last_ts)"
+                     if unsliceable else ""))
+    if not recs and not continuations:
         # SystemExit("a string") prints that string to stderr and exits with **code 1**.
         # Having nothing to do is not a failure —— the web UI displayed this as "failed".
         print("all done (re-run with --restart)")
@@ -948,7 +1487,7 @@ def _main_distill():
                 raise
             except Exception:
                 docs, status = [], "fail"
-            made = write(r, docs, seen) if status == "ok" else []
+            made = write(r, docs, seen, privacy=privacy) if status == "ok" else []
             rows += made
             if status == "skip":
                 empty += 1
@@ -979,12 +1518,55 @@ def _main_distill():
                       + f"  {el/60:.1f} min "
                       f"({el/done*(len(recs)-done)/60:.0f} min left)", flush=True)
 
+    # ── continuation pages (§4.2) — a session that grew after it was already distilled ─────────
+    # Never rewrites the original page(s); each one gets a NEW page holding only the turns after
+    # its marker's last_ts, linked back with `continues:` (write()) and the marker is extended,
+    # not replaced (mark_continued()).  Sequential, not thread-pooled: there are normally far
+    # fewer of these than fresh sessions, and each one calls tail_since() (a file read) before
+    # the LLM call, which the resume-safe ThreadPoolExecutor path above was not built to interleave.
+    cont_made = cont_failed = cont_empty = 0
+    for r, since in continuations:
+        try:
+            tail = continuation_tail(r, since)
+        except ThirdPartyGateError:
+            raise
+        except Exception as error:
+            print(f"continuation read failed ({r.get('agent', 'claude')}): {type(error).__name__}")
+            cont_failed += 1
+            continue          # nothing new to say, or the tail could not be read/masked safely
+        cont_rec = {**r, "text": tail["text"], "n_msg": tail["n_msg"],
+                    "first_ts": tail["last_ts"] or r.get("first_ts")}
+        try:
+            docs, status = distill(cont_rec)
+        except ThirdPartyGateError:
+            raise
+        except Exception:
+            docs, status = [], "fail"
+        if status == "fail":
+            cont_failed += 1
+            continue          # no marker update — the next run's continuation_candidates() retries it
+        if status == "skip":
+            cont_empty += 1
+            mark_continued(r, [])
+            continue
+        prior = _prior_pages(r)
+        no_llm = no_llm_of_pages(prior, r, privacy) or _ledger_no_llm(r)
+        made = write(r, docs, seen, continues=(prior or [None])[0],
+                     no_llm=no_llm, privacy=privacy)
+        rows += made
+        cont_made += len(made)
+        mark_continued(r, made)
+    if continuations:
+        print(f"  continuations: {cont_made} page(s) from {len(continuations)} grown session(s) "
+              f"· {cont_empty} small-talk skip(s) · {cont_failed} failure(s)")
+
     # The review list is built from **the real files on disk**.  Built from the in-memory rows,
     # a resumed run would hold only this round's documents and drop the earlier ones.
     import glob as _g
     allrows = []
     for f in sorted(_g.glob(os.path.join(OUT, "*.md"))):
-        head = open(f, encoding="utf-8").read()[:1500]
+        with open(f, encoding="utf-8") as page:
+            head = page.read(1500)
         g = lambda k: (re.search(rf"^{k}:\s*\"?(.+?)\"?\s*$", head, re.M) or [None, ""])[1]
         allrows.append((os.path.basename(f)[:-3], g("title"), g("doc_type"),
                         g("why_captured"), g("session_id")))
@@ -998,6 +1580,9 @@ def _main_distill():
         print(f"  ⚠️ the {failed} failure(s) left no completion marker — simply run again to retry them.")
     print(f"  {OUT}")
     print(f"  review list {REVIEW}  ({len(allrows)} rows) ← confirm classification and why_captured afterwards")
+    if failed or cont_failed:
+        raise SystemExit(f"distillation incomplete: {failed} session(s) and {cont_failed} continuation(s) failed; "
+                         "successful completion markers were retained; retry to process only unfinished work")
 
 
 if __name__ == "__main__":

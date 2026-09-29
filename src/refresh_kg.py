@@ -57,6 +57,15 @@ VAULT_PLUGIN = os.path.join(VAULT, ".obsidian/plugins/kal-galaxy")
 # The full grounds are in docs/PIPELINE.md §KG refresh.
 WARN_RATIO = 0.20
 
+# `--check` only fails past this many pending chunks — not on "any at all".  A single new page
+# (one document, a handful of chunks) is normal and constant; failing --check on it would make
+# `refresh_kg.py --check || refresh_kg.py` (the cron/hook pattern, DESIGN-EXTRACT-MCP.md §4) run
+# a full extraction — and `lr_extract.py`'s own path still calls `claude -p` (the shared
+# subscription quota, not a per-agent budget) unless every chunk is being extracted through the
+# kal_extract_* MCP tools instead.  Firing on every single ingested page would spend that quota
+# continuously rather than in the batched, threshold-gated way this cron loop is meant to run in.
+PENDING_WARN = int(os.environ.get("KAL_PENDING_WARN", "50"))
+
 
 def stale_state(db):
     """→ (a dict of the latest reason per document, the total document count).  A document recorded several times counts once.
@@ -94,6 +103,19 @@ def report(latest, total):
     return ratio
 
 
+def pending_count():
+    """Chunks pending extraction that stale_docs never caught (§1 of DESIGN-EXTRACT-MCP.md):
+    stale_docs is only filled by the sync_v3 path, so a document that arrived through openwiki
+    (or any other path that never runs sync_v3) never gets a stale_docs row and never gets a
+    doc_hashes entry either — it was invisible to both existing checks.  collect() sees the
+    whole vault regardless of how a document arrived, so lr_extract.pending_extraction() is the
+    one place this judgement lives now — status.py ④ and kal_extract_begin (kal_mcp.py) call
+    the same function.
+    """
+    import lr_extract
+    return lr_extract.pending_extraction()["pending_count"]
+
+
 def run(cmd, cwd=None):
     print(f"\n$ {' '.join(cmd)}", flush=True)
     p = subprocess.run(cmd, cwd=cwd)
@@ -114,12 +136,20 @@ def main():
     db = lancedb.connect(DB)
     latest, total = stale_state(db)
     ratio = report(latest, total)
+    pending = 0 if a.aliases_only else pending_count()
+    # Always printed (even 0) — code review round 1: a silent "0" reads as "there is nothing to
+    # say" when in fact nobody looked; a explicit number is the only way to tell "checked, none
+    # pending" from "the check was skipped".
+    print(f"  {pending} chunk(s) awaiting extraction — never reached stale_docs (new "
+          f"documents, or documents ingested outside the sync_v3 path)")
 
     if a.check:
-        # Reported through the exit code — cron and hooks use `refresh_kg.py --check || refresh_kg.py`
-        sys.exit(1 if ratio >= WARN_RATIO else 0)
+        # Reported through the exit code — cron and hooks use `refresh_kg.py --check || refresh_kg.py`.
+        # `pending >= PENDING_WARN`, not `pending` truthy — see PENDING_WARN above for why a
+        # single new page must not fail --check.
+        sys.exit(1 if (ratio >= WARN_RATIO or pending >= PENDING_WARN) else 0)
 
-    if not latest and not a.force and not a.aliases_only:
+    if not latest and not pending and not a.force and not a.aliases_only:
         print("\n  Nothing to refresh.  To force it, pass --force")
         return
 

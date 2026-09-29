@@ -40,6 +40,7 @@ import pyarrow as pa
 
 import kal_config as _kal_config
 from frontmatter import FM_RE, FM_OPEN_RE
+from source_links import source_urls
 # Where the vault lives.  Mounted at /vault inside the container (see docker-compose).
 #  Priority is the same as every other setting: environment > ~/.kal/config.json > default.
 #  This one place used to skip config.json, so `export KAL_VAULT=…` lived **only in that
@@ -216,7 +217,7 @@ def is_skipped(path):
     #  ⚠ A generated `index.md` is navigation, not knowledge —— it is a list of links to the
     #     documents beside it, so indexing it puts a page whose entire body is other pages' titles
     #     into the same ranking as those pages.  Measured 2026-09-02: searching the bundle for
-    #     "지식 그래프" returned `personal/sessions/claude/index.md` **first**, ahead of the three
+    #     a Korean query for 'knowledge graph' returned `personal/sessions/claude/index.md` **first**, ahead of the three
     #     documents actually about it.  OKF §8 makes these files a required navigational surface,
     #     which is exactly why they must not compete as content.
     if parts[-1] == "index.md":
@@ -402,6 +403,7 @@ def schemas(dim):
             pa.field("path", pa.string()),           # the natural key
             pa.field("abs_path", pa.string()),
             pa.field("title", pa.string()),
+            pa.field("source_url", pa.string()),
             pa.field("folder", pa.string()),
             pa.field("size", pa.int64()),
             pa.field("mtime", pa.int64()),
@@ -558,9 +560,50 @@ def clean(t):
 # Which key was used is recorded in date_src.  Mixed together they cannot be told apart later.
 DATE_KEYS = ("generated_at", "captured", "created", "updated")
 
+#  Outside sources kal-ingest (skills/kal-ingest/SKILL.md) tells a person or an agent to record
+#  with `sources: [{resource, type, channel?}]` in a document's own frontmatter.  An allowlist,
+#  not a pattern —— the same reasoning as `SESSION_AGENTS`: `type: evil` must not become an
+#  origin nobody chose.
+ORIGIN_TYPES = ("slack", "notion", "gdrive", "web")
+#  **The one list of every origin `classify_origin` can return.**  Every origin-aware consumer —
+#  `kal_mcp.kal_search`'s allowed values, its docstring, `kal_search.py`'s `--origin` choices —
+#  reads this instead of spelling the pair (or now six) out again.  `status.py`/`kal_stats`'s
+#  `by_origin` need no list at all: they just Counter() whatever `documents.origin` holds.
+ORIGINS = ("vault", "session") + ORIGIN_TYPES
+
+
+def source_type(fm):
+    """The outside-source type from `sources[].type` in a frontmatter **block** —— `""` if none.
+
+    ⚠ **The frontmatter block only, never the body.**  Same class of bug `classify_origin`'s own
+       docstring already warns about for the session URI: a note *documenting* the `sources:`
+       convention (this very docstring, if it were indexed) must not be reclassified by it.
+       Callers pass `m.group(1)` from `FM_RE`, never the raw file text.
+
+    Handles both spellings kal-ingest and the MCP tools can write:
+        flow style, one line:  sources: [{resource: "…", type: slack, channel: "#eng"}]
+        block style:           sources:
+                                  - resource: "…"
+                                    type: slack
+
+    Only `ORIGIN_TYPES` come back as a type — an unknown or malformed one is `""`, never a guess.
+    """
+    #  Flow style first: `type:` has to be found before the matching `]`, so the line is scanned
+    #  only up to a reasonable width rather than with an unbounded `.*` that could run past it
+    #  into a later, unrelated `sources:`-shaped line.
+    m = re.search(r'^sources:[ \t]*\[.{0,2000}?\btype:[ \t]*["\']?(\w+)', fm, re.M)
+    if not m:
+        #  Block style: the `sources:` key followed by its indented lines, then `type:` within
+        #  those —— the same two-step `okf_generated_at` uses for `generated: { at: … }`.
+        blk = re.search(r"^sources:[ \t]*\r?\n((?:[ \t]+\S.*\r?\n?)+)", fm, re.M)
+        if blk:
+            m = re.search(r'^[ \t]+type:[ \t]*["\']?(\w+)', blk.group(1), re.M)
+    t = m.group(1).lower() if m else ""
+    return t if t in ORIGIN_TYPES else ""
+
 
 def classify_origin(rel, raw):
-    """`session` or `vault`.
+    """One of `ORIGINS`.
 
     ⚠ **Provenance, not path.**  This was `rel.startswith(SESSION_DIR)`, which only recognises the
        vault's own `raw/conversations/sessions/`.  An openwiki bundle keeps the same documents at
@@ -578,10 +621,21 @@ def classify_origin(rel, raw):
        Reproduced 2026-09-04 on all three spellings.  This corpus is largely write-ups about this
        pipeline, so it fires in practice.  Same body-vs-frontmatter class as `owned()` in
        openwiki_emit and promote_distilled, which were both fixed for it.
+
+    ⚠ **Sessions keep precedence.**  `sources[].type` is only ever consulted once the session
+       arms above have both said no —— a distilled session that happens to also carry a
+       `sources: [{type: slack}]` entry (it does not today, but nothing stops it) stays `session`.
     """
     #  The path arm stays unconditional —— the vault layout, kept for anything predating the bundle.
     #  A page there is a session even when its agent is one `SESSION_AGENTS` does not name.
-    return "session" if rel.startswith(SESSION_DIR) or session_agent(rel, raw) else "vault"
+    if rel.startswith(SESSION_DIR) or session_agent(rel, raw):
+        return "session"
+    m = FM_RE.match(raw)
+    if m:
+        t = source_type(m.group(1))
+        if t:
+            return t
+    return "vault"
 
 
 def session_agent(rel, raw):
@@ -899,6 +953,7 @@ def scan_vault(with_unreadable=False):
         no_llm = no_llm or _blocked_by_path(rel)
         out[did] = {"doc_id": did, "path": rel, "abs_path": f,
                     "title": title or os.path.basename(rel)[:-3],
+                    "source_url": next(iter(source_urls(raw)), ""),
                     "folder": os.path.dirname(rel) or ".",
                     "size": st.st_size, "mtime": int(st.st_mtime),
                     "content_hash": hashlib.sha256(raw.encode()).hexdigest()[:16],
@@ -950,6 +1005,43 @@ def diff_vault(new, db):
             deleted.discard(oh[h])
     return {"added": added, "modified": modified, "deleted": deleted,
             "renamed": renamed, "unchanged": unchanged, "first_build": False}
+
+
+#  DESIGN-GITHUB-SYNC.md §3.3 —— the "index" writer of the three the ledger names (distill,
+#  index, extract).  `session` origin is deliberately excluded: distill_sessions.mark_done()
+#  already writes a richer row for it (distilled_through_last_ts, the agent-specific source_type)
+#  and a second, poorer row here would just be noise the same document already has a home for.
+LEDGER_SOURCE_TYPE = {"vault": "obsidian", "slack": "slack_channel",
+                       "notion": "notion_page", "gdrive": "gdrive", "web": "web"}
+
+
+def record_index_ledger(docs, changes):
+    """Best-effort ledger row (§3.2) for every added/modified document this rebuild touched.
+    Never raises and never blocks the index: a device with no bundle configured (KAL_VAULT unset,
+    true of most local-only installs) must index exactly as it did before the ledger existed.
+
+    ⚠ **`source_id` is the vault-relative path, not `sources[].resource`.**  The two agree for a
+       document synced only once, but a Slack message re-ingested independently by two devices
+       would get two different ledger rows instead of converging on one — `classify_origin`'s
+       frontmatter reader already extracts `type`, but not yet `resource`, and adding that is a
+       DB-schema-free follow-up, not implemented here (report back if cross-device de-dup on the
+       *same* external resource is wanted before that follow-up lands).
+    """
+    for did in changes.get("added", ()) | changes.get("modified", ()):
+        row = docs.get(did)
+        if not row:
+            continue
+        source_type = LEDGER_SOURCE_TYPE.get(row.get("origin"))
+        if source_type is None:
+            continue
+        try:
+            import ledger
+            ledger.append({"source_type": source_type, "source_id": row["path"],
+                            "content_hash": row["content_hash"],
+                            "source_updated_at": row.get("doc_updated") or None,
+                            "no_llm": bool(row.get("no_llm"))})
+        except Exception:
+            pass
 
 
 def llm_gate(doc_ids, blocked):
@@ -1350,6 +1442,7 @@ def _main_index():
                   f"· deleted {len(changes['deleted'])} · renamed {len(changes['renamed'])} "
                   f"· unchanged {len(changes['unchanged'])}")
         print()
+        record_index_ledger(docs, changes)
 
         # Note the stale marks present at the start.  **Only these** are cleared later —— marks
         # sync_v3 adds while the rebuild is running point at documents not yet extracted, so
@@ -1909,6 +2002,58 @@ def _selftest():
     #  …and outside that layout the key alone is not provenance, the same as for origin.
     assert session_agent("personal/wiki/x.md", "---\ntitle: t\nsession_agent: codex\n---\nb") == "", \
         "a session_agent key outside the older layout was taken for provenance"
+
+    #  ── outside sources: frontmatter's sources[].type becomes an origin ─────────────────────
+    #  kal-ingest's convention (skills/kal-ingest/SKILL.md): sources: [{resource, type, channel?}].
+    for _typ in ORIGIN_TYPES:
+        for _flow, _blk in (
+            ('---\ntitle: n\nsources: [{resource: "https://x", type: %s}]\n---\nb\n' % _typ,
+             '---\ntitle: n\nsources:\n  - resource: "https://x"\n    type: %s\n---\nb\n' % _typ),
+        ):
+            assert classify_origin("personal/wiki/x.md", _flow) == _typ, \
+                f"flow-style sources[].type={_typ} was not recognised: {classify_origin('p', _flow)!r}"
+            assert classify_origin("personal/wiki/x.md", _blk) == _typ, \
+                f"block-style sources[].type={_typ} was not recognised: {classify_origin('p', _blk)!r}"
+    #  an unknown type is not a guess —— it falls back to vault, same as an unknown session scheme
+    assert classify_origin("personal/wiki/x.md",
+                           '---\ntitle: n\nsources: [{resource: "https://x", type: evil}]\n---\nb\n'
+                           ) == "vault", "an unrecognised sources[].type made up an origin"
+    #  a type mentioned only in the body, not the frontmatter, must not reclassify the note
+    assert classify_origin("personal/wiki/x.md",
+                           "---\ntitle: n\n---\nsources: [{resource: \"x\", type: slack}]\n"
+                           ) == "vault", "a sources[] block in the body was read as frontmatter"
+    #  sessions keep precedence over an outside-source type on the same document
+    assert classify_origin("personal/sessions/x.md",
+                           '---\ntitle: s\nsources:\n  - resource: "claude-session://a"\n'
+                           '    type: slack\n---\nb\n') == "session", \
+        "an outside-source type outranked session provenance"
+
+    #  ── record_index_ledger: the "index" writer of the ledger's three (DESIGN-GITHUB-SYNC.md §3.3) ──
+    import tempfile as _tf, ledger as _L
+    with _tf.TemporaryDirectory() as _d:
+        _docs = {1: {"path": "a.md", "origin": "vault", "content_hash": "h1",
+                     "doc_updated": "2026-01-01", "no_llm": False},
+                 2: {"path": "b.md", "origin": "slack", "content_hash": "h2",
+                     "doc_updated": "2026-01-02", "no_llm": True},
+                 3: {"path": "c.md", "origin": "session", "content_hash": "h3",
+                     "doc_updated": "2026-01-03", "no_llm": False}}
+        _changes = {"added": {1, 2, 3}, "modified": set()}
+        record_index_ledger(_docs, _changes)      # no KAL_VAULT set yet — must be a no-op, not an error
+        assert _L.read_all(root=_d) == []
+        import os as _os
+        _old_vault = _os.environ.get("KAL_VAULT")
+        _os.environ["KAL_VAULT"] = _d
+        try:
+            record_index_ledger(_docs, _changes)
+        finally:
+            if _old_vault is None:
+                del _os.environ["KAL_VAULT"]
+            else:
+                _os.environ["KAL_VAULT"] = _old_vault
+        _rows = {(r["source_type"], r["source_id"]): r for r in _L.read_all(root=_d)}
+        assert set(_rows) == {("obsidian", "a.md"), ("slack_channel", "b.md")}, \
+            f"vault→obsidian and slack→slack_channel expected, session must not get a second row: {_rows}"
+        assert _rows[("slack_channel", "b.md")]["no_llm"] is True, _rows
 
     # ── The rebuild must refuse to replace a populated DB with nothing ──────────────────
     #  ⚠ Run as a **subprocess against the real entry point**, not by calling the comparison.

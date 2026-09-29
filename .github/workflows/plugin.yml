@@ -33,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.0.1
-        with: { enable-cache: true }
+        with: { enable-cache: true, python-version: '3.13' }
       - uses: oven-sh/setup-bun@v2
       #  ⚠ Go is installed **explicitly**.  There was no `setup-go` until now, so it ran on
       #     whatever version the runner happened to carry —— `api/go.mod` asks for `go 1.25`
@@ -74,7 +74,10 @@ jobs:
       - name: Plugin tests
         run: cd plugin && npm ci && npm test
       - name: Go tests
-        run: cd api && go test ./...
+        run: |
+          KAL_VAULT="$(mktemp -d)"
+          export KAL_VAULT
+          cd api && go test -count=1 ./...
 
   probe:
     runs-on: ubuntu-latest

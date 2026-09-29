@@ -52,7 +52,7 @@ import pyarrow.compute as pc
 #  `agent` says what `origin` says —— that a gated document is a session, and whose —— so it is
 #  blanked with it.  (2026-09-25)
 GATED_BLANK = ("path", "abs_path", "title", "folder", "content_hash", "origin", "agent", "doc_type",
-               "doc_date", "date_src", "doc_updated")
+               "doc_date", "date_src", "doc_updated", "source_url")
 GATED_ZERO = ("size", "mtime", "indexed_at")
 GATED_KEEP = ("doc_id", "no_llm")
 

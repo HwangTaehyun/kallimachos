@@ -313,12 +313,38 @@ selftest: mcp-test selftest-py
 #
 # Every self-check that runs without docker (CI calls this)
 selftest-py:
+    @just _test-isolated just selftest-py-checks
+
+_test-isolated +args:
+    @set -eu; \
+      python=$({{py}} -c 'import sys; print(sys.executable)'); \
+      uv_cache=$(uv cache dir); hf_home="${HF_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/huggingface}"; \
+      T=$(mktemp -d); trap 'chmod -R u+w "$T"; rm -rf "$T"' EXIT; \
+      for name in $(compgen -e); do case "$name" in KAL_*|GIT_*|ANTHROPIC_*|CLAUDE_*|OPENAI_*|VAULT_DIR|PYTHONPATH|PYTHONHOME) unset "$name";; esac; done; \
+      mkdir -p "$T/home" "$T/state" "$T/vault" "$T/config" "$T/cache" "$T/tmp" "$T/bin"; \
+      for cli in claude codex hermes; do ln -s /usr/bin/false "$T/bin/$cli"; done; \
+      git config --file "$T/gitconfig" user.name fixture; \
+      git config --file "$T/gitconfig" user.email fixture@example.invalid; \
+      env HOME="$T/home" KAL_HOME="$T/state" KAL_DIR="$T/state" KAL_VAULT="$T/vault" VAULT_DIR="$T/vault" \
+        KAL_OUT="$T/output" KAL_PYTHON="$python" KAL_SRC="{{src}}" \
+        XDG_CONFIG_HOME="$T/config" XDG_CACHE_HOME="$T/cache" TMPDIR="$T/tmp" PATH="$T/bin:$PATH" \
+        GIT_CONFIG_GLOBAL="$T/gitconfig" GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+        UV_CACHE_DIR="$uv_cache" UV_OFFLINE=1 UV_PYTHON_DOWNLOADS=never \
+        HF_HOME="$hf_home" HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_HUB_DISABLE_TELEMETRY=1 \
+        HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 \
+        http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 all_proxy=http://127.0.0.1:9 \
+        NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1 {{args}}
+
+[private]
+selftest-py-checks:
     #  ⚠ A lock out of step with pyproject **kills the container build** —— `uv sync --frozen`
     #    fails with `Could not find root package`.  Locally it goes unnoticed because the
     #    already-built .venv makes everything run: measured (2026-08-25), changing only
     #    `pyproject`'s name left every self-check and test passing while `just up` died.
     #    It is the cheapest check, so it goes first.
     @uv lock --check
+    @{{py}} -m unittest discover -s "{{src}}" -p 'test_*.py' -v
+    @just selftest-py-wheel
     @{{py}} {{src}}/plugin_probe.py --selftest
     @{{py}} {{src}}/kal_lock.py
     @{{py}} {{src}}/entity_resolve.py
@@ -326,6 +352,10 @@ selftest-py:
     @{{py}} {{src}}/claude_relay.py --selftest
     @{{py}} {{src}}/claude_cli.py --selftest
     @{{py}} {{src}}/kal_mcp.py --selftest-static
+    #  ⚠ The extraction lifecycle + real-stdio suite runs only when KAL_MCP_WRITE=1, and
+    #    `_test-isolated` strips every inherited KAL_* —— so it is set here, after that strip.
+    #    status.py's wiring guard requires this exact line.
+    @KAL_MCP_WRITE=1 {{py}} {{src}}/kal_mcp.py --selftest-static
     @{{py}} {{src}}/test_stale_resolve.py
     @{{py}} {{src}}/alias_suggest.py --selftest
     @R="${KAL_HOME:-$HOME/.kal}/runs"; n=$(ls "$R" 2>/dev/null | wc -l); {{py}} {{src}}/verify_docs.py --selftest || exit 1; [ "$(ls "$R" 2>/dev/null | wc -l)" = "$n" ] || { echo "  ❌ verify_docs --selftest wrote a run record into $R"; exit 1; }
@@ -337,6 +367,9 @@ selftest-py:
     #  The one frontmatter fence.  It runs **before** schema_v3, because every fence-shaped
     #  defect below it starts here —— twelve copies of this regex once disagreed.
     @{{py}} {{src}}/frontmatter.py
+    @{{py}} {{src}}/ledger.py --selftest
+    @{{py}} {{src}}/device_auth.py --selftest
+    @{{py}} {{src}}/github_sync.py --selftest
     @{{py}} {{src}}/schema_v3.py --selftest
     @{{py}} {{src}}/kal_search.py --selftest
     @{{py}} {{src}}/kal_config.py --selftest
@@ -413,6 +446,12 @@ selftest-py:
     @#     the ignore rule just silently stops existing, so it takes a machine to see.
     @if grep -nE '^[^#[:space:]].*[^[:space:]][[:space:]]+#' .gitignore .dockerignore; then echo "  ❌ end-of-line comment above —— that whole line is one pattern and matches nothing"; exit 1; fi; echo "  ✅ ignore files carry no end-of-line comments"
     @echo "  ── the list above is every self-check (read the list, do not count) ──"
+
+[private]
+selftest-py-wheel:
+    @set -eu; T=$(mktemp -d); trap 'rm -rf "$T"' EXIT; \
+      uv build --offline --python "{{py}}" --out-dir "$T"; \
+      {{py}} {{src}}/test_cli_wheel.py "$T"/*.whl "$T"/*.tar.gz
 
 # ── The pipeline ──────────────────────────────────────────────────────
 
@@ -675,6 +714,29 @@ sync *args:
 # Refresh the stale KG (extract → build → export)
 refresh *args:
     @{{py}} {{src}}/refresh_kg.py {{args}}
+
+#  ── kal cloud device sync (DESIGN-GITHUB-SYNC.md §5, §7) ─────────────────────────────────
+#
+#  Distinct from `sync` above (that one is the local, per-document `sync_v3.py` — no GitHub,
+#  no cloud). These four are `kal login`/`kal logout`/`kal whoami`/`kal sync` (kal_cli.py) run
+#  directly from this checkout; `[project.scripts]` (pyproject.toml) installs the same dispatcher
+#  as the `kal` command — see kal_cli.py's own docstring.
+
+# Log this device in to kal cloud (RFC 8628 device-code flow) — opens a link, waits for approval
+login *args:
+    @{{py}} {{src}}/kal_cli.py login {{args}}
+
+# Remove this device's saved credential
+logout:
+    @{{py}} {{src}}/kal_cli.py logout
+
+# This device's login (url + device name only — never the token)
+whoami:
+    @{{py}} {{src}}/kal_cli.py whoami
+
+# Pull → distil this device's new sessions → export → commit (own paths only) → push
+sync-github:
+    @{{py}} {{src}}/kal_cli.py sync
 
 # Why KAL_PYTHON is passed: export_all.sh defaults to `python3`, so without it the system
 # python is used instead of the venv and lancedb is not found.

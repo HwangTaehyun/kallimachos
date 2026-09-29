@@ -34,6 +34,8 @@ KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 import lancedb
+from schema_v3 import ORIGINS
+from source_links import external_url
 
 DB = os.environ.get("KAL_PATH", os.path.join(KAL_HOME, "db"))
 _M = None
@@ -363,6 +365,7 @@ class KAL:
         return [{"doc_id": d, "score": round(s, 4),
                  "path": self.D.get(d, {}).get("path", "?"),
                  "title": self.D.get(d, {}).get("title", "?"),
+                 "source_url": external_url(self.D.get(d, {}).get("source_url")),
                  "origin": self.D.get(d, {}).get("origin", "vault"),
                  "abs_path": self.D.get(d, {}).get("abs_path", "")} for d, s in ranked], mode, w
 
@@ -717,7 +720,7 @@ if __name__ == "__main__":
     ap.add_argument("query")
     ap.add_argument("--mode", default="default", choices=list(PRESETS))
     ap.add_argument("--top", type=int, default=ANSWER_N)
-    ap.add_argument("--origin", choices=["vault", "session"])
+    ap.add_argument("--origin", choices=list(ORIGINS))
     ap.add_argument("--min-degree", type=int, default=1,
                     help="exclude entities/relations with fewer than N connections from the graph components (default 1 = all)")
     ap.add_argument("--snippets", action="store_true")
@@ -743,6 +746,8 @@ if __name__ == "__main__":
         for i, r in enumerate(res, 1):
             tag = "📓" if r["origin"] == "vault" else "💬"
             print(f'  {i:>2}. [{r["score"]:.3f}] {tag} {r["path"]}')
+            if r.get("source_url"):
+                print(f'      Original: {r["source_url"]}')
         if a.snippets:
             print()
             sn = kal.snippets(a.query, [r["doc_id"] for r in res[:3]])

@@ -34,6 +34,14 @@ dev = [
     "textual-dev>=1.7",     # `textual console` —— the only practical way to debug a TUI
 ]
 
+#  `kal login`/`kal sync` are installed as a console script by the package build below.
+#  The wheel contains the pipeline's Python modules, with `kal_cli` as the command dispatcher.
+#  `uv sync` installs this entry point into the project environment; a wheel install exposes
+#  the same command without a source checkout. The just recipes remain available for source
+#  users: `just login`/`just logout`/`just whoami`/`just sync-github` call the same dispatcher.
+[project.scripts]
+kal = "kal_cli:main"
+
 # ── torch, in its CPU build ────────────────────────────────────────────────
 #
 #  The default PyPI linux wheel is `torch==2.13.0+cu130` and drags in the CUDA runtime.
@@ -53,6 +61,21 @@ explicit = true          # this index is used only for the packages named below
 torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [tool.uv]
-#  This is **a collection of scripts**, not a library.  It is not built —— without saying so,
-#  uv warns "skipping project.scripts" on every run.
-package = false
+#  Build the pipeline scripts as installable modules so the `kal` console entry point works
+#  outside a source checkout as well as in the project's uv environment.
+package = true
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+exclude = ["/src/test_*.py", "**/__pycache__/**", "**/*.pyc"]
+
+[tool.hatch.build.targets.wheel]
+only-include = ["src"]
+include = ["/src/*.py"]
+sources = ["src"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src/*.py", "/pyproject.toml", "/uv.lock", "/LICENSE"]

@@ -33,7 +33,7 @@ import os, re, sys, json, errno, fnmatch, collections, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 #  ⚠ Imported, never copied.  See the module docstring.
 from ingest_sessions import (SECRETS, mask, find_leaks, SYNTH,      # noqa: F401  (SECRETS/SYNTH re-exported for tests)
-                             NOISE_PREFIX, NOISE_RE, load_excluded, before_cutoff)
+                             NOISE_PREFIX, NOISE_RE, load_excluded, before_cutoff, epoch)
 
 KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
 #  Where Codex itself keeps them: `$CODEX_HOME` when set (`find_codex_home`, openai/codex
@@ -111,7 +111,7 @@ def is_noise(block):
     return any(p.search(s) for p in NOISE_RE)
 
 
-def parse_rollout(path, cutoff=None):
+def parse_rollout(path, cutoff=None, *, since=None, through=None):
     """One rollout file → {text, n_msg, first_ts, last_ts, cwd, cli_version} or None.
 
     `cutoff` (epoch seconds, from exclude.txt) drops every row stamped at or after it.
@@ -141,6 +141,11 @@ def parse_rollout(path, cutoff=None):
                 continue                       # turn_context, compacted, …
             if not before_cutoff(row.get("timestamp"), cutoff):
                 continue                       # at or after this session's cutoff in exclude.txt
+            stamp = epoch(row.get("timestamp"))
+            if since is not None and (stamp is None or stamp <= since):
+                continue
+            if through is not None and (stamp is None or stamp > through):
+                continue
             ptype = payload.get("type")
             if ptype in DROP_PAYLOAD:
                 continue

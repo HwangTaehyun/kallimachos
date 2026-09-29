@@ -242,7 +242,7 @@ def render_index(rel_dir, entries, root=False):
         lines += ["---", 'okf_version: "0.2"', "---", ""]
     lines += ["# %s" % (rel_dir.rstrip("/").split("/")[-1] or "openwiki"), ""]
     if not entries:
-        lines.append("_(비어 있음)_")
+        lines.append("_(empty)_")
     for title, rel, desc in sorted(entries, key=lambda e: (e[0] or "", e[1])):
         lines.append("* [%s](/%s)%s" % (title or slug_of(rel), rel.lstrip("/").replace(os.sep, "/"),
                                         (" - " + desc) if desc else ""))
@@ -262,6 +262,255 @@ def convert_one(src, rel_out, idx, unresolved):
     return text, (fm.get("title") or slug_of(src)), desc
 
 
+def _device_metadata(text):
+    import yaml
+    from source_links import MAX_FRONTMATTER_CHARS, MAX_YAML_DEPTH, MAX_YAML_NODES
+
+    match = FM_RE.match(text)
+    if not match:
+        return (), None, None
+    block = match.group(1)
+    if not OWNED_LINE.search(_fm_scalar_free(block)):
+        return (), match, None
+    try:
+        if len(block) > MAX_FRONTMATTER_CHARS:
+            raise ValueError("oversized frontmatter requires manual review")
+        depth = nodes = 0
+        for event in yaml.parse(block, Loader=yaml.SafeLoader):
+            if getattr(event, "anchor", None):
+                raise ValueError("frontmatter aliases require manual review")
+            if isinstance(event, (yaml.MappingStartEvent, yaml.SequenceStartEvent)):
+                depth += 1
+                nodes += 1
+            elif isinstance(event, (yaml.MappingEndEvent, yaml.SequenceEndEvent)):
+                depth -= 1
+            elif isinstance(event, yaml.ScalarEvent):
+                nodes += 1
+                if event.value == "<<":
+                    raise ValueError("frontmatter merges require manual review")
+            if depth > MAX_YAML_DEPTH or nodes > MAX_YAML_NODES:
+                raise ValueError("complex frontmatter requires manual review")
+        node = yaml.compose(block, Loader=yaml.SafeLoader)
+        data = yaml.safe_load(block)
+        if not isinstance(node, yaml.MappingNode) or node.flow_style or not isinstance(data, dict):
+            raise ValueError("unsupported frontmatter mapping")
+        mappings = [node]
+        source_node = next((value for key, value in node.value if key.value == "sources"), None)
+        if isinstance(source_node, yaml.SequenceNode):
+            mappings.extend(value for value in source_node.value if isinstance(value, yaml.MappingNode))
+        for mapping in mappings:
+            keys = [key.value for key, _ in mapping.value if isinstance(key, yaml.ScalarNode)]
+            if len(keys) != len(mapping.value) or len(keys) != len(set(keys)) or "<<" in keys:
+                raise ValueError("ambiguous frontmatter keys")
+        sources = data.get("sources", [])
+        if not isinstance(sources, list):
+            raise ValueError("invalid session provenance")
+        resources = tuple(sorted({item["resource"] for item in sources if isinstance(item, dict)
+                                  and isinstance(item.get("resource"), str)
+                                  and re.fullmatch(r"(?:" + "|".join(map(re.escape, SESSION_AGENTS))
+                                                   + r")-session://[^\s]+", item["resource"])}))
+        return resources, match, node
+    except yaml.YAMLError as error:
+        raise ValueError("unreadable published frontmatter") from error
+
+
+def _privacy_metadata_only(text):
+    provenance, match, node = _device_metadata(text)
+    if not provenance or node is None:
+        raise ValueError("no safely matched session provenance")
+    if NO_LLM_RE.search(match.group(1)):
+        return text
+    field = next((value for key, value in node.value if key.value == "no_llm"), None)
+    if field is not None:
+        if field.start_mark.line != field.end_mark.line or not hasattr(field, "style"):
+            raise ValueError("complex no_llm value requires manual review")
+        start = match.start(1) + field.start_mark.index
+        end = match.start(1) + field.end_mark.index
+        return text[:start] + "true" + text[end:]
+    newline = "\r\n" if "\r\n" in text[:match.start(1)] else "\n"
+    return text[:match.start(1)] + "no_llm: true" + newline + text[match.start(1):]
+
+
+def _device_git(wiki, args):
+    result = subprocess.run(["git", "--literal-pathspecs", "-c", "core.hooksPath=/dev/null",
+                             "-c", "core.fsmonitor=false", "-C", wiki, *args], capture_output=True)
+    if result.returncode:
+        raise ValueError("could not verify published Git history")
+    return result.stdout
+
+
+def _reviewed_paths(wiki, relative):
+    history = _device_git(wiki, ["log", "--follow", "--format=", "--name-status", "-z", "--", relative])
+    entries = iter(history.decode("utf-8", "surrogateescape").split("\0"))
+    paths = {relative}
+    current = relative
+    for status in entries:
+        status = status.strip()
+        if not status:
+            continue
+        first = next(entries, "")
+        if status.startswith(("R", "C")):
+            second = next(entries, "")
+            if status.startswith("R") and second == current:
+                paths.add(first)
+                current = first
+    return paths
+
+
+def _device_plan(wiki, device_root, plan):
+    wiki = os.path.realpath(wiki)
+    published = {}
+    snapshots = {}
+    has_history = bool(_device_git(wiki, ["rev-list", "--all", "--max-count=1"]).strip())
+    tracked = set(_device_git(wiki, ["ls-files", "-z", "--", os.path.relpath(device_root, wiki)])
+                  .decode("utf-8", "surrogateescape").split("\0"))
+    for directory, dirs, files in os.walk(device_root, followlinks=False):
+        for name in dirs + files:
+            path = os.path.join(directory, name)
+            if os.path.islink(path):
+                raise ValueError(f"device page contains a symlink: {os.path.relpath(path, wiki)}")
+        for name in files:
+            if not name.endswith(".md") or name == "index.md":
+                continue
+            path = os.path.join(directory, name)
+            with open(path, "rb") as source:
+                content = source.read()
+                identity = os.fstat(source.fileno())
+            text = content.decode("utf-8", "surrogateescape")
+            relative = os.path.relpath(path, wiki)
+            try:
+                provenance, _, _ = _device_metadata(text)
+            except ValueError as error:
+                raise ValueError(f"manually review and flag no_llm for {relative}: {error}") from error
+            if not provenance:
+                continue
+            if relative not in tracked or identity.st_nlink != 1:
+                raise ValueError(f"untracked or hardlinked owned page requires review: {relative}")
+            published[relative] = (text, provenance)
+            snapshots[relative] = (content, identity)
+    histories = {}
+
+    def reviewed_paths(relative):
+        if relative not in histories:
+            histories[relative] = _reviewed_paths(wiki, relative)
+        return histories[relative]
+
+    resolved = []
+    claimed = set()
+    for relative, text, title, desc in plan:
+        provenance, match, _ = _device_metadata(text)
+        if not provenance:
+            raise ValueError(f"cannot establish session ownership for {relative}")
+        destination = relative
+        if relative in published:
+            aliases = [candidate for candidate, (_, candidate_provenance) in published.items()
+                       if candidate != relative and candidate_provenance == provenance
+                       and relative in reviewed_paths(candidate)]
+            if aliases:
+                raise ValueError(f"ambiguous published identity; manually review {relative}, {', '.join(aliases)}")
+        if relative not in published and os.path.lexists(os.path.join(wiki, relative)):
+            raise ValueError(f"cannot establish owned published provenance; manually review no_llm for {relative}")
+        if has_history and relative not in published and not os.path.lexists(os.path.join(wiki, relative)):
+            commit = _device_git(wiki, ["log", "-1", "--diff-filter=AM", "--format=%H", "--", relative]).strip()
+            if commit:
+                previous = _device_git(wiki, ["show", commit.decode() + ":" + relative]).decode("utf-8", "surrogateescape")
+                previous_provenance, previous_match, _ = _device_metadata(previous)
+                candidates = []
+                lineage = []
+                related = []
+                for candidate, (current, candidate_provenance) in published.items():
+                    if candidate_provenance != provenance or previous_provenance != provenance:
+                        continue
+                    related.append(candidate)
+                    _, current_match, _ = _device_metadata(current)
+                    renamed = relative in reviewed_paths(candidate)
+                    previous_body = previous[previous_match.end():]
+                    current_body = current[current_match.end():]
+                    retains_identity = bool(previous_body.strip()) and current_body.startswith(previous_body)
+                    if renamed and retains_identity:
+                        lineage.append(candidate)
+                    if renamed or current_body == previous_body:
+                        candidates.append(candidate)
+                if len(candidates) != 1 or len(lineage) != 1:
+                    paths = ", ".join(candidates or related or [relative])
+                    raise ValueError(f"ambiguous or missing published identity for {relative}; review and manually flag no_llm where needed: {paths}")
+                destination = lineage[0]
+        if destination in claimed:
+            raise ValueError(f"ambiguous published identity: multiple sources target {destination}")
+        claimed.add(destination)
+        if destination in published:
+            current, current_provenance = published[destination]
+            if current_provenance != provenance:
+                raise ValueError(f"published provenance changed; manually review privacy for {destination}")
+            if NO_LLM_RE.search(match.group(1)):
+                try:
+                    text = _privacy_metadata_only(current)
+                except ValueError as error:
+                    raise ValueError(f"manually flag no_llm for {destination}: {error}") from error
+            elif destination != relative or has_no_llm(os.path.join(wiki, destination)):
+                text = current
+        resolved.append((destination, text, title, desc))
+    return resolved, snapshots
+
+
+def index_plan(wiki):
+    """Every generated index, built from the whole bundle: `(by_dir, [(path, text), ...], parents)`."""
+    by_dir = {}
+    for f in sorted(glob.glob(os.path.join(wiki, "**", "*.md"), recursive=True)):
+        rel = os.path.relpath(f, wiki)
+        if os.path.basename(rel) == "index.md" or rel.split(os.sep)[0] == "references":
+            continue
+        if os.sep not in rel:                       # SPEC.md / INSTRUCTIONS.md at the root
+            continue
+        fmx, _b = parse_fm(open(f, encoding="utf-8", errors="replace").read())
+        d = re.search(r'^description:\s*(.+)$', open(f, encoding="utf-8", errors="replace").read(), re.M)
+        by_dir.setdefault(os.path.dirname(rel), []).append(
+            ((fmx.get("title") or slug_of(rel)), rel,
+             (d.group(1).strip().strip('"') if d else "")))
+    #  a parent index listing its children, so no directory is unreachable from the root
+    #  every ancestor directory, up to and including the bundle root —— a directory reachable from
+    #  nowhere is a directory nobody finds.  §8 calls this progressive disclosure.
+    parents = set()
+    for d in by_dir:
+        while os.path.dirname(d):
+            d = os.path.dirname(d)
+            parents.add(d)
+    parents.add("")                                    # the bundle root
+
+    def _kids(p):
+        out = [(os.path.basename(d) or d, os.path.join(d, "index.md").replace(os.sep, "/"),
+                "%d page(s)" % len(v))
+               for d, v in sorted(by_dir.items()) if os.path.dirname(d) == p]
+        out += [(os.path.basename(c), os.path.join(c, "index.md").replace(os.sep, "/"), "")
+                for c in sorted(parents)
+                if c and os.path.dirname(c) == p and c not in by_dir]
+        return out
+    _writes = ([(os.path.join(wiki, d, "index.md"), render_index(d, entries))
+                for d, entries in sorted(by_dir.items())]
+               + [(os.path.join(wiki, p, "index.md"), render_index(p, _kids(p), root=(p == "")))
+                  for p in sorted(parents) if _kids(p)])
+    return by_dir, _writes, parents
+
+
+def _indexes_only(wiki):
+    """Rewrite every generated index from the pages already in the bundle (used after a sync merge)."""
+    if not git_ok(wiki):
+        print(f"❌ the bundle is not a git repository: {wiki}", file=sys.stderr)
+        return 1
+    root = os.path.realpath(wiki)
+    _by_dir, writes, _parents = index_plan(wiki)
+    for path, _ in writes:
+        if os.path.realpath(os.path.dirname(path)) != os.path.dirname(os.path.join(root, os.path.relpath(path, wiki))) \
+                or os.path.islink(path):
+            print(f"❌ {os.path.relpath(path, wiki)} resolves outside the bundle; nothing written", file=sys.stderr)
+            return 1
+    for path, text in writes:
+        with open(path, "w", encoding="utf-8") as out:
+            out.write(text)
+    print(f"  ✅ regenerated {len(writes)} index file(s)")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--wiki", default=WIKI, help="the openwiki bundle root")
@@ -274,12 +523,31 @@ def main():
                     help="skip source paths containing this fragment (repeatable).  Needed to "
                          "keep an already-migrated subtree — raw/conversations/sessions — out of "
                          "a run over its parent.")
+    ap.add_argument("--device", default=None,
+                    help="emit only this device's session pages; do not regenerate indexes or the bundle manifest")
+    ap.add_argument("--indexes-only", action="store_true",
+                    help="regenerate the shared index.md files from the bundle's pages; write nothing else")
     ap.add_argument("--force", action="store_true", help="proceed past the shrink guard")
     ap.add_argument("--dry-run", action="store_true", help="report, write nothing")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         return _selftest()
+    if a.device is not None:
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", a.device):
+            ap.error("--device must be a lowercase device slug")
+        if a.into is not None:
+            ap.error("--device cannot be combined with --into")
+        a.into = os.path.join("personal", "sessions", a.device)
+        device_root = os.path.join(os.path.realpath(a.wiki), a.into)
+        if os.path.realpath(device_root) != device_root:
+            print("device destination contains a symlink; refusing to write another path", file=sys.stderr)
+            return 1
+        state = subprocess.run(["git", "-C", a.wiki, "status", "--porcelain", "--untracked-files=all", "--", a.into],
+                               capture_output=True, text=True)
+        if state.returncode != 0 or state.stdout.strip():
+            print("device destination has uncommitted changes or cannot be inspected; review them before emitting", file=sys.stderr)
+            return 1
 
     #  ⚠ **`--into` used to be joined straight onto the bundle root.**  An absolute value
     #     discarded the root entirely and `../` walked out of it, so writes —— and then the
@@ -298,10 +566,12 @@ def main():
         probe = os.path.realpath(os.path.join(a.wiki, a.into))
         root = os.path.realpath(a.wiki)
         if os.path.commonpath([probe, root]) != root:
-            print(f"❌ --into escapes the bundle: {a.into} → {probe}")
+            print(f"❌ --into escapes the bundle: {a.into} → {probe}", file=sys.stderr)
             return 1
+    if a.indexes_only:
+        return _indexes_only(a.wiki)
     if not os.path.isdir(a.src):
-        print(f"❌ no such source folder: {a.src}")
+        print(f"❌ no such source folder: {a.src}", file=sys.stderr)
         return 1
     #  ⚠ **The source must not sit inside the bundle.**  `openwiki-adopt` points VAULT_DIR at the
     #     bundle so every surface reads what was indexed —— and from that moment `just openwiki-vault`
@@ -313,12 +583,12 @@ def main():
         print(f"❌ --from is inside the bundle: {a.src}\n"
               f"   Converting the bundle into itself would duplicate every page.\n"
               f"   After `just openwiki-adopt`, pass the original vault explicitly:\n"
-              f"     just openwiki-vault {a.wiki} <path-to-the-obsidian-vault>")
+              f"     just openwiki-vault {a.wiki} <path-to-the-obsidian-vault>", file=sys.stderr)
         return 1
     if not git_ok(a.wiki):
         print(f"❌ the bundle is not a git repository: {a.wiki}\n"
               f"   This replaces pages, and `git revert` is the only way back.\n"
-              f"     git -C {a.wiki} init && git -C {a.wiki} add -A && git -C {a.wiki} commit -m init")
+              f"     git -C {a.wiki} init && git -C {a.wiki} add -A && git -C {a.wiki} commit -m init", file=sys.stderr)
         return 1
 
     #  ⚠ Not recursive before.  Measured on the real vault: `wiki/` migrated **3 of 79** and
@@ -336,8 +606,11 @@ def main():
         print(f"  ⓘ excluded {before - len(files)} file(s) matching {a.exclude}")
     if n_ix:
         print(f"  ⓘ skipped {n_ix} source index.md —— this tool generates its own (§8)")
+    if not files and a.device:
+        print("  no settled session pages to emit; existing bundle files left unchanged")
+        return 0
     if not files:
-        print(f"❌ no .md under {a.src}")
+        print(f"❌ no .md under {a.src}", file=sys.stderr)
         return 1
 
     #  Wikilinks resolve against the *source* folder, the way okf_convert does for the vault.
@@ -389,6 +662,12 @@ def main():
             text = "\n".join(_l)
             carried_excl.append(_srel)
 
+        if a.device and has_no_llm(f):
+            try:
+                text = _privacy_metadata_only(text)
+            except ValueError as error:
+                print(f"cannot carry source privacy to {rel}; manually review no_llm: {error}", file=sys.stderr)
+                return 1
         plan.append((rel, text, title, desc))
 
     if carried_excl:
@@ -396,14 +675,32 @@ def main():
               f"excluded by KAL_NO_LLM/KAL_SKIP (first: {carried_excl[0]}) —— the bundle path "
               f"does not match those settings, so the mark travels with the content instead")
 
+    device_snapshots = {}
+    if a.device:
+        try:
+            plan, device_snapshots = _device_plan(a.wiki, device_root, plan)
+        except (ValueError, OSError) as error:
+            print(f"device emission stopped: {error}", file=sys.stderr)
+            return 1
+
     #  ── the shrink guard, counting what we would actually replace ──
     touched_dirs = sorted({os.path.dirname(os.path.join(a.wiki, rel)) for rel, *_ in plan})
     existing = sum(len(owned(d)) for d in touched_dirs if os.path.isdir(d))
-    if existing and len(plan) < existing * SHRINK_RATIO and not a.force:
+    if existing and not a.device and len(plan) < existing * SHRINK_RATIO and not a.force:
         print(f"❌ {len(plan)} page(s) to write but {existing} already there —— "
               f"{existing - len(plan)} would disappear.\n"
-              f"   Check that {a.src} is intact.  If this is intended, pass --force")
+              f"   Check that {a.src} is intact.  If this is intended, pass --force", file=sys.stderr)
         return 1
+
+    if a.device:
+        for rel, *_ in plan:
+            destination = os.path.join(a.wiki, rel)
+            if not _under(destination, device_root) or os.path.islink(destination):
+                print(f"device page resolves outside its owned directory or through a symlink: {rel}; refusing", file=sys.stderr)
+                return 1
+            if os.path.lexists(destination) and destination not in owned(os.path.dirname(destination)):
+                print(f"device emission would overwrite a non-generated page: {rel}; refusing", file=sys.stderr)
+                return 1
 
     left = sum(len(foreign(d)) for d in touched_dirs if os.path.isdir(d))
     if left:
@@ -422,7 +719,7 @@ def main():
     #     exactly one run, and nothing said so.  (deep review 2026-09-02, security lens)
     for rel, text, title, desc in list(plan):
         dst = os.path.join(a.wiki, rel)
-        if os.path.exists(dst) and has_no_llm(dst) and not re.search(r"^no_llm:", text, re.M):
+        if not a.device and os.path.exists(dst) and has_no_llm(dst) and not re.search(r"^no_llm:", text, re.M):
             i = plan.index((rel, text, title, desc))
             #  Second line, straight after `type:` —— the position `to_okf` puts it in.
             lines = text.split("\n")
@@ -434,12 +731,27 @@ def main():
     #  ⚠ **The one write that leaves ~/.kal (0700) for a shareable git repository.**  Both
     #     ingesters verify before writing; this boundary did not, so anything `SECRETS` fails to
     #     match rode ingest → distill → bundle uncontested.  Names and counts only, never values.
+    if a.device:
+        for rel, text, *_ in plan:
+            destination = os.path.join(a.wiki, rel)
+            if os.path.isfile(destination):
+                with open(destination, "rb") as existing_page:
+                    current = existing_page.read()
+                if current != text.encode("utf-8", "surrogateescape"):
+                    try:
+                        permitted = _privacy_metadata_only(current.decode("utf-8", "surrogateescape")) == text
+                    except ValueError:
+                        permitted = False
+                    if not permitted:
+                        print(f"device emission would replace an existing page: {rel}; preserve reviewed edits or publish a new page", file=sys.stderr)
+                        return 1
+
     leak = find_leaks("".join(txt for _rel, txt, *_ in plan))
     if leak:
         print(f"\n❌ masking verification failed — {sum(leak.values())} secret(s) in the pages "
-              f"about to be published: {leak}")
-        print("   Nothing is written and it stops here.  Strengthen SECRETS in ingest_sessions.py,")
-        print("   re-run the ingest and distil, then try again.")
+              f"about to be published: {leak}", file=sys.stderr)
+        print("   Nothing is written and it stops here.  Strengthen SECRETS in ingest_sessions.py,", file=sys.stderr)
+        print("   re-run the ingest and distil, then try again.", file=sys.stderr)
         return 1
 
     #  ── write ──
@@ -472,7 +784,9 @@ def main():
            `/tmp/outside/index.md`** with a generated index.  `git -C bundle status` said nothing.
            Resolving the directory catches both spellings; resolving the file catches only one.
         """
-        root = os.path.realpath(a.wiki)
+        root = device_root if a.device else os.path.realpath(a.wiki)
+        if a.device and os.path.realpath(path) != os.path.join(os.path.realpath(a.wiki), os.path.relpath(path, a.wiki)):
+            return False
         parent = os.path.realpath(os.path.dirname(path) or ".")
         if os.path.commonpath([parent, root]) != root:
             return False
@@ -487,12 +801,24 @@ def main():
         print(f"❌ {os.path.relpath(path, a.wiki)} resolves outside the bundle: "
               f"{os.path.realpath(path)}\n"
               f"   A symlink on that path would send the write out of the repository, and\n"
-              f"   `git revert` could not bring it back.  Nothing further is written.")
+              f"   `git revert` could not bring it back.  Nothing further is written.", file=sys.stderr)
         return False
 
     handles = []
+    fields = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_nlink")
     try:
+        if a.device:
+            for rel, (content, identity) in device_snapshots.items():
+                path = os.path.join(a.wiki, rel)
+                if not _inside(path) or os.path.realpath(path) != os.path.join(os.path.realpath(a.wiki), rel):
+                    raise OSError(f"device path changed during emission: {rel}")
+                with open(path, "rb") as current:
+                    observed = os.fstat(current.fileno())
+                    if any(getattr(observed, key) != getattr(identity, key) for key in fields) or current.read() != content:
+                        raise OSError(f"device page changed during emission: {rel}")
         for rel, _text, _t, _d in plan:
+            if a.device and rel in device_snapshots and device_snapshots[rel][0] == _text.encode("utf-8", "surrogateescape"):
+                continue
             dst = os.path.join(a.wiki, rel)
             if not _guarded(dst):
                 for _r, fh in handles:
@@ -504,13 +830,27 @@ def main():
             #     atomicity fix it lost only those sorted after the failure.  Proving the write can
             #     start must not be the thing that destroys the old content.  Truncation happens at
             #     write time, per file, immediately before its new bytes go in.
-            fd = os.open(dst, os.O_WRONLY | os.O_CREAT, 0o644)
-            handles.append((rel, os.fdopen(fd, "r+", encoding="utf-8")))
+            if a.device:
+                flags = os.O_RDWR | os.O_NOFOLLOW
+                if rel not in device_snapshots:
+                    flags |= os.O_CREAT | os.O_EXCL
+                fd = os.open(dst, flags, 0o644)
+                handle = os.fdopen(fd, "r+b")
+                if rel in device_snapshots:
+                    content, identity = device_snapshots[rel]
+                    observed = os.fstat(handle.fileno())
+                    if any(getattr(observed, key) != getattr(identity, key) for key in fields) or handle.read() != content:
+                        handle.close()
+                        raise OSError(f"device page changed before writing: {rel}")
+                handles.append((rel, handle))
+            else:
+                fd = os.open(dst, os.O_WRONLY | os.O_CREAT, 0o644)
+                handles.append((rel, os.fdopen(fd, "r+", encoding="utf-8")))
     except OSError as e:
         for _rel, fh in handles:
             fh.close()
         print(f"❌ a destination could not be opened: {e}\n"
-              f"   Nothing was deleted and nothing was written.")
+              f"   Nothing was deleted and nothing was written.", file=sys.stderr)
         return 1
 
     #  ⚠ **A planned destination must not be unlinked.**  Opening every file before deleting made
@@ -523,7 +863,7 @@ def main():
     for d in touched_dirs:
         os.makedirs(d, exist_ok=True)
         for stale in owned(d):
-            if os.path.realpath(stale) in planned:
+            if a.device or os.path.realpath(stale) in planned:
                 continue
             #  A stale page reached through a link would unlink the link, not its target —— but
             #  refuse anyway: the caller asked to replace pages in the bundle, not to touch links.
@@ -533,8 +873,16 @@ def main():
     for rel, fh in handles:
         with fh:
             fh.seek(0)
-            fh.write(texts[rel])
+            fh.write(texts[rel].encode("utf-8", "surrogateescape") if a.device else texts[rel])
             fh.truncate()
+
+    if a.device:
+        print(f"  emitted {len(plan)} page(s) for device {a.device}; indexes and bundle manifest left unchanged")
+        if skipped:
+            print(f"  {skipped} file(s) skipped (no frontmatter)")
+        if unresolved:
+            print(f"  {len(unresolved)} unresolved wikilink(s) kept as text")
+        return 0
 
     #  ── indexes and manifest ──
     #  ⚠ **Built from the whole bundle, not from this run's `plan`.**  They used to be rebuilt
@@ -543,46 +891,13 @@ def main():
     #     on disk but became unreachable from the root, which is the exact property the comment
     #     below claims to enforce.  Reproduced: manifest went 2 pages → 1.
     #     (deep review 2026-09-02, completeness lens)
-    by_dir = {}
-    for f in sorted(glob.glob(os.path.join(a.wiki, "**", "*.md"), recursive=True)):
-        rel = os.path.relpath(f, a.wiki)
-        if os.path.basename(rel) == "index.md" or rel.split(os.sep)[0] == "references":
-            continue
-        if os.sep not in rel:                       # SPEC.md / INSTRUCTIONS.md at the root
-            continue
-        fmx, _b = parse_fm(open(f, encoding="utf-8", errors="replace").read())
-        d = re.search(r'^description:\s*(.+)$', open(f, encoding="utf-8", errors="replace").read(), re.M)
-        by_dir.setdefault(os.path.dirname(rel), []).append(
-            ((fmx.get("title") or slug_of(rel)), rel,
-             (d.group(1).strip().strip('"') if d else "")))
-    #  a parent index listing its children, so no directory is unreachable from the root
-    #  every ancestor directory, up to and including the bundle root —— a directory reachable from
-    #  nowhere is a directory nobody finds.  §8 calls this progressive disclosure.
-    parents = set()
-    for d in by_dir:
-        while os.path.dirname(d):
-            d = os.path.dirname(d)
-            parents.add(d)
-    parents.add("")                                    # the bundle root
-
-    def _kids(p):
-        out = [(os.path.basename(d) or d, os.path.join(d, "index.md").replace(os.sep, "/"),
-                "%d page(s)" % len(v))
-               for d, v in sorted(by_dir.items()) if os.path.dirname(d) == p]
-        out += [(os.path.basename(c), os.path.join(c, "index.md").replace(os.sep, "/"), "")
-                for c in sorted(parents)
-                if c and os.path.dirname(c) == p and c not in by_dir]
-        return out
+    by_dir, _writes, parents = index_plan(a.wiki)
 
     #  ⚠ **Check every index destination before writing the first one.**  The page loop already
     #     proves each destination openable before it deletes anything; the index loop had no
     #     equivalent, so a symlink partway through left new pages on disk with stale-or-absent
     #     indexes and no manifest, and `git status` showed that as an ordinary edit.  "Nothing
     #     further is written" was true and not enough.  (adversarial review 2026-09-04)
-    _writes = ([(os.path.join(a.wiki, d, "index.md"), render_index(d, entries))
-                for d, entries in sorted(by_dir.items())]
-               + [(os.path.join(a.wiki, p, "index.md"), render_index(p, _kids(p), root=(p == "")))
-                  for p in sorted(parents) if _kids(p)])
     for _path, _ in _writes:
         if not _guarded(_path):
             return 1
@@ -698,7 +1013,7 @@ def _selftest():
                     "the bundle root index must declare okf_version and nothing else"
             else:
                 assert not body.startswith("---"), f"{ix} carries frontmatter, which §8 forbids"
-            assert "* [" in body or "(비어 있음)" in body, f"{ix} lists nothing"
+            assert "* [" in body or "(empty)" in body, f"{ix} lists nothing"
         assert os.path.exists(os.path.join(wiki, "index.md")), "the bundle root has no index"
         ok.append("indexes carry no frontmatter, and the root declares okf_version (§8·§12)")
 

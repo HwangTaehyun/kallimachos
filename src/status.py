@@ -176,6 +176,7 @@ def _empty_status(tables):
                "extracted_at": 0, "extract_drift": 0},
         "artifacts": {"mtimes": {}, "stale": []},
         "checked_at": int(time.time()),
+        "ledger": ledger_summary(),
     }
 
 
@@ -291,35 +292,35 @@ def collect():
     stale_ratio = len(stale) / max(len(docs), 1)
 
     # ── Has extraction fallen behind ──────────────────────────────────
+    # ⚠ This used to compare lr_kg.json's doc_hashes snapshot against the vault now — which
+    #   only catches *edited* documents.  A document that was never in that snapshot (brand
+    #   new, or ingested through a path that never ran extraction) has no `was` to compare
+    #   against, so `snap.get(rel) is None` skipped it — reported "up to date" forever
+    #   (DESIGN-EXTRACT-MCP.md §1). `lr_extract.pending_extraction()` is the one place that
+    #   judgement now lives — status.py ④, refresh_kg.py and kal_extract_begin (kal_mcp.py)
+    #   all call the same function so they cannot disagree about what is pending.
     kg_path = os.path.join(KAL_HOME, "lr_kg.json")
     extract_drift, extracted_at, drift_error = [], 0, ""
     if os.path.exists(kg_path):
         try:
-            kg = json.load(open(kg_path))
-            extracted_at = int(kg.get("extracted_at", 0) or _mtime(kg_path))
-            snap = kg.get("doc_hashes") or {}
-            if snap:
-                for f in sorted(glob.glob(f"{VAULT}/**/*.md", recursive=True)):
-                    if is_skipped(f):
-                        continue
-                    rel = os.path.relpath(f, VAULT)
-                    was = snap.get(rel)
-                    if was is None:
-                        continue
-                    try:
-                        now = hashlib.sha256(
-                            open(f, encoding="utf-8", errors="ignore").read().encode()
-                        ).hexdigest()[:16]
-                    except OSError as e:
-                        # One unreadable file must not throw away the whole scan.  The outer
-                        # except used to catch it and hand back **the partially built list**
-                        # as the final result, which then reported "up to date".
-                        drift_error = drift_error or f"{rel}: {e}"
-                        continue
-                    if was != now:
-                        extract_drift.append(rel)
+            extracted_at = int(json.load(open(kg_path)).get("extracted_at", 0) or _mtime(kg_path))
         except Exception as e:
             drift_error = drift_error or f"{type(e).__name__}: {e}"
+    try:
+        import lr_extract
+        pending_docs = {c["doc"] for c in lr_extract.pending_extraction()["pending_chunks"]}
+        if pending_docs:
+            for f in sorted(glob.glob(f"{VAULT}/**/*.md", recursive=True)):
+                if is_skipped(f):
+                    continue
+                rel = os.path.relpath(f, VAULT)
+                slug = rel.replace("/", "_")
+                if slug.endswith(".md"):
+                    slug = slug[:-3]
+                if slug in pending_docs:
+                    extract_drift.append(rel)
+    except Exception as e:
+        drift_error = drift_error or f"{type(e).__name__}: {e}"
 
     # ── Have the artifacts fallen behind ──────────────────────────────
     artifacts = {
@@ -381,7 +382,30 @@ def collect():
         },
         "artifacts": {"mtimes": artifacts, "stale": stale_artifacts},
         "checked_at": int(time.time()),
+        #  DESIGN-GITHUB-SYNC.md §3.2/§3.3 — the ledger reader.  `kal status` (this file) reads
+        #  only this device's own file for a quick local judgement, per §3.2 ("kal status reads
+        #  its own device ledger"); `kal web` is the one that reads every device's file to show
+        #  cross-device progress.  {} when no bundle is configured — a device that never synced
+        #  must see exactly what it saw before the ledger existed, not an error.
+        "ledger": ledger_summary(),
     }
+
+
+def ledger_summary():
+    """This device's own ledger rows, summarised: how many, by source_type, and the most recent
+    one's timestamp.  {} if no bundle is configured (ledger.bundle_root() is None) or the file
+    does not exist yet — both ordinary, not errors."""
+    try:
+        import ledger
+        rows = ledger.read_all(root=ledger.bundle_root())
+        mine = [r for r in rows if r.get("device") == ledger.device_id()]
+    except Exception:
+        return {}
+    if not mine:
+        return {}
+    by_type = collections.Counter(r.get("source_type", "unknown") for r in mine)
+    latest = max((r.get("source_updated_at") or "" for r in mine), default="")
+    return {"rows": len(mine), "by_source_type": dict(by_type), "latest_source_updated_at": latest}
 
 
 # Pipeline steps —— name, description, command, rough duration.  UI and CLI share this list.
@@ -664,19 +688,242 @@ def _fixture_if_no_db():
 
     ⚠ **When a real DB exists, it is used.**  Always covering it with a fixture would hide
        defects that only real data reveals —— a check running is not a check guarding.
+
+    ⚠ **The vault has to be covered too, not just the DB (code review round 1, BLOCKER).**
+       `collect()`'s ④ block always calls `lr_extract.pending_extraction()`, which reads
+       `lr_extract`'s own `VAULT`/`KAL_HOME`/`CACHE` globals (lr_extract.py:32-41) — a separate
+       set from `DB` above. Swapping only `DB` left every self-check below that reaches this far
+       (e.g. the ① "healthy state" and ⑦-c "empty-DB shape" checks, both **before** the ⑥ block
+       does its own vault patching) scanning the operator's **real** vault against a **fixture**
+       DB — measured: `just selftest` printed the real vault's own doc count
+       ("sending to the LLM: 1116 docs …") on a machine that has no real DB at all.
     """
     global DB
-    import shutil
-    import fixture_db
+    import shutil, tempfile
+    import fixture_db, lr_extract
     if fixture_db.db_is_usable(DB):
         return lambda: None                         # the real DB is intact
     _was, DB = DB, fixture_db.build()
+    _was_lr = (lr_extract.VAULT, lr_extract.KAL_HOME, lr_extract.CACHE)
+    _lr_home = tempfile.mkdtemp()
+    lr_extract.VAULT = tempfile.mkdtemp()            # empty — nothing pending, nothing to leak
+    lr_extract.KAL_HOME = _lr_home
+    lr_extract.CACHE = os.path.join(_lr_home, "lr_cache.jsonl")
     print(f"  ⓘ no real DB, running against a fixture ({_was} → temporary)")
-    def _cleanup(_p=DB, _o=_was):
+    def _cleanup(_p=DB, _o=_was, _plr=(lr_extract.VAULT, _lr_home), _olr=_was_lr):
         global DB
         DB = _o
+        lr_extract.VAULT, lr_extract.KAL_HOME, lr_extract.CACHE = _olr
         shutil.rmtree(_p, ignore_errors=True)
+        shutil.rmtree(_plr[0], ignore_errors=True)
+        shutil.rmtree(_plr[1], ignore_errors=True)
     return _cleanup
+
+
+def _expected_unittest_files(srcdir):
+    import subprocess
+
+    code = '''
+import contextlib, importlib, inspect, io, json, pathlib, sys, unittest
+root = pathlib.Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(root))
+loader = unittest.TestLoader()
+files = set()
+with contextlib.redirect_stdout(io.StringIO()):
+    for path in sorted(root.glob("test_*.py")):
+        module = importlib.import_module(path.stem)
+        for cls in vars(module).values():
+            if (inspect.isclass(cls) and issubclass(cls, unittest.TestCase)
+                    and cls.__module__ == module.__name__
+                    and (loader.getTestCaseNames(cls) or hasattr(cls, "runTest"))):
+                files.add(path.name)
+print(json.dumps(sorted(files)))
+'''
+    result = subprocess.run([sys.executable, "-c", code, srcdir],
+                            capture_output=True, text=True, check=True)
+    return set(json.loads(result.stdout))
+
+
+def _registered_unittest_files(srcdir, pattern="test_*.py"):
+    import subprocess
+
+    code = '''
+import contextlib, inspect, io, json, pathlib, sys, unittest
+root = pathlib.Path(sys.argv[1]).resolve()
+loader = unittest.TestLoader()
+with contextlib.redirect_stdout(io.StringIO()):
+    suite = loader.discover(str(root), pattern=sys.argv[2])
+if loader.errors:
+    raise RuntimeError("\\n".join(loader.errors))
+files = set()
+pending = [suite]
+while pending:
+    test = pending.pop()
+    if isinstance(test, unittest.TestSuite):
+        pending.extend(test)
+    elif isinstance(test, unittest.TestCase):
+        path = pathlib.Path(inspect.getfile(type(test))).resolve()
+        if path.parent == root:
+            files.add(path.name)
+print(json.dumps(sorted(files)))
+'''
+    result = subprocess.run([sys.executable, "-c", code, srcdir, pattern],
+                            capture_output=True, text=True, check=True)
+    return set(json.loads(result.stdout))
+
+
+def _selftest_recipe_bodies(text):
+    import shlex
+
+    recipes = {m[1]: (m[2], m[3]) for m in re.finditer(
+        r"^([\w-]+)[^:\n]*:([^\n]*)\n((?:[ \t]+[^\n]*\n|\n)+)", text, re.M)}
+    pending = [name for name in ("selftest", "selftest-py", "mcp-test") if name in recipes]
+    assert pending, "no selftest recipe found in the justfile —— this guard is blind"
+    visited, bodies = set(), []
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        dependencies, body = recipes[name]
+        pending.extend(word for word in dependencies.split() if word in recipes)
+        for line in body.replace("\\\n", " ").splitlines():
+            command = line.strip().lstrip("@")
+            if not command or command.startswith("#"):
+                continue
+            bodies.append(command)
+            tokens = shlex.split(command, comments=True)
+            if tokens and tokens[0] == "just":
+                pending.extend(tokens[i + 1] for i, token in enumerate(tokens[:-1])
+                               if token == "just" and tokens[i + 1] in recipes)
+    return "\n".join(bodies)
+
+
+def _test_command_tokens(line, srcdir):
+    import shlex
+
+    command = re.sub(r"\{\{\s*py\s*\}\}", "python", line)
+    command = re.sub(r"\{\{\s*src\s*\}\}", lambda _: srcdir, command)
+    return shlex.split(command, comments=True)
+
+
+def _literal_test_files(recipes, srcdir):
+    files = set()
+    for line in recipes.splitlines():
+        tokens = _test_command_tokens(line, srcdir)
+        if tokens and tokens[0] in ("echo", "printf"):
+            continue
+        for i, token in enumerate(tokens[:-1]):
+            if not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", os.path.basename(token)):
+                continue
+            script = pathlib.Path(tokens[i + 1])
+            if not script.is_absolute():
+                script = pathlib.Path(srcdir).parent / script
+            if script.suffix == ".py" and script.resolve().parent == pathlib.Path(srcdir).resolve():
+                files.add(script.name)
+    return files
+
+
+def _standalone_assertions(source):
+    import ast
+
+    return any(isinstance(node, ast.Assert)
+               for statement in ast.parse(source).body if not isinstance(statement, ast.ClassDef)
+               for node in ast.walk(statement))
+
+
+def _unittest_discovery_patterns(recipes, srcdir):
+    parser = argparse.ArgumentParser(add_help=False, exit_on_error=False)
+    parser.add_argument("-s", "--start-directory", default=".")
+    parser.add_argument("-p", "--pattern", default="test*.py")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("-q", "--quiet", action="store_true")
+    patterns = set()
+    for line in recipes.splitlines():
+        tokens = _test_command_tokens(line, srcdir)
+        if (len(tokens) < 4 or not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", os.path.basename(tokens[0]))
+                or tokens[1:4] != ["-m", "unittest", "discover"]):
+            continue
+        try:
+            args, extra = parser.parse_known_args(tokens[4:])
+        except (argparse.ArgumentError, SystemExit):
+            continue
+        start = pathlib.Path(args.start_directory)
+        if not start.is_absolute():
+            start = pathlib.Path(srcdir).parent / start
+        if not extra and start.resolve() == pathlib.Path(srcdir).resolve():
+            patterns.add(args.pattern)
+    return patterns
+
+
+def _extract_lifecycle_is_wired(recipes, srcdir):
+    for line in recipes.splitlines():
+        tokens = _test_command_tokens(line, srcdir)
+        if tokens and tokens[0] == "env":
+            tokens = tokens[1:]
+        if (len(tokens) == 4 and tokens[0] == "KAL_MCP_WRITE=1"
+                and re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", os.path.basename(tokens[1]))
+                and tokens[3] == "--selftest-static"
+                and "kal_mcp.py" in _literal_test_files(line, srcdir)):
+            return True
+    return False
+
+
+def _check_test_wiring(_jf, _srcdir):
+    #  Anything that calls a real LLM or needs a human hand stays out of the fast list.
+    #  It is recorded here **with its reason**, so it is distinguishable from an oversight.
+    _EXEMPT = {"claude_cli.py": "makes 2 real haiku calls (up to 210s, and it costs) —— run by hand"}
+    _Q3, _S3 = chr(34) * 3, chr(39) * 3
+    if os.path.isfile(_jf):
+        #  ⚠ **Do not search the whole justfile.**  Nearly every script also appears in an
+        #    ordinary recipe (`search:` calls kal_search.py), so deleting the wiring still
+        #    passes —— a guard present but silent.  It was written that way at first and a
+        #    mutation exposed it (2026-08-21).  Only reachable bodies of the `selftest` and
+        #    `mcp-test` recipes and their helpers are read, not comments or orphan helpers.
+        _recipes = _selftest_recipe_bodies(pathlib.Path(_jf).read_text(encoding="utf-8"))
+        _expected = _expected_unittest_files(_srcdir)
+        _registered = _registered_unittest_files(_srcdir)
+        _literal = _literal_test_files(_recipes, _srcdir)
+        _discovered = set()
+        for _pattern in _unittest_discovery_patterns(_recipes, _srcdir):
+            _discovered.update(_registered_unittest_files(_srcdir, _pattern))
+        for _fn in sorted(os.listdir(_srcdir)):
+            if not _fn.endswith(".py"):
+                continue
+            _t = pathlib.Path(_srcdir, _fn).read_text(encoding="utf-8")
+            #  Tests also come in two script shapes —— `def _selftest()` and a bare
+            #  `__main__`. Looking only for one misses the other; unittest registration
+            #  is checked separately because TestCase assertions need no bare `assert`.
+            #  Both script forms must keep literal wiring even when discovery exists.
+            if _fn.startswith("test_"):
+                #  A name starting with test_ is a test —— wherever its asserts sit.
+                #  `test_stale_resolve.py` keeps its asserts inside `def main()`, so neither
+                #  of the two shapes below caught it.  Deleting its wiring stayed silent.
+                _i = 0
+            elif re.search(r"^def _?selftest", _t, re.M):
+                _i = 0                        # function form —— the whole file is read
+            else:
+                _i = _t.find("\nif __name__")
+                if _i < 0 and _t.startswith("if __name__"):
+                    _i = 0
+                if _i < 0:
+                    continue
+            #  ⚠ Counting an `assert` inside a comment or docstring calls a file with no
+            #    tests a test.  This session fell into that trap three times.  Strip first.
+            _strip8 = (_Q3 + r"[\s\S]*?" + _Q3 + "|" + _S3 + r"[\s\S]*?" + _S3
+                       + r"|#[^\n]*")
+            if _fn not in _expected and "assert " not in re.sub(_strip8, "", _t[_i:]):
+                continue                      # it has __main__ but is not a test (a CLI entry point)
+            if _fn in _EXEMPT:
+                continue
+            #  kal_extract_mcp.py's lifecycle + stdio tests run only through kal_mcp.py with
+            #  KAL_MCP_WRITE=1 —— accept that delegation only while the justfile really has it.
+            if _fn == "kal_extract_mcp.py" and _extract_lifecycle_is_wired(_recipes, _srcdir):
+                continue
+            _literal_covered = _fn in _literal and (_fn not in _expected or _fn in _registered)
+            assert _literal_covered or (_fn in _discovered and not _standalone_assertions(_t)), (
+                f"{_fn} has tests but is not executed by the justfile —— nobody runs them.  "
+                f"Add it to `just selftest`, or record why it cannot go there in status.py's _EXEMPT.")
 
 
 def _selftest():
@@ -690,6 +937,18 @@ def _selftest():
     finishes, so **a missing table is normal**.  Raising that as an error is a false alarm
     every single run.  Telling the two apart is the point of this check.
     """
+    #  ⚠ Point lr_extract at an empty vault for the whole self-check.  pending_extraction() reads
+    #     lr_extract's own module globals, not schema_v3's, and _fixture_if_no_db() only swaps them
+    #     when there is no DB —— with a real DB present the check scanned the operator's whole vault
+    #     four times (measured 2026-09-27: "1116 docs · 2661 chunks" x4 inside `just selftest-py`).
+    #     Blocks below that need a populated vault still set lr_extract.VAULT themselves.
+    import atexit, shutil, tempfile, lr_extract
+    _lr_iso = tempfile.mkdtemp(prefix="kal-status-lr-")
+    os.makedirs(os.path.join(_lr_iso, "vault"))
+    lr_extract.VAULT = os.path.join(_lr_iso, "vault")
+    lr_extract.KAL_HOME = _lr_iso
+    lr_extract.CACHE = os.path.join(_lr_iso, "lr_cache.jsonl")
+    atexit.register(shutil.rmtree, _lr_iso, True)
     #  ⚠ One alias for schema_v3, hoisted to the top.  There were two (`_S` and `_sv`) purely
     #     because the second use came before the first import —— and `_S.VAULT, _sv.VAULT = x, x`
     #     then read as if two modules needed keeping in sync.  A reviewer read it exactly that
@@ -983,52 +1242,7 @@ def _selftest():
     #    file was a bare `__main__`, so it never made the list.  It ran only when that file was
     #    executed by hand, so the regressions written to guard something guarded nothing day to
     #    day.  `run_log.py` was the same.  **A test existing and a test running differ.** (2026-08-21)
-    _srcdir = os.path.dirname(os.path.abspath(__file__))
-    #  Anything that calls a real LLM or needs a human hand stays out of the fast list.
-    #  It is recorded here **with its reason**, so it is distinguishable from an oversight.
-    _EXEMPT = {"claude_cli.py": "makes 2 real haiku calls (up to 210s, and it costs) —— run by hand"}
-    _Q3, _S3 = chr(34) * 3, chr(39) * 3
-    if os.path.isfile(_jf):
-        #  ⚠ **Do not search the whole justfile.**  Nearly every script also appears in an
-        #    ordinary recipe (`search:` calls kal_search.py), so deleting the wiring still
-        #    passes —— a guard present but silent.  It was written that way at first and a
-        #    mutation exposed it (2026-08-21).  Only the **bodies** of the `selftest` and
-        #    `mcp-test` recipes are read.
-        _jt = open(_jf, encoding="utf-8").read()
-        _recipes = "".join(
-            m.group(0) for m in _re.finditer(
-                r"^(?:selftest|mcp-test)[^:\n]*:[^\n]*\n((?:[ \t]+[^\n]*\n|\n)+)", _jt, _re.M))
-        assert _recipes.strip(), "no selftest recipe found in the justfile —— this guard is blind"
-        for _fn in sorted(os.listdir(_srcdir)):
-            if not _fn.endswith(".py"):
-                continue
-            _t = open(os.path.join(_srcdir, _fn), encoding="utf-8").read()
-            #  Tests come in two shapes —— `def _selftest()` (18 of them) and a bare
-            #  `__main__` (5).  Looking only for the first misses the second and vice versa.
-            #  It first looked only at `__main__` and was failing to cover all 18
-            #  (measured 2026-08-21, right after this guard was added).
-            if _fn.startswith("test_"):
-                #  A name starting with test_ is a test —— wherever its asserts sit.
-                #  `test_stale_resolve.py` keeps its asserts inside `def main()`, so neither
-                #  of the two shapes below caught it.  Deleting its wiring stayed silent.
-                _i = 0
-            elif _re.search(r"^def _?selftest", _t, _re.M):
-                _i = 0                        # function form —— the whole file is read
-            else:
-                _i = _t.find("\nif __name__")
-                if _i < 0:
-                    continue
-            #  ⚠ Counting an `assert` inside a comment or docstring calls a file with no
-            #    tests a test.  This session fell into that trap three times.  Strip first.
-            _strip8 = (_Q3 + r"[\s\S]*?" + _Q3 + "|" + _S3 + r"[\s\S]*?" + _S3
-                       + r"|#[^\n]*")
-            if "assert " not in _re.sub(_strip8, "", _t[_i:]):
-                continue                      # it has __main__ but is not a test (a CLI entry point)
-            if _fn in _EXEMPT:
-                continue
-            assert _fn in _recipes, (
-                f"{_fn} has tests in its __main__ and is not in the justfile —— nobody runs them.  "
-                f"Add it to `just selftest`, or record why it cannot go there in status.py's _EXEMPT.")
+    _check_test_wiring(_jf, os.path.dirname(os.path.abspath(__file__)))
 
     # ⑧b **Is any module-level constant assigned twice.**
     #    A second assignment at module level is legal Python and **silently wins**, so it is
@@ -1270,11 +1484,22 @@ def _selftest():
     #     A check that cannot see the production line is not a check for it.
     import tempfile as _tf, shutil as _sh
     import fixture_db as _fx
+    import lr_extract
     _empty, _fdb = _tf.mkdtemp(), _fx.build()
     _keepdb, _keepvault = globals()["DB"], _S.VAULT
+    #  `collect()` always runs the real ④ block too (`lr_extract.pending_extraction()`), and
+    #  `lr_extract` keeps its **own** module-level `VAULT`/`KAL_HOME`/`CACHE` (lr_extract.py:32-41)
+    #  — a separate set of globals from `_S.VAULT` above.  Every `_S.VAULT = ...` swap below must
+    #  be mirrored onto `lr_extract.VAULT`, or `pending_extraction()` silently scans the operator's
+    #  real vault while this block believes it is running in an isolated fixture (code review
+    #  round 1, BLOCKER — measured: the real vault's own doc count printed to screen mid-fixture).
+    _keeplr = (lr_extract.VAULT, lr_extract.KAL_HOME, lr_extract.CACHE)
+    _lr_home_dummy = _tf.mkdtemp()
+    lr_extract.KAL_HOME = _lr_home_dummy
+    lr_extract.CACHE = os.path.join(_lr_home_dummy, "lr_cache.jsonl")
     try:
         globals()["DB"] = _fdb
-        _S.VAULT = _empty
+        _S.VAULT = lr_extract.VAULT = _empty
         _d = collect()["documents"]
         assert _d["vault_absent"] is True, "an empty vault was not recognised as absent"
         assert _d["deleted"] == [], f"an empty vault still reported {len(_d['deleted'])} deletions"
@@ -1285,7 +1510,7 @@ def _selftest():
             _fp = os.path.join(_real, _r["path"])
             os.makedirs(os.path.dirname(_fp), exist_ok=True)
             open(_fp, "w", encoding="utf-8").write("x" * 200 + "\n")
-        _S.VAULT = _real
+        _S.VAULT = lr_extract.VAULT = _real
         assert collect()["documents"]["vault_absent"] is False, \
             "a vault holding the documents was called absent"
         #  …and a vault holding **only some** of them is neither absent nor a mass deletion.  This
@@ -1297,7 +1522,7 @@ def _selftest():
             _fp = os.path.join(_part, _rows[0]["path"])
             os.makedirs(os.path.dirname(_fp), exist_ok=True)
             open(_fp, "w", encoding="utf-8").write("x" * 200 + "\n")
-            _S.VAULT = _part
+            _S.VAULT = lr_extract.VAULT = _part
             _dd = collect()["documents"]
             assert _dd["vault_absent"] is False, "a partly visible vault was called absent"
             assert _dd["vault_shrunk"] is True, \
@@ -1326,6 +1551,7 @@ def _selftest():
         _bdb.create_table("meta", data=[{"key": "built_at", "value": "0"}])
         try:
             globals()["DB"], _S.VAULT = _bdir, _bvault
+            lr_extract.VAULT = _bvault
             for _n in ("n0.md", "n1.md"):
                 open(os.path.join(_bvault, _n), "w", encoding="utf-8").write("x" * 200 + "\n")
             _bd = collect()["documents"]
@@ -1365,6 +1591,7 @@ def _selftest():
                    os.path.join(_uvault, "dangling.md"))
         try:
             globals()["DB"], _S.VAULT = _udir, _uvault
+            lr_extract.VAULT = _uvault
             _ud = collect()["documents"]          # ① it must not raise at all
             #  ② and it must not read as a deletion —— that is the path that removes it
             assert not [x for x in _ud["deleted"]
@@ -1405,8 +1632,52 @@ def _selftest():
         _sh.rmtree(_real, ignore_errors=True)
     finally:
         globals()["DB"], _S.VAULT = _keepdb, _keepvault
+        lr_extract.VAULT, lr_extract.KAL_HOME, lr_extract.CACHE = _keeplr
         _sh.rmtree(_empty, ignore_errors=True)
         _sh.rmtree(_fdb, ignore_errors=True)
+        _sh.rmtree(_lr_home_dummy, ignore_errors=True)
+
+    #  ④ `lr_extract.pending_extraction()` (called from the ④ block above, kg["extract_drift"])
+    #     keeps its **own** module-level `VAULT`/`KAL_HOME`/`CACHE` (lr_extract.py:32-41) — a
+    #     separate set of globals from `_S.VAULT` (schema_v3) and this file's own `KAL_HOME`.
+    #     A first version of the ④ block patched only `_S.VAULT` for this self-check, same as
+    #     every other block above, and `lr_extract.pending_extraction()` ran against the real
+    #     `~/.kal` vault instead of the fixture — the assertions below "passed" against live
+    #     data and `just selftest` printed the real vault's own doc count on the way
+    #     ("sending to the LLM: 1116 docs …") instead of staying silent inside a fixture
+    #     (code review round 1, BLOCKER).  Every global `pending_extraction()` reads has to be
+    #     patched here, not just the ones `collect()` itself reads directly.
+    import lr_extract as _lx
+    _edir, _evault = _tf.mkdtemp(), _tf.mkdtemp()
+    _ecache_home = _tf.mkdtemp()
+    _edb = _lc.connect(_edir)
+    _edb.create_table("documents", data=[
+        {"doc_id": "e0", "path": "new.md", "no_llm": False,
+         "title": "new", "mtime": 1.0, "sha": "e" * 8}])
+    _edb.create_table("meta", data=[{"key": "built_at", "value": "0"}])
+    open(os.path.join(_evault, "new.md"), "w", encoding="utf-8").write(
+        "---\ntitle: new\n---\n" + "brand new document, never extracted " * 20 + "\n")
+    _keep_lx = (_lx.VAULT, _lx.KAL_HOME, _lx.CACHE)
+    try:
+        globals()["DB"], _S.VAULT = _edir, _evault
+        # No lr_cache.jsonl at all in this fixture home —— everything collect() sees is pending.
+        _lx.VAULT = _evault
+        _lx.KAL_HOME = _ecache_home
+        _lx.CACHE = os.path.join(_ecache_home, "lr_cache.jsonl")
+        _pd = collect()
+        assert "new.md" in _pd["kg"]["extract_drift"], \
+            f"a brand-new, never-extracted document was not reported pending: {_pd['kg']}"
+        assert _pd["kg"]["extract_drift"] == ["new.md"], \
+            (f"the fixture has exactly one document, so extract_drift must hold exactly it — "
+             f"got {_pd['kg']['extract_drift']!r}.  A larger/different list here means "
+             f"pending_extraction() read the real vault, not this fixture.")
+    finally:
+        _lx.VAULT, _lx.KAL_HOME, _lx.CACHE = _keep_lx
+        globals()["DB"], _S.VAULT = _keepdb, _keepvault
+        _sh.rmtree(_edir, ignore_errors=True)
+        _sh.rmtree(_evault, ignore_errors=True)
+        _sh.rmtree(_ecache_home, ignore_errors=True)
+
     #     The dict-only arm below stays as well: recommend() must keep telling the two apart,
     #     and it is the part the screen actually reads.  A container that mounts no vault
     #     deleted —— measured "deleted 1115" plus a high-severity "run sync", which would have
@@ -1475,6 +1746,32 @@ def _selftest():
     assert _gate_stale("Private", "row") is False, "paths configured + row gate → fine"
     assert _gate_stale("", None) is False and _gate_stale(None, None) is False, "nothing configured → never stale"
     print("  ✅ status self-check —— gate era: an index without meta.gate is flagged only when KAL_NO_LLM paths are configured")
+
+    #  ledger_summary(): the "reader" of the ledger's writer/reader split (DESIGN-GITHUB-SYNC.md
+    #  §3.3) — this device's own rows only, never another device's (that is kal/web's job).
+    import tempfile as _tf2, ledger as _L2
+    assert ledger_summary() == {} or True   # whatever this machine's real bundle holds; not asserted
+    with _tf2.TemporaryDirectory() as _ld:
+        _old_v = os.environ.get("KAL_VAULT")
+        os.environ["KAL_VAULT"] = _ld
+        try:
+            assert ledger_summary() == {}, "an empty ledger dir must summarise as {}, not raise"
+            _L2.append({"source_type": "claude_session", "source_id": "s1",
+                        "source_updated_at": "2026-01-01T00:00:00Z"}, device=_L2.device_id())
+            _L2.append({"source_type": "obsidian", "source_id": "n.md",
+                        "source_updated_at": "2026-02-02T00:00:00Z"}, device=_L2.device_id())
+            _L2.append({"source_type": "claude_session", "source_id": "s2",
+                        "source_updated_at": "2020-01-01T00:00:00Z"}, device="some-other-device")
+            summ = ledger_summary()
+            assert summ["rows"] == 2, f"another device's row must not count as this device's: {summ}"
+            assert summ["by_source_type"] == {"claude_session": 1, "obsidian": 1}, summ
+            assert summ["latest_source_updated_at"] == "2026-02-02T00:00:00Z", summ
+        finally:
+            if _old_v is None:
+                del os.environ["KAL_VAULT"]
+            else:
+                os.environ["KAL_VAULT"] = _old_v
+    print("  ✅ status self-check —— ledger_summary() counts only this device's own rows, {} when unconfigured")
 
 
 def main():

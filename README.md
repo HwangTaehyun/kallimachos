@@ -103,6 +103,9 @@ for, because forgetting them is the reason you are asking.
   is what keeps Korean working when the embedding half misses.
 - **A galaxy view** renders entities as stars and relations as edges, grouped by topic — useful
   for spotting a cluster you forgot you had.
+- **Extract with your own agent, not the shared subscription** — the `kal-extract` Claude Code
+  skill (`skills/kal-extract`) fills in entities/relationships using your own agent session's
+  model and tokens via four MCP tools on a local, opt-in `KAL_MCP_WRITE=1` server.
 
 ## A look inside
 
@@ -490,7 +493,7 @@ What the relay will not do:
 | [`docs/PIPELINE.md`](docs/PIPELINE.md) | Steps 1–7, caches, what to re-run when |
 | [`docs/ERD.md`](docs/ERD.md) | Schema, key design, integrity constraints |
 | [`docs/HYBRID_METHODOLOGY.md`](docs/HYBRID_METHODOLOGY.md) | How search quality was measured — and its limits |
-| [`docs/CONNECTING-AGENTS.md`](docs/CONNECTING-AGENTS.md) | Hooking the graph to Buzz, Hermes and other MCP clients |
+| [`docs/CONNECTING-AGENTS.md`](docs/CONNECTING-AGENTS.md) | Hooking the graph to Buzz, Hermes and other MCP clients — also `kal login`/`kal sync`, its "Install and sync on each device" section |
 | [`docs/DOCKER-SETUP.md`](docs/DOCKER-SETUP.md) | Container setup in order — .env, the relay, changing the vault, what breaks |
 | [`docs/STACK.md`](docs/STACK.md) | Container/relay operations, security review |
 

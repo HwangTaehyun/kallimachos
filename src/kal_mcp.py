@@ -18,7 +18,7 @@ authentication, and loopback binding is the only defence (docs/STACK.md §7).  O
 in MCP would collapse that premise.
 """
 import vault_path
-import functools, glob, json, logging, os, re, stat, sys, threading, time
+import functools, glob, json, logging, os, re, stat, sys, threading, time, uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -54,7 +54,8 @@ _READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False,
 
 import kal_search as K
 from entity_resolve import merge_key
-from schema_v3 import FM_KEEP as _FM_KEEP, llm_gate, REDACTED, NO_LLM_RE, doc_meta
+from schema_v3 import FM_KEEP as _FM_KEEP, llm_gate, REDACTED, NO_LLM_RE, doc_meta, ORIGINS
+from source_links import external_url, source_urls, source_resources
 
 VAULT = vault_path.vault()
 
@@ -194,6 +195,7 @@ def _docs_index():
             continue
         out[d["doc_id"]] = {
             "doc_id": d["doc_id"], "path": d["path"], "title": d.get("title", ""),
+            "source_url": external_url(d.get("source_url")),
             "date": d.get("doc_date", ""), "date_src": d.get("date_src", "none"),
             "updated": d.get("doc_updated", ""), "origin": d.get("origin", ""),
             #  Which coding agent a session document came from (2026-09-25).  Only when present:
@@ -526,6 +528,7 @@ def refs_of(doc_ids):
     if _DOCS is None:
         _DOCS = _docs_index()
     slugs, paths, unresolved = [], [], False
+    refs, seen = [], set()
     #  ⚠ **Slice the same documents `docs_of` shows.**  This took `doc_ids[:DOCS_CAP]` in raw
     #     order while `docs_of` sorts newest-first before slicing, so the two described
     #     different document sets —— 171 of the 188 entities with more than ten documents
@@ -542,17 +545,35 @@ def refs_of(doc_ids):
         #  ⚠ `d["path"]` comes **from the index** —— in the cloud, a file the user uploaded.  This
         #     read had no containment at all: `path: /dev/stdin` read the child's own JSON-RPC pipe
         #     (2026-09-25).  Through the one reader, like every other vault read.
-        head = _read_in_vault(os.path.join(VAULT, d["path"]), HEAD_READ_MAX)
+        head = _read_in_vault(os.path.join(VAULT, d["path"]), SRC_READ_MAX)
+        if _gate_by_path(d["path"]) or (head is not None and doc_meta(head)[2]):
+            unresolved = True
+            continue
+        fm = FM_RE.match(head) if head is not None else None
+        if head is not None and head.lstrip("\ufeff").lstrip().startswith("---") and not fm:
+            unresolved = True
+            continue
+        urls = source_urls(head) if head is not None else [external_url(d.get("source_url"))]
+        for url in urls:
+            if url and url not in seen:
+                seen.add(url)
+                refs.append({"id": "", "slug": "", "title": d.get("title", "")[:REF_TITLE_MAX],
+                             "url": url})
         if head is None:
             continue
-        front = head.split("\n---", 1)[0]
+        front = fm.group(1) if fm else ""
         m = _SRC_BLOCK_RE.search(front)
         if m:
+            unresolved = True
             block, inline = m.group(1), m.group(2)
+            resources = source_resources(head)
+            if inline and resources:
+                paths += resources
+                inline = None
             if block:
                 #  The modern shape: each entry carries a vault-relative `resource:` path.
                 #  Those are resolved directly (below); they are not slugs.
-                paths += _RESOURCE_RE.findall(block)
+                paths += resources or _RESOURCE_RE.findall(block)
                 #  A block may still carry bare `id: <slug>` entries with no resource.
                 if not _RESOURCE_RE.search(block):
                     slugs += re.findall(r"[\w./:-]+", block)
@@ -561,15 +582,13 @@ def refs_of(doc_ids):
                 # "slug", and the non-existent slug "s1" produces an unresolved on every call.
                 slugs += re.findall(r"[\w./:-]+", inline)
 
-    refs, seen = [], set()
-
     def _note_ref(sid, key, note):
         """Read a resolved source note into a ref.  **The only place a source note is opened.**
 
         Containment is checked here so both shapes get the same guarantee —— see `_in_vault`.
         """
         nonlocal unresolved
-        if not _in_vault(note):
+        if not _in_vault(note) or _gate_by_path(os.path.relpath(os.path.realpath(note), _VROOT)):
             unresolved = True              # refuse silently, but do not report "no basis"
             return
         #  ⚠ Bounded read.  `read()` with no argument pulled a 20 MB note into memory and into the
@@ -583,7 +602,7 @@ def refs_of(doc_ids):
             unresolved = True
             refs.append({"id": sid, "slug": key, "title": "", "url": None})
             return
-        if doc_meta(t)[2]:
+        if doc_meta(t)[2] or (t.lstrip("\ufeff").lstrip().startswith("---") and not FM_RE.match(t)):
             #  ⚠ The source note is gated out of transmission.  **Count it.**  Returning bare
             #     let `status` collapse to "none" —— telling the model "no external references"
             #     about an entity that has one, withheld.  That is the exact confusion the
@@ -592,7 +611,7 @@ def refs_of(doc_ids):
             return
         ttl = re.search(r'^title:\s*"?([^"\n]+)', t, re.M)
         url = _URL_RE.search(t)
-        url = url.group(0) if url else None
+        url = next(iter(source_urls(t)), "") or (external_url(url.group(0)) if url else None)
         if url and len(url) > REF_URL_MAX:
             url = None                      # a URL that long is not a citation
         refs.append({"id": sid, "slug": key,
@@ -616,8 +635,13 @@ def refs_of(doc_ids):
         if not rel or "\x00" in rel or rel in seen:
             continue
         seen.add(rel)
-        for cand in (os.path.join(VAULT, rel.lstrip("/")),
-                     os.path.join(SRC_DIR, os.path.basename(rel))):
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", rel) or rel.startswith("//"):
+            unresolved = True
+            continue
+        candidates = [os.path.join(VAULT, rel.lstrip("/"))]
+        if os.path.dirname(rel.lstrip("/")) == "wiki/sources":
+            candidates.append(os.path.join(SRC_DIR, os.path.basename(rel)))
+        for cand in candidates:
             try:
                 ok = _in_vault(cand) and os.path.isfile(cand)
             except ValueError:
@@ -918,12 +942,14 @@ SEARCH_MODES = {
 @_serial
 def kal_search(query: str, top: int = 20, origin: str | None = None,
                mode: str | None = None) -> dict:
-    """origin: 'vault' (notes written by hand) | 'session' (distilled from a conversation) | None (all)"""
+    """origin: 'vault' (notes written by hand) | 'session' (distilled from a conversation) |
+    'slack' | 'notion' | 'gdrive' | 'web' (an outside document, by where kal-ingest recorded it
+    came from) | None (all)"""
     top = _clamp(top, 1, 50, 20)
     fresh()
-    if origin not in (None, "vault", "session"):
+    if origin is not None and origin not in ORIGINS:
         return {"error": "bad_origin", "got": origin,
-                "expected": ["vault", "session", None]}
+                "expected": list(ORIGINS) + [None]}
     if mode is not None and mode not in SEARCH_MODES:
         return {"error": "bad_mode", "got": mode, "expected": sorted(SEARCH_MODES)}
     global _DOCS
@@ -1288,6 +1314,28 @@ def kal_stats() -> dict:
     return out
 
 
+# ═══════════════════════ kal_extract_* — write tools, opt-in only (§11) ═══════════════════════
+#
+# DESIGN-EXTRACT-MCP.md §5/§11/§12/§13/§14 is the normative spec these four tools implement.
+# The tools themselves, their job-file helpers and their self-checks live in
+# kal_extract_mcp.py — split out solely to keep this file under the 150KB structure guard
+# (`just check-publish`).  Registration still happens on this SAME `app`, gated by the same
+# KAL_MCP_WRITE flag, read once, right here, at import time.
+#
+# ⚠ Registration itself is the gate.  `KAL_MCP_WRITE=1` is read **once at import time** — never
+#   inferred from whether KAL_HOME happens to be writable (the hosted cloud gives every user a
+#   writable KAL_HOME too, so that inference is false there — §11 BLOCKER).  Not set → these four
+#   tools are simply never handed to `@app.tool`, so a client never sees them in its tool list at
+#   all (not a runtime refusal — absence).
+import kal_extract_mcp
+KAL_MCP_WRITE = os.environ.get("KAL_MCP_WRITE") == "1"
+WRITE_TOOL_NAMES = kal_extract_mcp.WRITE_TOOL_NAMES
+
+if KAL_MCP_WRITE:
+    (kal_extract_begin, kal_extract_next, kal_extract_submit,
+     kal_extract_finish) = kal_extract_mcp.register(app, _serial, _clamp)
+
+
 def _selftest_static():
     """The checks that need no DB and no vault —— so they run in CI (`selftest-py`).
 
@@ -1492,11 +1540,23 @@ def _selftest_static():
     for _t in _tools:
         _a = _t.annotations
         assert _a is not None, f"{_t.name} has no annotations —— clients treat it as a write"
-        if not _a.read_only_hint:
-            #  The one combination Codex runs without asking (requires_mcp_tool_approval).
-            assert not (_a.destructive_hint is False and _a.open_world_hint is False), \
-                f"{_t.name} is not read-only yet would run unasked in Codex auto mode"
-        assert _a.read_only_hint is True, f"{_t.name} reads only but does not say so"
+        if _t.name in WRITE_TOOL_NAMES:
+            #  §12 BLOCKER 1: the four kal_extract_* tools are writes and must say so —
+            #  read_only_hint=False + destructive_hint=True, deliberately NOT the
+            #  destructive_hint=False + open_world_hint=False pair Codex auto-approves.
+            #  Leaving a write tool out of WRITE_TOOL_NAMES makes it fall into the `else`
+            #  branch below and fail the read-only assertion instead of silently passing —
+            #  that is the point (§14 "read/write assertion branch" mutation row).
+            assert _a.read_only_hint is False, \
+                f"{_t.name} is a write tool (§12) but claims read_only_hint=True"
+            assert _a.destructive_hint is True, \
+                f"{_t.name} is a write tool but does not set destructive_hint —— Codex would auto-approve it (§12)"
+        else:
+            if not _a.read_only_hint:
+                #  The one combination Codex runs without asking (requires_mcp_tool_approval).
+                assert not (_a.destructive_hint is False and _a.open_world_hint is False), \
+                    f"{_t.name} is not read-only yet would run unasked in Codex auto mode"
+            assert _a.read_only_hint is True, f"{_t.name} reads only but does not say so"
         _units = len((_t.description or "").encode("utf-16-le")) // 2
         assert _units <= 1200, f"{_t.name}'s description is {_units} UTF-16 units (limit 1,200)"
     _desc = next(t.description for t in _tools if t.name == "kal_search")
@@ -1520,6 +1580,11 @@ def _selftest_static():
     #  that called it behind an `if` or after its reads still did (round 6).  Its source is read here.
     import ast, inspect, textwrap
     for _t in _tools:
+        if _t.name in WRITE_TOOL_NAMES:
+            # kal_extract_* operate on job files under KAL_HOME, not the LanceDB tables fresh()
+            # guards — they have no _DOCS/_BLOCKED/_db staleness to protect against, so the
+            # "fresh() first" rule (written for the six read tools) does not apply to them.
+            continue
         _fn = ast.parse(textwrap.dedent(inspect.getsource(globals()[_t.name]))).body[0]
         _n = sum(isinstance(x, ast.Call) and getattr(x.func, "id", None) == "fresh" for x in ast.walk(_fn))
         _at = next((i for i, s in enumerate(_fn.body) if isinstance(s, ast.Expr) and isinstance(s.value, ast.Call)
@@ -1588,6 +1653,50 @@ def _selftest_static():
         assert K._M is _same, "a reopen onto the same embedding model dropped the query model —— it would reload for nothing"
     finally:
         K.KAL, K._M, K._M_NAME, _g["_db"] = _kept_k
+
+    # ── kal_extract_* registration is opt-in, not inferred (§11 BLOCKER, §14) ─────────────────
+    #    A fresh subprocess is required — registration is decided once, at import time, by
+    #    reading KAL_MCP_WRITE, so the already-imported module here cannot show the other state.
+    import subprocess as _sp3, tempfile as _tf5
+    _probe_src = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "import asyncio, kal_mcp as m\n"
+        "names = {t.name for t in asyncio.run(m.app.list_tools())}\n"
+        "print('HAS_WRITE=' + str(bool(names & m.WRITE_TOOL_NAMES)))\n"
+    ) % os.path.dirname(os.path.abspath(__file__))
+    with _tf5.TemporaryDirectory() as _d5:
+        _base_env = dict(os.environ)
+        _base_env["KAL_VAULT"] = os.path.join(_d5, "vault")
+        _base_env["KAL_HOME"] = os.path.join(_d5, "home")
+        os.makedirs(_base_env["KAL_VAULT"])
+        for _flag, _want in ((None, False), ("1", True)):
+            _env = dict(_base_env)
+            _env.pop("KAL_MCP_WRITE", None)
+            if _flag is not None:
+                _env["KAL_MCP_WRITE"] = _flag
+            _r = _sp3.run([sys.executable, "-c", _probe_src], env=_env, capture_output=True, text=True)
+            assert _r.returncode == 0, f"probing KAL_MCP_WRITE={_flag!r} crashed: {_r.stderr[-1000:]}"
+            assert f"HAS_WRITE={_want}" in _r.stdout, (
+                f"KAL_MCP_WRITE={_flag!r} expected kal_extract_* registered={_want} — writable "
+                f"KAL_HOME must not be inferred as consent (§11 BLOCKER). got: {_r.stdout!r} "
+                f"{_r.stderr[-500:]}")
+
+    # ── job_id is checked before a file is ever opened (§5 begin — the kal_doc/refs_of path-
+    #    escape shape) ─────────────────────────────────────────────────────────────────────
+    assert kal_extract_mcp._load_job("../../etc/passwd") is None, "a non-UUID job_id must never open a file"
+    assert kal_extract_mcp._load_job("' OR 1=1") is None
+    assert kal_extract_mcp._load_job(str(uuid.uuid4())) is None, "a well-formed but nonexistent job_id must not error"
+
+    # ── kal_extract_* job lifecycle (§14) — a fully synthetic vault + KAL_HOME, no real DB ────
+    #    Only runs when this process itself was started with KAL_MCP_WRITE=1 (the tools do not
+    #    exist as module globals otherwise).  `just selftest-py`'s plain `--selftest-static`
+    #    call therefore only exercises the registration-toggle check above; running
+    #    `KAL_MCP_WRITE=1 python kal_mcp.py --selftest-static` exercises this whole block too
+    #    (job-lifecycle assertions and the real-stdio replay both live in kal_extract_mcp.py).
+    if KAL_MCP_WRITE:
+        kal_extract_mcp.run_selftest(kal_extract_begin, kal_extract_next,
+                                     kal_extract_submit, kal_extract_finish)
+
 
     print("  ✅ kal_mcp static checks —— one reader (FIFO · /dev/stdin · links · siblings · O_NOFOLLOW window) · "
           "kal_doc and refs_of through it · kal_stats against known rows (and an index without the agent "

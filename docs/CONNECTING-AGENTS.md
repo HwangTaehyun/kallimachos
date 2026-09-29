@@ -1,6 +1,7 @@
 # Connecting to agent runtimes — Buzz · Hermes · others
 
-kal is an **MCP server**. It exposes six tools, all **read-only**:
+kal is an **MCP server**. It exposes six read-only tools by default; four extraction tools only
+when `KAL_MCP_WRITE=1` on a host stdio server (see `skills/kal-extract`):
 
 | Tool | What |
 |---|---|
@@ -14,6 +15,18 @@ kal is an **MCP server**. It exposes six tools, all **read-only**:
 `kal_stats` arrives with 0.2.0. Images built from v0.1.2 or earlier source expose only the first
 five. Go by the source, not the tag: the README builds whatever you have checked out and tags it
 with the manifest's version.
+
+### The four write tools — local stdio only, opt-in
+
+`kal_extract_begin`/`kal_extract_next`/`kal_extract_submit`/`kal_extract_finish` fill in the
+knowledge graph's entities/relationships using your own agent's model and tokens. They exist only
+on a **local stdio** server (§① below) started with `KAL_MCP_WRITE=1` in its own process
+environment — the server reads that flag once at import time and only then registers the four
+tools; a client cannot turn it on after connecting. Neither the shipped plugin Docker image (its
+`docker run` mounts the vault and DB `:ro` and runs `--read-only --cap-drop ALL`) nor the hosted
+remote server (`mcp.kallimachos.dev`, a shared multi-tenant process) ever sets this flag, so they
+never expose these tools regardless of what a client asks for. See `skills/kal-extract/SKILL.md`
+for the setup command and the full extraction workflow.
 
 There are **two** transports, and most of this document is about telling which one you can use.
 
@@ -324,8 +337,9 @@ Any other harness passes those strings literally and `docker run` dies:
 
 ### Checking that it connected
 
-`just mcp-test` actually calls all six tools (it needs a real vault — `kal_doc` reads a
-document). On Claude Code, `claude mcp list` should show kal as ✔ Connected. Pasting the app's
+`just mcp-test` actually calls all six read-only tools by default; four extraction tools only
+when `KAL_MCP_WRITE=1` on a host stdio server (see `skills/kal-extract`) — it needs a real vault
+(`kal_doc` reads a document). On Claude Code, `claude mcp list` should show kal as ✔ Connected. Pasting the app's
 Claude Code line runs `claude mcp add … --header "Authorization: Bearer $KAL_CLOUD_TOKEN"`; while
 that command runs, the token is a command-line argument, and anyone else on the machine can see it
 with `ps` — this matters on a machine other people log into. If kal was added with a command that
@@ -358,6 +372,114 @@ An empty response is usually one of four things:
 
 A Hermes Buzz teammate without kal's tools is the intended state, not a fault — read §Buzz-A
 before changing `HERMES_ACP_SKIP_CONFIGURED_MCP`.
+
+---
+
+## Install and sync on each device
+
+Multiple machines (a laptop, a desktop, a headless host running Hermes) can keep **one** knowledge
+graph in sync through a single private GitHub repository instead of each pushing its own full
+export — the design is `docs/DESIGN-GITHUB-SYNC.md` in the private workspace (not shipped here;
+`kal/` only carries the code the design produced). Each device runs the same two commands.
+
+### `kal login`
+
+Registers this device with `kal cloud` using the OAuth Device Authorization Grant
+([RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628)) — the same shape as `gh auth login`:
+
+```
+just login                       # or: python3 src/kal_cli.py login [--url ...] [--name my-mac]
+  Open https://app.kallimachos.dev/device and enter code: WDJB-MJHT
+  (or open the printed verify_uri_complete link directly)
+  logged in as device 'my-mac' on https://app.kallimachos.dev
+```
+
+The server URL must use `https://` (plain `http://` is accepted only for a loopback host during
+local development); anything else is rejected before any request is sent.
+
+Open the link, approve the device, and this machine gets a **device credential** — not a GitHub
+token. It is saved to `~/.config/kal/device.json` (`0700`/`0600`, deliberately **outside**
+`~/.kal` — that directory is a docker volume mount on some setups, and a credential does not
+belong on a surface that gets backed up, cloned, or imaged alongside the knowledge DB). The
+credential's only job is proving "this device" to `kal cloud` later, when it asks for a short-lived
+(1 hour) GitHub token — kal never stores or sees a long-lived GitHub credential of yours.
+
+- `just whoami` — shows the login (URL + device name) and nothing else. The token itself is never
+  printed, not at login and not at whoami.
+- `just logout` — deletes the saved credential. The device stays approved server-side until you
+  also revoke it from the web app's Connections screen.
+
+### `kal sync`
+
+```
+just sync-github                 # or: python3 src/kal_cli.py sync [--repository ID] [--notify-build]
+python3 src/kal_cli.py sync --status     # outcome of the last sync (also hook and autosync runs); exits 1 if it failed
+```
+
+With more than one connected repository, pass `--repository ID` (list the IDs with `kal
+repositories`); without it `kal sync` stops and asks. `--notify-build` asks the cloud to start a
+build after a successful push and is off by default.
+
+One run does, in order: ask `kal cloud` for a 1-hour GitHub token → `git pull` the bundle
+(hardened: no hooks, no filesystem-watcher config, no inherited git credential helper, no `ext://`
+protocol, no LFS smudge — the same hardening a connected GitHub bundle uses for every git call) →
+distil this device's new sessions through the existing `just openwiki-sessions` pipeline (which
+already skips sessions still being written — see the settle rule in `distill_sessions.py`) →
+publish this device's newly-extracted knowledge-graph cache lines → commit **only this device's own
+files** (its `personal/sessions/<device>/` folder, its own ledger and extract-cache files — never
+another device's) with a `Kal-Host: <device>` trailer → push. If another device pushed in the
+meantime, `kal sync` fetches and rebases **this device's own commits** on top and retries (bounded);
+a real conflict stops the sync and asks for a manual look rather than resolving blindly — `kal
+sync` never force-pushes. The one exception is the generated shared indexes (`index.md`,
+`personal/index.md`, `personal/sessions/index.md`): when a rebase conflicts only there, sync takes the
+remote copy, finishes the rebase, then regenerates the indexes and commits them.
+
+**Recovery when the remote history was rewritten.** If someone force-pushed the bundle repository,
+`kal sync` refuses to rebase or push (it would republish commits the rewrite removed). Once you trust
+the rewritten remote, set `B` to the bundle path, then:
+
+- (1) save unpushed work: `git -C "$B" format-patch refs/kal/synced.. -o ~/kal-unpushed` (only if that ref is missing, use `origin/main..`), and save uncommitted files too: `git -C "$B" stash -u` (then `git stash pop` after step 3) or copy them out
+- (2) `git -C "$B" update-ref -d refs/kal/synced`
+- (3) `git -C "$B" fetch https://github.com/<owner>/<repo>.git main && git -C "$B" reset --hard FETCH_HEAD` (the plain https URL of the repository, with no token: sync's short-lived token is not available to plain git, so this needs your own git credentials), or re-clone
+- (4) rerun `kal sync` — it re-records this device's ledger rows from its local markers
+
+Step 4 needs nothing else: sessions this device already distilled keep their local `.done` markers, and
+the next run writes any ledger row the reset removed back from those markers, so other devices do not
+distil the same sessions again. A checkout that never recorded `refs/kal/synced` is compared against its
+own `origin/<branch>`; with neither, a history that has diverged from the remote is refused too.
+`kal sync` also rebases unpushed local commits onto the remote *before* distilling, so other devices'
+ledger rows are always seen first; a conflicting rebase stops the sync.
+
+The GitHub token this step receives never touches `.git/config`, a command line argument, or a log
+line — git receives it only through a `GIT_ASKPASS` helper reading an environment variable set for
+that one subprocess (`src/git_askpass.py`).
+
+**Prerequisites**: this device must already have the bundle git-cloned somewhere `KAL_VAULT`/
+`VAULT_DIR` points at (`kal sync` does not clone it for you — see `just openwiki` above to build a
+bundle the first time), and your account must have connected a GitHub repository from kal's web
+Connections screen first (`kal sync` reports a clear "no GitHub connection" if it has not).
+
+### Other subcommands
+
+| Command | What it does |
+|---|---|
+| `kal repositories` | Lists the repositories this device may sync, one per line: `ID`, `owner/name`, `enabled`/`disabled`, build status. Use the ID with `--repository`. |
+| `kal autosync [--interval SECONDS]` | Runs one sync now, then again every 30 minutes (default `1800`) in the foreground until stopped. Opt-in; accepts `--repository` and `--notify-build`. |
+| `kal session-end` | Runs one sync cycle; meant for a Claude Code `SessionEnd` hook. Accepts `--repository` and `--notify-build`. |
+| `kal session-end --print-hook` | Prints the hook JSON snippet (30-minute timeout) without installing or running anything. |
+
+### Installing the `kal` command
+
+`kal login`/`kal logout`/`kal whoami`/`kal sync`/`kal autosync`/`kal session-end`/`kal repositories`
+are subcommands of `src/kal_cli.py`
+(`kal_cli`, `device_auth`, `github_sync` in `src/`). `pyproject.toml` declares the console script
+`kal = "kal_cli:main"` and sets `package = true`, so the project builds as a wheel:
+
+- **From a source checkout**: `uv sync` installs the `kal` entry point into the project
+  environment; run it as `uv run kal <subcommand>`.
+- **Without a checkout**: install the built wheel and `kal <subcommand>` is on your `PATH`.
+- **Source-checkout shortcuts** call the same dispatcher: `just login`/`just logout`/`just whoami`/
+  `just sync-github`, or `python3 src/kal_cli.py <subcommand>`.
 
 ---
 

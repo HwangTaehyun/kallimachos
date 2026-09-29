@@ -299,7 +299,7 @@ def _selftest():
 
 
 #  The columns a sync may find missing and still write around —— see the note in `sync()`.
-LATE_COLUMNS_TOLERATED = {"agent"}
+LATE_COLUMNS_TOLERATED = {"agent", "source_url"}
 
 
 def sync(dry_run=False):
@@ -365,6 +365,8 @@ def sync(dry_run=False):
     print(f"decided  added {len(d['added'])} · modified {len(d['modified'])} · deleted {len(d['deleted'])} "
           f"· renamed {len(d['renamed'])} · unchanged {len(d['unchanged'])}")
     if not touched and not gone:
+        if "source_url" not in db.open_table("documents").schema.names:
+            print("  this index predates documents.source_url; run `just index` to add original links")
         return print("no changes — nothing done")
     if dry_run:
         return print("(dry-run)")

@@ -26,6 +26,7 @@ Leaving them out only costs you things:
 | `created` (or `captured` · `generated_at` · `updated`) | it **drops out of the time axis** — `as_of` and timeline will not see it |
 | `tags` | that word will not find it |
 | `no_llm: true` | **there is no way to turn it off** — the extraction stage sends that text to the LLM |
+| `sources` | search cannot filter by where it came from, and there is no link back to the original |
 
 So the minimum form is this:
 
@@ -51,6 +52,39 @@ July 2, 2026            ✗   ← Notion's UI display format
 ```
 
 It must **start** with `YYYY-MM-DD`. Slack's epoch `ts` has to be converted.
+
+## Recording where it came from
+
+Add a `sources` entry so a search can tell *where* a note came from (Slack, and which channel ·
+Notion · Drive · a web page) and follow the link back, on top of `source/<type>` tags:
+
+```yaml
+---
+title: Retro on tuning search weights
+created: 2026-08-01
+tags: [search, retrieval, source/slack, source/slack/eng-search]
+sources: [{resource: "https://acme.slack.com/archives/C0123/p1722556800000000", type: slack, channel: "#eng-search"}]
+no_llm: true
+---
+```
+
+- `resource` — the original link. **How to get it per source:**
+  - Slack: "Copy link" on the message → a permalink like
+    `https://<workspace>.slack.com/archives/<channel>/p<epoch-with-6-decimals-no-dot>`.
+  - Notion: "Copy link" on the page — the page URL as Notion gives it.
+  - Google Drive: "Get link" on the file — the `drive.google.com/file/d/…` URL.
+  - Web: the page's own URL.
+- `type` — one of `slack` · `notion` · `gdrive` · `web`. Becomes the document's `origin` (search's
+  `--origin`/`origin=` filter) — **frontmatter only**; mentioning a type in the body does nothing.
+- `channel` — Slack only, `"#name"`. Also add the `source/slack/<channel-slug>` tag (lowercase,
+  spaces → `-`) alongside the plain `source/slack` tag — tags are what a keyword search matches,
+  `sources[].resource` is what a person clicks through to the original.
+- Converting Slack's epoch `ts` (`1722556800.000200`) into the permalink: drop the `.`, keep 6
+  digits after it, prefix `p` — `1722556800.000200` → `p1722556800000200`. The same `ts`, formatted
+  as a date for `created`, needs a proper conversion (`date -r 1722556800` or
+  `datetime.fromtimestamp`), never a truncation.
+- A private channel or page still needs `no_llm: true` — recording where something came from is
+  not the same as clearing it for the LLM.
 
 ## One document = one point on the time axis
 

@@ -26,6 +26,7 @@ import fcntl
 import os
 import sys
 import time
+from typing import Literal
 
 
 # Where ~/.kal lives.  Mounted at /data/kal inside the container (see docker-compose).
@@ -33,12 +34,29 @@ KAL_HOME = os.environ.get("KAL_HOME", os.path.expanduser("~/.kal"))
 LOCK_PATH = os.path.join(KAL_HOME, ".write.lock")
 
 
+class LockBusy(Exception):
+    """Raised by db_lock(..., on_conflict="raise") on contention.
+
+    .holder is the identifying string of whoever currently holds the lock (the same
+    first line of the lock file that the sys.exit message below reads).
+    """
+
+    def __init__(self, holder: str):
+        super().__init__(f"lock held by {holder}")
+        self.holder = holder
+
+
 @contextlib.contextmanager
-def db_lock(who: str, timeout: float = 0.0):
+def db_lock(who: str, timeout: float = 0.0, on_conflict: Literal["exit", "raise"] = "exit"):
     """An exclusive lock.  With timeout=0 it fails immediately and says who is holding it.
 
     Why not waiting is the default — the write jobs in this pipeline run 90 seconds to 3 hours.
     Waiting in silence makes the user think it has hung.  Better to name the holder and die.
+
+    on_conflict="exit" (default) preserves every existing CLI call's behavior unchanged —
+    sys.exit on contention.  on_conflict="raise" is for callers that live inside a long-running
+    server process (e.g. kal_mcp.py) where sys.exit would kill the whole interpreter instead of
+    just the one operation — those callers opt in and get LockBusy instead.
     """
     os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
     fh = open(LOCK_PATH, "a+", encoding="utf-8")
@@ -54,6 +72,8 @@ def db_lock(who: str, timeout: float = 0.0):
                 fh.seek(0)
                 holder = fh.read().strip() or "(unknown)"
                 fh.close()
+                if on_conflict == "raise":
+                    raise LockBusy(holder)
                 sys.exit(
                     f"❌ the DB is already in use — {holder}\n"
                     f"   Editing the same DB concurrently corrupts it silently.\n"
@@ -108,4 +128,16 @@ if __name__ == "__main__":
     with db_lock("selftest-C"):
         pass
 
-    print("  ✅ self-check passed — concurrent runs blocked · holder shown · reacquired after release")
+    # on_conflict="raise" — a server process must not have sys.exit pulled out from under it
+    with db_lock("selftest-E"):
+        try:
+            with db_lock("selftest-F", on_conflict="raise"):
+                raise AssertionError("WRONG: the second one took the lock")
+        except LockBusy as e:
+            assert e.holder.startswith("selftest-E"), f"wrong holder reported: {e.holder!r}"
+    # default (on_conflict="exit") is unchanged — this in-process check would sys.exit if it
+    # regressed, which is itself the mutation check for "default behavior preserved"
+    with db_lock("selftest-G"):
+        pass
+
+    print("  ✅ self-check passed — concurrent runs blocked · holder shown · reacquired after release · LockBusy raised on opt-in")
