@@ -275,7 +275,7 @@ class ContinuationTests(unittest.TestCase):
             'padding: "' + "x" * L.MAX_FRONTMATTER_CHARS + '"',
             "sources: [unterminated",
         )
-        for root in (self.out, self.bundle):
+        for root in (self.bundle,):     # vault/repository pages —— the ones another device can write
             page = root / "untrusted.md"
             for fm in cases:
                 with self.subTest(root=root.name, case=fm[:40]), \
@@ -290,6 +290,28 @@ class ContinuationTests(unittest.TestCase):
                     construct.assert_not_called()
                     self.assertFalse(list(self.done.iterdir()))
             page.unlink()
+
+    def test_distilled_pages_use_their_own_line_format_and_still_block(self):
+        #  ~/.kal/distilled is not strict YAML by design (okf_convert.parse_fm): 421 of 1,017 real titles
+        #  carried inner quotes and stopped every sync (2026-09-30).  YAML is never constructed for them,
+        #  and a blocked session behind such a title is still never sent to the model.
+        import yaml
+        page = self.out / "quoted.md"
+        page.write_text('---\ntitle: "BoldSign "template link" is not public"\nsession_id: session\n'
+                        'session_agent: claude\n"no_llm": true\n---\nSaved.\n')
+        with patch.object(yaml.SafeLoader, "construct_document",
+                          side_effect=AssertionError("distilled page parsed as YAML")) as construct:
+            result, model = self.run_main(self.record())
+        self.assertNotIsInstance(result, str)
+        model.assert_not_called()
+        construct.assert_not_called()
+        page.write_text("base: &b0 {value: canary}\n" + "\n".join(
+            f"b{i}: &b{i} {{<<: [*b{i - 1}, *b{i - 1}]}}" for i in range(1, 6)))
+        page.write_text("---\n" + page.read_text() + "\n---\nbody\n")
+        with patch.object(yaml.SafeLoader, "construct_document",
+                          side_effect=AssertionError("distilled page parsed as YAML")) as construct:
+            self.run_main(self.record(sid="other"))
+        construct.assert_not_called()
 
     def test_bounded_quoted_privacy_and_large_body_still_block_by_session_identity(self):
         import source_links as L

@@ -693,9 +693,13 @@ def mark_done(r, made=()):
         _ledger_record(r, made)
 
 
+MAX_PAGE_CHARS = 4_000_000    # a distilled page far past anything the distiller writes
+
+
 def privacy_snapshot():
     from pathlib import Path
     from source_links import load_frontmatter
+    from okf_convert import parse_fm
     import schema_v3 as S
 
     def unreadable(error):
@@ -716,7 +720,17 @@ def privacy_snapshot():
                 path = Path(directory) / name
                 raw = path.read_text(encoding="utf-8")
                 try:
-                    data = load_frontmatter(raw)
+                    if root == Path(OUT):
+                        #  This pipeline's own intermediate pages are not strict YAML by design (titles mix
+                        #  quotes and colons —— okf_convert.parse_fm); read them with that line parser, which
+                        #  cannot amplify.  The bounded YAML loader stays for vault/repository pages, the
+                        #  ones another device can write.  (2026-09-30: 421 of 1,017 distilled titles with
+                        #  inner quotes stopped every sync here.)
+                        if len(raw) > MAX_PAGE_CHARS:
+                            raise ValueError("over-budget page")
+                        data = parse_fm(raw)[0]
+                    else:
+                        data = load_frontmatter(raw)
                 except ValueError as error:
                     raise ValueError(f"cannot resolve privacy: {error}: {path}") from None
                 if not data:

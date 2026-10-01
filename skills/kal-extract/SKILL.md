@@ -198,7 +198,7 @@ their own agent's tokens, which is the opposite of this skill's whole point.
 
 ## Step 5 — index and push (shell, not MCP)
 
-`kal_extract_finish` only writes `lr_kg.json`. Run the rest yourself with Bash, in order:
+`kal_extract_finish` only writes `lr_kg.json`. For a repository MCP (GitHub-synced), the results reach the cloud through `kal sync`, not `just push`. For the account graph, run the rest yourself with Bash, in order:
 
 ```bash
 just index

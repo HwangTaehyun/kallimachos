@@ -237,11 +237,29 @@ def read_shared_rows(bundle, repository, shared_ref=None, report=None):
     return merge_shared_rows(streams, repository, report=report)
 
 
+def _masked(value):
+    """Mask every string in an extraction result with the ingest masker.  The model can re-create a
+    credential-shaped string the masked page never contained (2026-09-30: a page about masking tests
+    came back as `postgresql://user:…@` in an entity description), and one such cached row stopped
+    every later export."""
+    from ingest_sessions import mask
+
+    if isinstance(value, str):
+        return mask(value)[0]
+    if isinstance(value, list):
+        return [_masked(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _masked(item) for key, item in value.items()}
+    return value
+
+
 def _append(path, rows):
     from ingest_sessions import find_leaks
 
     if not rows:
         return
+    rows = [{**row, "entities": _masked(row.get("entities")), "relationships": _masked(row.get("relationships"))}
+            if isinstance(row, dict) and ("entities" in row or "relationships" in row) else row for row in rows]
     encoded = [json.dumps(row, ensure_ascii=False) + "\n" for row in rows]
     if any(find_leaks(line) for line in encoded):
         raise ExtractionError("extraction results failed secret masking verification; nothing was exported")

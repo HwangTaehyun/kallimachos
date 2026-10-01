@@ -649,9 +649,14 @@ def _sync(url=None, get_token=None, bundle=None, device=None, print_fn=print, re
     url = url or cred["url"]
     device = device or ledger.device_id()
 
+    #  Same priority as every other setting: environment > ~/.kal/config.json.  (Only the environment
+    #  was read, so a device configured through `just vault` / the web UI was told "no bundle".)
+    if bundle is None and ledger.bundle_root() is None:
+        import kal_config
+        bundle = kal_config.path_override("vault")
     bundle = bundle or ledger.bundle_root()
     if bundle is None:
-        raise SyncError("no bundle configured — set KAL_VAULT to the openwiki bundle path")
+        raise SyncError("no bundle configured — set KAL_VAULT or `just vault <path>` to the openwiki bundle")
     if not os.path.exists(os.path.join(bundle, ".git")):
         raise SyncError(f"{bundle} is not a git checkout — clone the bundle once by hand first")
 

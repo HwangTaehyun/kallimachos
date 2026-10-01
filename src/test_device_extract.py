@@ -461,3 +461,20 @@ with patch.object(L, "claude_cli_run", side_effect=AssertionError("symlink targe
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResultMaskingTests(unittest.TestCase):
+    def test_credential_shaped_model_output_is_masked_not_fatal(self):
+        import tempfile
+        from pathlib import Path
+        import device_extract as D
+        row = {"doc": "d", "idx": 0, "h": "h", "pv": "p", "model": "m",
+               "entities": [{"name": "db", "type": "tool",
+                             "description": "connects with postgresql://user:hunter22@db:5432/app"}],
+               "relationships": []}
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t) / "x.jsonl"
+            D._append(out, [row])
+            text = out.read_text()
+        self.assertIn("REDACTED", text)
+        self.assertNotIn("hunter22", text)

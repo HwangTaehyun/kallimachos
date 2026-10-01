@@ -425,7 +425,7 @@ One run does, in order: ask `kal cloud` for a 1-hour GitHub token → `git pull`
 protocol, no LFS smudge — the same hardening a connected GitHub bundle uses for every git call) →
 distil this device's new sessions through the existing `just openwiki-sessions` pipeline (which
 already skips sessions still being written — see the settle rule in `distill_sessions.py`) →
-publish this device's newly-extracted knowledge-graph cache lines → commit **only this device's own
+extract this device's pending chunks and publish the new knowledge-graph cache lines (the extraction is an **LLM step**: it runs on this device through the Claude CLI backend, `device_extract.py`, and costs the device owner's tokens; `kal sync` refuses while an MCP extraction job holds chunks) → commit **only this device's own
 files** (its `personal/sessions/<device>/` folder, its own ledger and extract-cache files — never
 another device's) with a `Kal-Host: <device>` trailer → push. If another device pushed in the
 meantime, `kal sync` fetches and rebases **this device's own commits** on top and retries (bounded);
@@ -454,8 +454,8 @@ The GitHub token this step receives never touches `.git/config`, a command line 
 line — git receives it only through a `GIT_ASKPASS` helper reading an environment variable set for
 that one subprocess (`src/git_askpass.py`).
 
-**Prerequisites**: this device must already have the bundle git-cloned somewhere `KAL_VAULT`/
-`VAULT_DIR` points at (`kal sync` does not clone it for you — see `just openwiki` above to build a
+**Prerequisites**: this device must already have the bundle git-cloned somewhere `KAL_VAULT` points at,
+else the `vault` entry in `~/.kal/config.json` (`kal sync` does not clone it for you — see `just openwiki` above to build a
 bundle the first time), and your account must have connected a GitHub repository from kal's web
 Connections screen first (`kal sync` reports a clear "no GitHub connection" if it has not).
 

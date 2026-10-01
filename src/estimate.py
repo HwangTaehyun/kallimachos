@@ -149,11 +149,13 @@ def _count_extract():
         for line in open(p, encoding="utf-8"):
             try:
                 r = json.loads(line)
-                if "h" in r:
+                if "h" in r and not r.get("failed"):
                     cached.add((r["doc"], r["idx"], r["h"], r.get("pv", "")))
             except Exception:
                 pass
-    todo = sum(1 for c in cs if L.cache_key(c) not in cached)
+    #  _done_key, not cache_key: cache_key carries the model (a storage key), so it never equalled the
+    #  4-tuple above and every plan reported "0 of N cached" (2026-09-30).  Failed rows count as not done.
+    todo = sum(1 for c in cs if L._done_key(c) not in cached)
     return todo, f"{len(cs) - todo} of {len(cs)} chunk(s) cached"
 
 
@@ -290,6 +292,23 @@ def render(e, indent=""):
 def _selftest():
     from status import STEPS
     ok = 0
+    #  ⓪ a cached chunk counts as done (any model), a failed line does not —— the plan said "0 of N
+    #     cached" for every vault while it compared the model-carrying cache_key (2026-09-30).
+    import tempfile, lr_extract as L
+    global KAL_HOME
+    home, collect = KAL_HOME, L.collect
+    chunk = {"doc": "d", "idx": 0, "h": "abc", "text": "t"}
+    try:
+        with tempfile.TemporaryDirectory() as t:
+            KAL_HOME, L.collect = t, (lambda: [chunk])
+            for line, want in (({"doc": "d", "idx": 0, "h": "abc", "pv": L.PROMPT_VERSION, "model": "other"}, 0),
+                               ({"doc": "d", "idx": 0, "h": "abc", "pv": L.PROMPT_VERSION, "failed": True}, 1)):
+                with open(os.path.join(t, "lr_cache.jsonl"), "w") as f:
+                    f.write(json.dumps(line) + "\n")
+                assert _count_extract()[0] == want, (line, _count_extract())
+    finally:
+        KAL_HOME, L.collect = home, collect
+    ok += 1
     #  ① every step estimates (no exception kills it)
     for s in STEPS:
         e = estimate(s["id"])

@@ -293,17 +293,30 @@ def review_pending(root, device, repository, expected):
     if any(not isinstance(row, dict) or row.get("device", device) != device for row in existing):
         raise LedgerStageError("existing device ledger contains foreign rows; review before merging")
     delta = []
+    reviewed = list(existing)
+    #  Parallel distil workers and repeated runs stage rows for one session out of order (a live session
+    #  also ends at a later last_ts each run).  Review them in progress order; a staged row at or behind
+    #  progress staged earlier in this same batch is redundant, not a regression —— only moving *reviewed*
+    #  progress backwards is refused.  (2026-09-30: 433 staged rows, 51 sessions out of order, stopped sync.)
+    rows = sorted(rows, key=lambda r: (str(r["source_type"]), str(r["source_id"]),
+                                       r["distilled_through_last_ts"] or 0,
+                                       -len(r.get("pages") or ())))    # at equal progress keep the richer row
     for row in rows:
         fields = {key: value for key, value in row.items() if key != "seq"}
         if any(all(prior.get(key, device if key == "device" else None) == value for key, value in fields.items())
                for prior in existing):
             continue
+        behind = False
         for prior in existing:
             if (prior.get("source_type"), prior.get("source_id")) != (row["source_type"], row["source_id"]):
                 continue
             progress = prior.get("distilled_through_last_ts")
             if type(progress) in (int, float) and progress >= (row["distilled_through_last_ts"] or 0):
-                raise LedgerStageError("pending ledger conflicts with existing reviewed progress; no rows were replaced")
+                if any(prior is r for r in reviewed):
+                    raise LedgerStageError("pending ledger conflicts with existing reviewed progress; no rows were replaced")
+                behind = True
+        if behind:
+            continue
         written = {**fields, "seq": len(lines) + len(delta)}
         delta.append(json.dumps(written, ensure_ascii=False, sort_keys=True).encode() + b"\n")
         existing.append(written)

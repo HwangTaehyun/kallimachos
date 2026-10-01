@@ -214,3 +214,37 @@ class LedgerDoneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewPendingOrderTests(unittest.TestCase):
+    """Staged rows for one session arrive out of order (parallel workers, repeated runs, a live session);
+    that is not a regression.  Moving progress behind a *reviewed* row still is."""
+
+    def review(self, staged, reviewed=()):
+        import json as _json
+        import ledger as Lg
+        data = b"".join(_json.dumps(r, sort_keys=True).encode() + b"\n" for r in reviewed)
+        with patch.object(Lg, "assert_ledger_snapshot"), patch.object(Lg, "_read_pending", return_value=staged), \
+                patch.object(Lg, "pending_path"), patch.object(Lg, "_pending_identity"):
+            out = Lg.review_pending("/bundle", "dev", "repo", {"data": data} if data else None)
+        self.last = [_json.loads(line) for line in out.splitlines() if line.strip()]
+        return [row["distilled_through_last_ts"] for row in self.last]
+
+    def review_rows(self, staged, reviewed=()):
+        self.review(staged, reviewed)
+        return self.last
+
+    def test_out_of_order_staged_rows_merge_in_progress_order(self):
+        base = {"source_type": "codex_session", "source_id": "s1", "device": "dev"}
+        staged = [{**base, "distilled_through_last_ts": t} for t in (809.0, 1061.0, 742.0, 1061.0, 809.0)]
+        #  the same progress staged twice with different pages (two runs saw one live session end there)
+        staged.append({**base, "distilled_through_last_ts": 1061.0, "pages": ["a", "b"]})
+        self.assertEqual(self.review(staged), [742.0, 809.0, 1061.0])
+        self.assertEqual(self.review_rows(staged)[-1].get("pages"), ["a", "b"])
+
+    def test_staged_row_behind_reviewed_progress_is_still_refused(self):
+        import ledger as Lg
+        base = {"source_type": "codex_session", "source_id": "s1", "device": "dev"}
+        with self.assertRaises(Lg.LedgerStageError):
+            self.review([{**base, "distilled_through_last_ts": 1000.0}],
+                        reviewed=[{**base, "distilled_through_last_ts": 2000.0, "seq": 0}])

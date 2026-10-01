@@ -1,9 +1,8 @@
 ---
 name: kal-recall
 description: |
-  Use to find something in the personal knowledge database (Super Brain — 1116 documents, <!-- db-count -->
-  25,476 entities <!-- db-count -->, accumulated since 2026-04), or to check **when and how** a concept, tool, or
-  person changed.
+  Use to find something in the personal knowledge database (Super Brain), or to check **when and how**
+  a concept, tool, or person changed.
   Triggers (kept verbatim: these are matching keys, not prose — translating them would stop the
   skill from firing on Korean prompts): "내 노트에", "예전에 뭐라 했더라", "이거 언제 정했지",
   "왜 이렇게 했었지", "super brain 에서", "kal", "내 지식 DB", "그때는 어땠어",
@@ -33,6 +32,10 @@ what is in here, and how fresh is it    →  kal_stats()
 
 If `kal_search` and `kal_entity` blur together, split on **do you know the exact name**. If not,
 search; if so, entity.
+
+When an entity or timeline question comes in, call `kal_stats()` first. If a tool returns
+`graph_empty` (or stats show 0 entities), tell the user the graph is not built yet — search and
+`kal_doc` still work, so answer from those.
 
 ## Point-in-time arguments — there is one rule
 

@@ -426,3 +426,31 @@ class SyncCycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BundleResolutionTests(unittest.TestCase):
+    """`just vault <path>` / the web UI write ~/.kal/config.json; sync read only KAL_VAULT and said
+    "no bundle configured" on a device that was configured (2026-09-30)."""
+
+    def test_config_vault_is_used_when_the_environment_has_none(self):
+        import kal_config
+        import ledger
+        with tempfile.TemporaryDirectory() as t, \
+                patch.object(device_auth, "load_credential", return_value={
+                    "url": "https://example.invalid", "token": "t", "device_name": "d"}), \
+                patch.object(ledger, "bundle_root", return_value=None), \
+                patch.object(kal_config, "path_override", return_value=t) as override:
+            with self.assertRaisesRegex(github_sync.SyncError, "not a git checkout") as caught:
+                github_sync._sync()
+            override.assert_called_with("vault")
+            self.assertIn(t, str(caught.exception))
+
+    def test_nothing_configured_names_both_ways_to_set_it(self):
+        import kal_config
+        import ledger
+        with patch.object(device_auth, "load_credential", return_value={
+                    "url": "https://example.invalid", "token": "t", "device_name": "d"}), \
+                patch.object(ledger, "bundle_root", return_value=None), \
+                patch.object(kal_config, "path_override", return_value=None):
+            with self.assertRaisesRegex(github_sync.SyncError, "KAL_VAULT or `just vault"):
+                github_sync._sync()
