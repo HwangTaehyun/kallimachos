@@ -54,7 +54,7 @@ _READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False,
 
 import kal_search as K
 from entity_resolve import merge_key
-from schema_v3 import FM_KEEP as _FM_KEEP, llm_gate, REDACTED, NO_LLM_RE, doc_meta, ORIGINS
+from schema_v3 import FM_KEEP as _FM_KEEP, llm_gate, REDACTED, NO_LLM_RE, doc_meta, ORIGINS, release_filter, gate_candidates
 from source_links import external_url, source_urls, source_resources
 
 VAULT = vault_path.vault()
@@ -334,14 +334,14 @@ def gate(row):
     # Duplicating the policy makes it diverge, and the diverged side is the one that leaks.
     # (The `ids and` in the `if ids and ids <= b` that used to live here let **entities of
     #  unknown provenance** straight through.  The empty set is a subset of anything.)
-    v = llm_gate(row.get("doc_ids"), blocked())
+    #  ⚠ 2026-10-03: this used to blank description and timeline only.  An adversarial review showed
+    #     with synthetic rows that `events` (verbatim fragments), `first_seen`/`last_seen`/`degree`
+    #     (sums over blocked sources) and source-less fragments all went out —— so the rule now lives
+    #     in `schema_v3.release_filter`, shared with export_kal_graph.  Tested in test_release_gate.py.
+    row, v = release_filter(row, blocked())
     if v == "block":
         return None, {"matched": None, "error": "blocked",
                       "hint": "every source document for this entity is excluded from transmission (no_llm)."}
-    if v == "redact":
-        row = dict(row)
-        row["description"] = REDACTED
-        row["timeline"] = "[]"
     return row, None
 
 
@@ -761,10 +761,9 @@ def resolve(name):
             return r, []
     cands = [r for r in rows if q in (r.get("name_norm") or "")]
     cands.sort(key=lambda r: -(r.get("degree") or 0))
-    return None, [{"name": c["name"], "type": c.get("type", ""),
-                   "degree": c.get("degree", 0),
-                   "doc_count": len(c.get("doc_ids") or [])}
-                  for c in cands[:CAND_CAP]]
+    #  Candidates pass the gate **before** sorting is cut and before they are shown —— a partial
+    #  match used to enumerate the names/degrees of fully-blocked entities (2026-10-03).
+    return None, gate_candidates(cands, blocked(), cap=CAND_CAP)
 
 
 def miss(name, cands):
@@ -958,7 +957,10 @@ def kal_search(query: str, top: int = 20, origin: str | None = None,
     # search() returns a 3-tuple (rows, mode, weights), not a dict.
     # Treating it as a dict meant **every call was dying** —— and the self-check passed
     # because it called no tools at all.  _selftest now calls every tool.
-    rows, used_mode, _w = db().search(query, mode=mode or "default", top=top, origin=origin)
+    #  KAL_SEARCH_GRAPH=0 fixes the server to graph-off for the whole process —— the D0 "I0" arm.
+    #  Not a tool argument on purpose: the arm must not be switchable by the model mid-run.
+    rows, used_mode, _w = db().search(query, mode=mode or "default", top=top, origin=origin,
+                                      graph=os.environ.get("KAL_SEARCH_GRAPH", "1") != "0")
     rows = [r for r in rows if r.get("doc_id") in _DOCS]     # no_llm excluded
     ids = [r["doc_id"] for r in rows]
     # rows carry no body text.  Evidence fragments come separately from snippets().
@@ -1117,7 +1119,7 @@ def kal_neighbors(name: str, min_degree: int = 1, limit: int = NEIGHBOR_CAP) -> 
     rels = tbl("lr_relations").search().where(
         f"src_id = {eid} OR tgt_id = {eid}").to_arrow().to_pylist()
     nb_ids = sorted({r["tgt_id"] if r["src_id"] == eid else r["src_id"] for r in rels})
-    deg, blocked_ents = {}, set()
+    deg, blocked_ents, redacted_ents = {}, set(), set()
     if nb_ids:
         # Too long an IN clause breaks the query.  It is sent in batches.
         for i in range(0, len(nb_ids), 500):
@@ -1126,9 +1128,13 @@ def kal_neighbors(name: str, min_degree: int = 1, limit: int = NEIGHBOR_CAP) -> 
                     f"entity_id IN ({chunk})").to_arrow().to_pylist():
                 deg[e["entity_id"]] = e.get("degree") or 0
                 # A neighbour's name is derived text too.  Degree alone must not leak a name.
-                eids = set(e.get("doc_ids") or ())
-                if blocked() and (not eids or eids <= blocked()):
+                #  Mixed provenance (redact): the name stays, the degree does not —— it is a sum
+                #  over blocked sources too (2026-10-03).
+                nv = llm_gate(e.get("doc_ids"), blocked()) if blocked() else "pass"
+                if nv == "block":
                     blocked_ents.add(e["entity_id"])
+                elif nv == "redact":
+                    redacted_ents.add(e["entity_id"])
 
     out = []
     for r in rels:
@@ -1137,17 +1143,19 @@ def kal_neighbors(name: str, min_degree: int = 1, limit: int = NEIGHBOR_CAP) -> 
             continue                       # the neighbouring **entity** is itself excluded
         if deg.get(other_id, 0) < min_degree:
             continue
-        raw_ids = r.get("doc_ids") or []
-        rids = [i for i in raw_ids if i not in blocked()]
-        if blocked() and (not raw_ids or not rids):
-            # A relation whose sources are all blocked, or **entirely absent**.  It used to be
-            # `raw_ids and …`, so a source-less relation always passed.
+        #  The relation row goes through the same release filter as an entity: all sources
+        #  blocked or **entirely absent** → dropped; mixed → body withheld, timeline withheld,
+        #  doc_ids narrowed to the allowed ones.  It used to drop blocked ids and send the body
+        #  **as written from them** (adversarial review, 2026-10-03).
+        r, rv = release_filter(r, blocked())
+        if rv == "block":
             continue
+        rids = r.get("doc_ids") or []
         # A thin source rides **along with it**.  Ids alone meant 5 kal_doc calls per citation.
         src = [{"doc_id": i, "path": _DOCS[i]["path"], "date": _DOCS[i]["date"]}
                for i in rids[:3] if i in _DOCS]
         item = {"name": r["tgt_name"] if r["src_id"] == eid else r["src_name"],
-                "degree": deg.get(other_id, 0),
+                "degree": None if other_id in redacted_ents else deg.get(other_id, 0),
                 "relation": (r.get("description") or "")[:220],
                 "docs": src}
         # A relation's **state transition**.  An axis an entity timeline cannot express.
@@ -1157,7 +1165,7 @@ def kal_neighbors(name: str, min_degree: int = 1, limit: int = NEIGHBOR_CAP) -> 
         if rtl:
             item["timeline"] = rtl
         out.append(item)
-    out.sort(key=lambda x: -x["degree"])
+    out.sort(key=lambda x: -(x["degree"] if x["degree"] is not None else -1))
     return {"matched": row["name"], "neighbors": out[:limit],
             "neighbor_total": len(out), "neighbors_truncated": len(out) > limit,
             "note": "read the source text of a relation's documents with kal_doc(doc_id).",
@@ -1806,6 +1814,35 @@ def _selftest():
         _r, _b = gate({"name": "x", "doc_ids": [], "description": "a potentially sensitive sentence"})
         assert _r is None and _b and _b.get("error") == "blocked", \
             "an entity with empty doc_ids passes straight through while a block is in force"
+        # ⑤ `events` —— verbatim fragments —— through a redact (2026-10-03, adversarial review).
+        #    Synthetic events are planted on the real row so the premise is **asserted**, not hoped:
+        #    at least one fragment from the blocked document and one from an allowed one.  Without
+        #    the premise the check passes with no filter at all (nothing to drop).
+        _ev = [{"at": "2026-01-01", "doc_id": _ids[0], "rev": "current", "text": "blocked fragment"},
+               {"at": "2026-02-01", "doc_id": _ids[1], "rev": "current", "text": "allowed fragment"},
+               {"at": "2026-03-01", "doc_id": None, "rev": "superseded", "text": "source gone"}]
+        assert sum(e["doc_id"] == _ids[0] for e in _ev) >= 1 and sum(e["doc_id"] not in (_ids[0], None) for e in _ev) >= 1
+        _e5 = dict(_e); _e5["events"] = json.dumps(_ev)
+        _with_blocked(_ids[:1])
+        _r, _b = gate(_e5)
+        _kept, _total = events_of(_r)
+        assert _b is None and _total == 1 and [e["doc_id"] for e in _kept] == [_ids[1]], \
+            f"a redact let blocked or source-less events through: {_kept}"
+        assert _r.get("degree") is None and _r.get("first_seen") == "2026-02-01", \
+            "redact kept degree / dates computed over blocked sources"
+        # ⑥ Name-miss candidates pass the gate before they are shown.
+        _with_blocked(_ids)                           # the test entity is now fully blocked
+        _row, _cands = resolve(_e["name"][:3].lower())
+        assert all(c["name"] != _e["name"] for c in _cands), "a fully blocked entity is listed as a candidate"
+        # ⑦ A mixed-provenance relation's body is withheld, not sent with blocked ids merely dropped.
+        _with_blocked(_ids[:1])
+        _nb = kal_neighbors(_e["name"], limit=NEIGHBOR_CAP)
+        _mixed = [n for n in _nb.get("neighbors", []) if n["relation"] == REDACTED]
+        _open = [n for n in _nb.get("neighbors", []) if n["relation"] != REDACTED]
+        assert "error" not in _nb and (_mixed or _open), "neighbors returned nothing under a partial block"
+        for n in _mixed:
+            assert "timeline" not in n, "a redacted relation still carried its timeline"
+        print(f"   gate ⑤⑥⑦: events filtered · candidates gated · neighbors {len(_mixed)} redacted / {len(_open)} open")
     finally:
         globals()["_BLOCKED"] = _old
 

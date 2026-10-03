@@ -208,7 +208,7 @@ def is_obsidian_vault(root):
 
 
 from lr_extract import SUMMARY_MAX_CHARS   # the profile cap is set in one place only
-from schema_v3 import llm_gate, REDACTED, TYPE_COLOR   # the transmission gate too
+from schema_v3 import llm_gate, REDACTED, TYPE_COLOR, release_filter   # the transmission gate too
 
 
 def clean(s, limit=SUMMARY_MAX_CHARS):
@@ -251,26 +251,26 @@ def build(min_degree):
     if blocked:
         keep = []
         for e in E:
-            v = llm_gate(e.get("doc_ids"), blocked)
+            #  One release filter for every exit (schema_v3.release_filter, 2026-10-03): a redact
+            #  also blanks degree/dates computed over blocked sources, not just the description.
+            e, v = release_filter(e, blocked)
             if v == "block":
                 continue                      # drop the whole entity —— the name is derived too
-            if v == "redact":
-                e = dict(e); e["description"] = REDACTED
             keep.append(e)
         print(f"   {len(blocked)} document(s) excluded from transmission → {len(E) - len(keep)} entity(ies) dropped")
         E = keep
 
-    E = [e for e in E if e["degree"] >= min_degree]
+    #  A redacted entity carries degree None (release_filter —— the count was over blocked sources).
+    #  It stays: dropping it would hide the fact that the entity exists.
+    E = [e for e in E if e["degree"] is None or e["degree"] >= min_degree]
     idx = {e["entity_id"]: i for i, e in enumerate(E)}
     R = [r for r in R if r["src_id"] in idx and r["tgt_id"] in idx]
     if blocked:
         kept = []
         for r in R:
-            v = llm_gate(r.get("doc_ids"), blocked)
+            r, v = release_filter(r, blocked)   # redact also blanks `keywords` (derived text)
             if v == "block":
                 continue
-            if v == "redact":
-                r = dict(r); r["description"] = REDACTED
             kept.append(r)
         R = kept
 

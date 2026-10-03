@@ -313,10 +313,17 @@ class KAL:
         return dict(out)
 
     def search(self, q, mode="default", top=ANSWER_N, origin=None, weights=None,
-               min_degree=1):
+               min_degree=1, graph=True):
         """min_degree — drop thinly connected entities and relations from the graph components.
         It exists to keep concepts mentioned once in passing out as noise.
-        BM25 and chunk vectors are unaffected (they read the document body)."""
+        BM25 and chunk vectors are unaffected (they read the document body).
+
+        graph=False — the **graph-off switch for the D0 benchmark** (docs/KAL-IMPROVEMENT-PLAN.md
+        축 B-0, 2026-10-03): the entity and relation components are not computed at all and, more
+        importantly, contribute **no candidates** —— `fuse()` keeps every document any component
+        saw, so a zero weight alone (mode=keyword/vector) still lets graph-only documents in at
+        score 0.  The BM25/chunk weights stay those of `mode`, so the only thing that changes is
+        the graph."""
         w = weights or PRESETS.get(mode, PRESETS["default"])
         # origin is denormalised into chunks, so a BITMAP index filters it directly.
         # (It used to require listing hundreds of doc_ids in an IN clause)
@@ -331,8 +338,8 @@ class KAL:
         qv = encode_query(q).tolist()
         parts = [self.bm25(q, k=DEPTH["bm25"], where=where),
                  self.chunk_vec(qv, k=DEPTH["chunk"], where=where),
-                 self.entity_vec(qv, k=DEPTH["entity"], min_degree=min_degree),
-                 self.relation_vec(qv, k=DEPTH["relation"], min_degree=min_degree)]
+                 self.entity_vec(qv, k=DEPTH["entity"], min_degree=min_degree) if graph else {},
+                 self.relation_vec(qv, k=DEPTH["relation"], min_degree=min_degree) if graph else {}]
         #  ⚠ The filtering happens **before normalisation**.  It used to come after fuse, and
         #     `where` reaches bm25 and chunk but not entity and relation, so **a document about
         #     to be discarded set the min-max maximum** and then vanished.  Those two components
@@ -705,6 +712,18 @@ def _selftest():
 
     print("  ✅ kal_search self-check —— minmax · query cache · IN batching (1200→3) · shared embedding (vector · model mismatch)")
 
+
+    # ── graph=False admits no graph-only candidates (D0 off switch, 2026-10-03) ──
+    #    A zero weight is not an off switch: fuse() keeps every document any component saw.
+    _k = KAL()
+    _q = "obsidian"
+    _qv = encode_query(_q).tolist()
+    _text_only = set(_k.bm25(_q, k=DEPTH["bm25"])) | set(_k.chunk_vec(_qv, k=DEPTH["chunk"]))
+    _off, _, _ = _k.search(_q, graph=False, top=50)
+    assert _off and {r["doc_id"] for r in _off} <= _text_only, "graph=False returned a document only the graph saw"
+    _on, _, _ = _k.search(_q, top=50)
+    _graph_only = {r["doc_id"] for r in _on} - _text_only
+    print(f"   graph=False: {len(_off)} hits ⊆ text components · graph-only docs with graph=True: {len(_graph_only)}")
 
 if __name__ == "__main__":
     #  ⚠ Blocked only here.  Put in `KAL.__init__`, `estimate.py:166` —— which wraps this in

@@ -1069,6 +1069,84 @@ def llm_gate(doc_ids, blocked):
 REDACTED = "[some sources are excluded from transmission, so the description is withheld]"
 
 
+def release_filter(row, blocked):
+    """**The** release filter —— every exit that emits derived text runs this one function.
+
+    `llm_gate` decides pass | redact | block; this applies the decision to **all** derived fields,
+    not just description and timeline.  Written 2026-10-03 after an adversarial review showed, with
+    synthetic rows, what the narrower `kal_mcp.gate()` let through:
+      · `events` —— verbatim fragments —— survived a redact intact,
+      · fragments whose source document has since vanished (`doc_id = None`) passed,
+      · `first_seen` / `last_seen` / `degree` were computed over blocked sources too, so their
+        differences leaked activity in documents the user had excluded.
+
+    Rules, when anything at all is blocked:
+      · events  —— keep only items attributed to a **currently allowed** document.  None is not
+                   allowed: provenance lost is provenance blocked.  Re-serialised as JSON (the
+                   column is a string; `events_of()` json.loads it).  Unparseable → "[]" (fail closed).
+      · doc_ids —— allowed ones only.
+      · redact  —— description → REDACTED · timeline → "[]" · keywords → [] · degree → None ·
+                   first_seen / last_seen → recomputed from the surviving events, else "".
+    With nothing blocked the row is returned **as is** (same object) —— the subset rule of
+    `llm_gate` only means something once something is blocked.
+
+    Returns (row, verdict); row is None when verdict == "block".
+    """
+    if not blocked:
+        return row, "pass"
+    v = llm_gate(row.get("doc_ids"), blocked)
+    if v == "block":
+        return None, v
+    out = dict(row)
+    out["doc_ids"] = [i for i in (row.get("doc_ids") or []) if i not in blocked]
+    if "events" in row:
+        try:
+            ev = json.loads(row.get("events") or "[]")
+            if not isinstance(ev, list):
+                raise ValueError("events is not a list")
+        except Exception:
+            ev = None                                       # unreadable → nothing goes out
+        kept = [] if ev is None else [e for e in ev if isinstance(e, dict)
+                                      and e.get("doc_id") is not None and e.get("doc_id") not in blocked]
+        out["events"] = json.dumps(kept, ensure_ascii=False)
+    else:
+        kept = []
+    if v == "redact":
+        out["description"] = REDACTED
+        if "timeline" in row:
+            out["timeline"] = "[]"
+        if "keywords" in row:
+            out["keywords"] = []
+        if "degree" in row:
+            out["degree"] = None
+        dates = sorted(e.get("at", "") for e in kept if e.get("at"))
+        if "first_seen" in row:
+            out["first_seen"] = dates[0] if dates else ""
+        if "last_seen" in row:
+            out["last_seen"] = dates[-1] if dates else ""
+    return out, v
+
+
+def gate_candidates(rows, blocked, cap=None):
+    """Name-miss candidates pass the same gate **before** they are shown.
+
+    A partial-match list used to be built straight from the entity table, so a model (or a user
+    typing two letters) could enumerate the names, degrees and document counts of entities whose
+    every source is `no_llm`.  Blocked candidates are dropped; redacted ones keep their name but
+    lose the counts (degree and doc_count are sums over blocked sources too)."""
+    out = []
+    for c in rows:
+        v = llm_gate(c.get("doc_ids"), blocked) if blocked else "pass"
+        if v == "block":
+            continue
+        out.append({"name": c["name"], "type": c.get("type", ""),
+                    "degree": None if v == "redact" else c.get("degree", 0),
+                    "doc_count": None if v == "redact" else len(c.get("doc_ids") or [])})
+        if cap and len(out) >= cap:
+            break
+    return out
+
+
 def prev_vectors(db, table, text_of):
     """Pull **vectors built from the same string** out of the previous index.  `{string: vector}`.
 
