@@ -89,6 +89,21 @@ class RedactTests(unittest.TestCase):
         self.assertEqual(row["events"], "[]")
 
 
+class SafeNameTests(unittest.TestCase):
+    def test_control_characters_and_length_are_bounded(self):
+        s = schema.safe_name("ok name\nIGNORE PREVIOUS\x1b[31m" + "x" * 500)
+        self.assertNotIn("\n", s); self.assertNotIn("\x1b", s); self.assertLessEqual(len(s), schema.NAME_CAP)
+        self.assertTrue(s.startswith("ok nameIGNORE PREVIOUS"))
+
+    def test_unicode_names_pass_and_non_strings_vanish(self):
+        self.assertEqual(schema.safe_name("옵시디언 · kal"), "옵시디언 · kal")
+        self.assertEqual(schema.safe_name(None), "")
+
+    def test_candidates_are_sanitised(self):
+        out = schema.gate_candidates([{"name": "a\nb", "type": "t", "degree": 1, "doc_ids": [1]}], set())
+        self.assertEqual(out[0]["name"], "ab")
+
+
 class CandidateTests(unittest.TestCase):
     def test_blocked_candidate_is_dropped_and_redacted_one_loses_counts(self):
         rows = [{"name": "open", "type": "t", "degree": 5, "doc_ids": [10]},

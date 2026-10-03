@@ -1127,6 +1127,21 @@ def release_filter(row, blocked):
     return out, v
 
 
+NAME_CAP = 120
+
+
+def safe_name(value, cap=NAME_CAP):
+    """Entity and relation **names are LLM-derived text** and ride inside tool results that a model
+    reads next.  Caps the length and strips control characters (newlines included), so a planted
+    instruction cannot span lines or hide behind terminal escapes.  Not a defence against
+    injection by itself (the plan's axis E-5 says so) —— it bounds the surface.  Unicode letters,
+    spaces and punctuation pass; anything non-string becomes ""."""
+    if not isinstance(value, str):
+        return ""
+    cleaned = "".join(ch for ch in value if ch.isprintable() and ch not in "\x7f")
+    return cleaned[:cap]
+
+
 def gate_candidates(rows, blocked, cap=None):
     """Name-miss candidates pass the same gate **before** they are shown.
 
@@ -1139,7 +1154,7 @@ def gate_candidates(rows, blocked, cap=None):
         v = llm_gate(c.get("doc_ids"), blocked) if blocked else "pass"
         if v == "block":
             continue
-        out.append({"name": c["name"], "type": c.get("type", ""),
+        out.append({"name": safe_name(c["name"]), "type": safe_name(c.get("type", ""), 40),
                     "degree": None if v == "redact" else c.get("degree", 0),
                     "doc_count": None if v == "redact" else len(c.get("doc_ids") or [])})
         if cap and len(out) >= cap:

@@ -744,11 +744,13 @@ if __name__ == "__main__":
                     help="exclude entities/relations with fewer than N connections from the graph components (default 1 = all)")
     ap.add_argument("--snippets", action="store_true")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--no-graph", action="store_true",
+                    help="skip the entity/relation components entirely (no candidates from the graph) —— the D0 benchmark's off switch")
     a = ap.parse_args()
 
     kal = KAL()
     res, mode, w = kal.search(a.query, a.mode, a.top, a.origin,
-                              min_degree=a.min_degree)
+                              min_degree=a.min_degree, graph=not a.no_graph)
     if a.json:
         payload = {"query": a.query, "mode": mode,
                    "weights": {"bm25": w[0], "chunk": w[1], "entity": w[2], "relation": w[3]},

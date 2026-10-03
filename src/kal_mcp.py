@@ -54,7 +54,8 @@ _READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False,
 
 import kal_search as K
 from entity_resolve import merge_key
-from schema_v3 import FM_KEEP as _FM_KEEP, llm_gate, REDACTED, NO_LLM_RE, doc_meta, ORIGINS, release_filter, gate_candidates
+import usage
+from schema_v3 import FM_KEEP as _FM_KEEP, llm_gate, REDACTED, NO_LLM_RE, doc_meta, ORIGINS, release_filter, gate_candidates, safe_name
 from source_links import external_url, source_urls, source_resources
 
 VAULT = vault_path.vault()
@@ -982,7 +983,10 @@ def kal_search(query: str, top: int = 20, origin: str | None = None,
             "no hits.  This is not an error —— the query simply matched nothing under the "
             f"'{used_mode}' ranking.  If you know the exact wording, retry with mode='keyword'; "
             "if you are paraphrasing, retry with mode='vector'.  Widen `origin` if you set it.")
-    return {"query": query, "hits": hits, "hit_count": len(hits), "mode": used_mode, "note": note}
+    out = {"query": query, "hits": hits, "hit_count": len(hits), "mode": used_mode, "note": note}
+    #  Opt-in local count of note text sent out (usage.py) —— off by default, forced off when hosted.
+    usage.record(sum(len(t) for h in hits for t in h.get("snippets", [])))
+    return out
 
 
 @app.tool(annotations=_READ_ONLY, description=(
@@ -1010,7 +1014,7 @@ def kal_entity(name: str, as_of: str | None = None) -> dict:
         return blk
     ids = list(row.get("doc_ids") or [])
     tl = timeline_of(row, until=as_of)
-    out = {"matched": row["name"], "type": row.get("type", ""),
+    out = {"matched": safe_name(row["name"]), "type": safe_name(row.get("type", ""), 40),
            "description": row.get("description", ""),
            "degree": row.get("degree", 0),
            "first_seen": row.get("first_seen", ""),
@@ -1060,7 +1064,7 @@ def kal_timeline(name: str, since: str | None = None, until: str | None = None) 
     ids = list(row.get("doc_ids") or [])
     tl = timeline_of(row, until=until, since=since)
     ev, ev_total = events_of(row, until=until, since=since)
-    return {"matched": row["name"],
+    return {"matched": safe_name(row["name"]),
             "first_seen": row.get("first_seen", ""),
             "last_seen": row.get("last_seen", ""),
             "timeline": tl, "change_count": len(tl),
@@ -1154,7 +1158,7 @@ def kal_neighbors(name: str, min_degree: int = 1, limit: int = NEIGHBOR_CAP) -> 
         # A thin source rides **along with it**.  Ids alone meant 5 kal_doc calls per citation.
         src = [{"doc_id": i, "path": _DOCS[i]["path"], "date": _DOCS[i]["date"]}
                for i in rids[:3] if i in _DOCS]
-        item = {"name": r["tgt_name"] if r["src_id"] == eid else r["src_name"],
+        item = {"name": safe_name(r["tgt_name"] if r["src_id"] == eid else r["src_name"]),
                 "degree": None if other_id in redacted_ents else deg.get(other_id, 0),
                 "relation": (r.get("description") or "")[:220],
                 "docs": src}
@@ -1166,7 +1170,7 @@ def kal_neighbors(name: str, min_degree: int = 1, limit: int = NEIGHBOR_CAP) -> 
             item["timeline"] = rtl
         out.append(item)
     out.sort(key=lambda x: -(x["degree"] if x["degree"] is not None else -1))
-    return {"matched": row["name"], "neighbors": out[:limit],
+    return {"matched": safe_name(row["name"]), "neighbors": out[:limit],
             "neighbor_total": len(out), "neighbors_truncated": len(out) > limit,
             "note": "read the source text of a relation's documents with kal_doc(doc_id).",
             **docs_of(list(row.get("doc_ids") or [])),
