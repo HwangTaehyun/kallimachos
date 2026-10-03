@@ -1090,6 +1090,25 @@ def cap_shape(d):
     return {**d, "entities": ents, "relationships": rels}
 
 
+def publishable_shape(d):
+    """The shape the **cloud builder** accepts —— applied before a row is cached or exported.
+
+    `cloud/scripts/build_repository.py` (`validate_row`) rejects a whole repository build when any
+    relationship names a source/target that is not one of that row's entities.  The LLM does this
+    routinely (327 of 3,964 rows in the first real export, 2026-10-03), so the first full build of
+    github.com/hwangtaehyun/openwiki failed three times with one unhelpful line.  Dropping those
+    relationships here keeps the device contract ⊆ the server contract in **one** place; the two
+    rules drifting apart is this repository's recurring failure mode (§8).
+
+    Matching is strip()+casefold(), exactly as the server does.  Entities are untouched."""
+    out = cap_shape(d)
+    names = {e["name"].strip().casefold() for e in out["entities"] if isinstance(e.get("name"), str)}
+    out["relationships"] = [x for x in out["relationships"]
+                            if isinstance(x.get("source"), str) and isinstance(x.get("target"), str)
+                            and x["source"].strip().casefold() in names and x["target"].strip().casefold() in names]
+    return out
+
+
 #  ⚠ Size, not just count.  Capping to 20/25 items still let one agent submit 50MB strings: a single
 #     kal_extract_submit appended 1,000,001,166 bytes to lr_cache.jsonl in 4.3 s (code review round 2,
 #     2026-09-27).  Scalars only, bounded length, bounded key count —— the worst case per chunk is now

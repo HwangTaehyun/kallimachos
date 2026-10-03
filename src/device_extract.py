@@ -132,7 +132,7 @@ def _rows(path=None, text=None):
                     and isinstance(row.get("model", lr_extract.MODEL), str)
                     and lr_extract.valid_shape(row)):
                 raise ExtractionError("extraction cache contains an invalid result shape")
-            bounded = lr_extract.cap_shape(row)
+            bounded = lr_extract.publishable_shape(row)      # server contract: see lr_extract
             clean = {"doc": row["doc"], "idx": row["idx"], "h": row["h"],
                      "pv": row.get("pv", ""), "model": row.get("model", lr_extract.MODEL),
                      "at": str(row.get("at", ""))[:32],
@@ -395,7 +395,7 @@ def _process(bundle, device, extract, local_cache_path, shared_ref, repository, 
                 raise ExtractionError("device extraction backend failed or refused a chunk; no commit or push was attempted") from error
             if row.get("failed") or not lr_extract.valid_shape(row):
                 raise ExtractionError("device entity extraction failed; check your CLI subscription, authentication or relay and retry; successful chunks remain cached")
-            row = {**lr_extract.cap_shape(row), "repository": repository}
+            row = {**lr_extract.publishable_shape(row), "repository": repository}
             _append(cache, [row])
             local.append(row)
             extracted.append(row)

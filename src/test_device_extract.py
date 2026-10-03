@@ -478,3 +478,29 @@ class ResultMaskingTests(unittest.TestCase):
             text = out.read_text()
         self.assertIn("REDACTED", text)
         self.assertNotIn("hunter22", text)
+
+
+class PublishableShapeTests(unittest.TestCase):
+    """Rows the device exports must satisfy the cloud builder's validate_row —— written after the
+    first real build of a repository failed three times on a relationship whose target was not one
+    of the row's entities (2026-10-03)."""
+
+    def test_relationship_naming_a_missing_entity_is_dropped_before_caching(self):
+        import lr_extract
+        row = {"entities": [{"name": "Alpha"}, {"name": " beta "}],
+               "relationships": [{"source": "alpha", "target": "BETA", "description": "ok"},
+                                 {"source": "Alpha", "target": "Gamma", "description": "gamma is not an entity"},
+                                 {"source": "Delta", "target": "beta"}]}
+        out = lr_extract.publishable_shape(row)
+        self.assertEqual([(r["source"], r["target"]) for r in out["relationships"]], [("alpha", "BETA")])
+        self.assertEqual(len(out["entities"]), 2)
+
+    def test_rows_read_from_the_cache_are_normalised_the_same_way(self):
+        import json, tempfile, pathlib, lr_extract, device_extract
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "lr_cache.jsonl"
+            path.write_text(json.dumps({"doc": "x", "idx": 0, "h": "abcdefabcdef", "pv": lr_extract.PROMPT_VERSION,
+                                        "entities": [{"name": "A"}],
+                                        "relationships": [{"source": "A", "target": "Nope"}]}) + "\n")
+            rows = device_extract._rows(path)
+            self.assertEqual(rows[0]["relationships"], [])
