@@ -984,6 +984,21 @@ def kal_search(query: str, top: int = 20, origin: str | None = None,
             f"'{used_mode}' ranking.  If you know the exact wording, retry with mode='keyword'; "
             "if you are paraphrasing, retry with mode='vector'.  Widen `origin` if you set it.")
     out = {"query": query, "hits": hits, "hit_count": len(hits), "mode": used_mode, "note": note}
+    #  KAL_SEARCH_SUMMARIES=1 adds the entity profiles the query matched (LightRAG low-level keys).
+    #  Experiment knob for the H5 "weak consumer" arm (docs/KAL-GRAPH-VALUE-HYPOTHESES.md): the
+    #  graph's summaries have never reached a consumer's response before.  Off by default; a
+    #  process-level switch like KAL_SEARCH_GRAPH, not a tool argument, for the same reason.
+    #  Every row passes the same release gate as kal_entity (block → dropped, redact → REDACTED).
+    if os.environ.get("KAL_SEARCH_SUMMARIES") == "1" and os.environ.get("KAL_SEARCH_GRAPH", "1") != "0":
+        ents = []
+        for e in db().entity_keys(query, k=5):
+            row, _v = release_filter(e, blocked())
+            if row is None:
+                continue
+            ents.append({"name": safe_name(row.get("name")), "type": safe_name(row.get("type", ""), 40),
+                         "summary": (row.get("description") or "")[:240],
+                         "pages": [_DOCS[d]["path"] for d in (row.get("doc_ids") or []) if d in _DOCS][:5]})
+        out["entities"] = ents
     #  Opt-in local count of note text sent out (usage.py) —— off by default, forced off when hosted.
     usage.record(sum(len(t) for h in hits for t in h.get("snippets", [])))
     return out
@@ -2055,6 +2070,16 @@ def _selftest():
     assert any(h.get("snippets") for h in q["hits"]), "every excerpt is empty"
     assert all("abs_path" not in h for h in q["hits"]), "abs_path leaked into the search results"
     assert kal_search("x", origin="nonsense").get("error") == "bad_origin"
+    # ⑧ entity summaries ride only when asked for, and never carry abs_path or unsafe names
+    assert "entities" not in q, "entity summaries leaked into the default response"
+    os.environ["KAL_SEARCH_SUMMARIES"] = "1"
+    try:
+        q8 = kal_search("obsidian", top=3)
+        assert isinstance(q8.get("entities"), list) and q8["entities"], "KAL_SEARCH_SUMMARIES=1 returned no entities"
+        assert all(set(x) == {"name", "type", "summary", "pages"} and x["name"] == safe_name(x["name"])
+                   for x in q8["entities"]), "entity summary row has an unexpected shape"
+    finally:
+        del os.environ["KAL_SEARCH_SUMMARIES"]
 
     if e["docs"]:
         d = kal_doc(e["docs"][0]["doc_id"])

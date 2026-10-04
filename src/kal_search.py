@@ -49,7 +49,14 @@ DEPTH = {"bm25": 300, "chunk": 300, "entity": 30, "relation": 40}
 #   0.0 → 0.730 (Δ-0.039, p<0.001)   turning expansion off is clearly worse
 #   0.5 → 0.769                       the value originally picked arbitrarily
 #   1.0 → 0.774 (Δ+0.005, p=0.034)   there is no basis for discounting an indirect path
-HOP = 1.0
+# Those numbers are from a 561-document **raw transcript** corpus (2026-08-17).  On the distilled
+# openwiki corpus the question is open, so the two graph paths can be switched off for an
+# ablation (docs/KAL-GRAPH-VALUE-HYPOTHESES.md H2) —— experiment knobs, not user settings:
+#   KAL_HOP=0           no 1-hop: relation_vec scores only the documents the relation was asserted in
+#   KAL_ENTITY_DOCS=N   entity_vec scores only the first N doc_ids of a matched entity (0 = all).
+#                       doc_ids are in merge order, not mention-count order —— an approximation.
+HOP = float(os.environ.get("KAL_HOP", "1.0"))
+ENTITY_DOCS = int(os.environ.get("KAL_ENTITY_DOCS", "0"))
 # How many documents to hand over as evidence — ablate_params.py ③.  Recall@20 saturates at 0.939.
 # N=10 misses 21% of the relevant documents.
 ANSWER_N = 20
@@ -290,9 +297,17 @@ class KAL:
             # (degree is absent from schema_v3's INDEXES.  Confirmed by measurement)
         for rank, e in enumerate(q.limit(k).to_list(), 1):
             w = 1.0 / (60 + rank)
-            for d in e["doc_ids"]:
+            for d in (e["doc_ids"][:ENTITY_DOCS] if ENTITY_DOCS else e["doc_ids"]):
                 out[d] += w
         return dict(out)
+
+    def entity_keys(self, q, k=5):
+        """The entity profiles a query matches —— LightRAG's "low-level keys", returned as rows,
+        not folded into document scores.  kal_search's `entities` field (opt-in, H5) is built from
+        this; the caller applies the release gate.  Empty without a graph."""
+        if not self.has_kg:
+            return []
+        return self.E.search(encode_query(q).tolist()).limit(k).to_list()
 
     def relation_vec(self, qv, k=DEPTH["relation"], min_degree=1):
         if not self.has_kg:
