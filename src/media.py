@@ -15,7 +15,8 @@ Linking (every link carries its basis; the same (media, entity) keeps only the s
                `media: [file, ...]` (those files get the note's `entities:` list)
   embed  0.9   the embed sits in a section (previous heading → next heading) that names an entity
                which was extracted from that very note
-  ocr    0.7   an entity name (≥ 4 chars, degree ≥ 2) occurs in the picture's text
+  ocr    0.7   an entity name (≥ 4 chars, degree ≥ 2) occurs in the picture's text, and the name is not an
+               ordinary word: it appears in at most OCR_GENERIC× as many notes as the entity was extracted from
   doc          the note path is recorded in `docs` (a link to the document, not to an entity)
 `no_llm` notes never contribute a reference, a link or a doc; a file referenced only by them is not listed.
 
@@ -102,11 +103,31 @@ def load_graph():
     return ents, docs
 
 
+def load_texts():
+    """→ lowercased text of every indexed document (for the OCR word-frequency check).  No index → []."""
+    db = os.environ.get("KAL_PATH", os.path.join(home(), "db"))
+    if not os.path.isdir(db):
+        return []
+    import lancedb
+    by = {}
+    for c in lancedb.connect(db).open_table("chunks").to_arrow().select(["doc_id", "text"]).to_pylist():
+        by[c["doc_id"]] = by.get(c["doc_id"], "") + " " + (c["text"] or "").lower()
+    return list(by.values())
+
+
+#  A name that occurs in many more notes than it was extracted from is an ordinary word that happens to be an
+#  entity.  Measured on a real graph (1,657 notes, 2026-10-06): index · notes · rebuild · schema · search sit at
+#  10–54×, real names (LanceDB · kallimachos · ffmpeg · Obsidian · MinIO) at ≤ 4×.  Without it a whiteboard
+#  reading "LanceDB index rebuild notes" was linked to "index", "notes" and "rebuild".
+OCR_GENERIC = 5
+
+
 class Entities:
     """Name lookups over the entity rows.  Keys are the table's `name_norm` (what the server graph shares)."""
 
-    def __init__(self, rows, docs=None):
+    def __init__(self, rows, docs=None, texts=None):
         self.docs = docs or {}
+        self._texts, self._generic = texts, {}       # texts: a loader, called once on the first OCR hit
         from schema_v3 import norm_name
         self.norm_name = norm_name
         self.rows = [r for r in rows if r.get("name")]
@@ -120,6 +141,16 @@ class Entities:
             for d in r.get("doc_ids") or []:
                 self.by_doc.setdefault(d, []).append(r)
         self.ocr_pool = [r for r in self.rows if len(r["name"]) >= 4 and (r.get("degree") or 0) >= 2]
+
+    def generic(self, r):
+        """Is this entity's name an ordinary word in this corpus (see OCR_GENERIC)?  No texts → no check."""
+        k = r["name"].lower()
+        if k not in self._generic:
+            if callable(self._texts):
+                self._texts = self._texts()
+            df = sum(1 for t in self._texts or [] if occurs(r["name"], t))
+            self._generic[k] = df > OCR_GENERIC * max(len(r.get("doc_ids") or []), 1)
+        return self._generic[k]
 
     def lookup(self, name):
         """A listed name → (key, display name, type).  Unknown names are kept (the server graph may have them)."""
@@ -468,7 +499,7 @@ def build_links(rec, meta, path, ents):
     text = (meta.get("ocr") or "").lower()
     if text:
         for r in ents.ocr_pool:
-            if occurs(r["name"], text):
+            if occurs(r["name"], text) and not ents.generic(r):
                 add(r.get("name_norm") or r["name"].lower(), r["name"], r.get("type") or "", "ocr",
                     docs[0] if docs else "")
     return links, list(dict.fromkeys(docs))
@@ -486,7 +517,7 @@ def source_of(rec, path, vault):
 def scan():
     vault = vault_path.vault()
     ents_rows, docs = load_graph()
-    ents = Entities(ents_rows, docs)
+    ents = Entities(ents_rows, docs, load_texts)
     found = collect(vault, media_dirs(), docs)
     out, n_new = {}, 0
     for path in sorted(found):

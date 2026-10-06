@@ -147,6 +147,19 @@ class ScanTest(Base):
         ents = media.Entities(ENTS + [{"name": "abc", "name_norm": "abc", "type": "", "doc_ids": [], "degree": 9}])
         self.assertEqual({r["name"] for r in ents.ocr_pool}, {"Redis", "KAL_CLOUD_TOKEN"})
 
+    def test_ocr_skips_ordinary_words(self):
+        # "index" is an entity from 2 notes but the word is in 20 → an ordinary word, no OCR link.
+        # "LanceDB" is in 3 notes and was extracted from 2 → a name, linked.  (measured on a real graph, 2026-10-06)
+        rows = [{"name": "index", "name_norm": "index", "type": "", "doc_ids": [1, 2], "degree": 9},
+                {"name": "LanceDB", "name_norm": "lancedb", "type": "tool", "doc_ids": [1, 2], "degree": 9}]
+        texts = ["the index page"] * 20 + ["lancedb store"] * 3
+        calls = []
+        ents = media.Entities(rows, texts=lambda: calls.append(1) or texts)
+        self.assertTrue(ents.generic(rows[0]))
+        self.assertFalse(ents.generic(rows[1]))
+        self.assertEqual(len(calls), 1, "the corpus is read once, not per entity")
+        self.assertFalse(media.Entities(rows).generic(rows[0]), "no texts → no check (manual-only setups)")
+
     def test_no_llm_excluded(self):
         m, by = self.scan()
         self.assertFalse([x for x in m["media"] if "secret" in x["source"]])
