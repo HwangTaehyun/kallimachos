@@ -334,7 +334,7 @@ class KAL:
         BM25 and chunk vectors are unaffected (they read the document body).
 
         graph=False — the **graph-off switch for the D0 benchmark** (docs/KAL-IMPROVEMENT-PLAN.md
-        축 B-0, 2026-10-03): the entity and relation components are not computed at all and, more
+        axis B-0, 2026-10-03): the entity and relation components are not computed at all and, more
         importantly, contribute **no candidates** —— `fuse()` keeps every document any component
         saw, so a zero weight alone (mode=keyword/vector) still lets graph-only documents in at
         score 0.  The BM25/chunk weights stay those of `mode`, so the only thing that changes is
@@ -730,6 +730,13 @@ def _selftest():
 
     # ── graph=False admits no graph-only candidates (D0 off switch, 2026-10-03) ──
     #    A zero weight is not an off switch: fuse() keeps every document any component saw.
+    #    This one needs a real index.  The isolated self-check (`just selftest-py`) has none, and
+    #    KAL() died there on `open_table("chunks")` —— say it was skipped, out loud (2026-10-06).
+    import db_ready
+    _miss = db_ready.missing(DB, ["documents", "chunks"])
+    if _miss:
+        print(f"   graph=False check skipped —— no index here (missing: {', '.join(_miss)})")
+        return
     _k = KAL()
     _q = "obsidian"
     _qv = encode_query(_q).tolist()

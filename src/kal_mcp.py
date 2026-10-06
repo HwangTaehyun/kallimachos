@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""kal_mcp — opens the personal knowledge DB through 6 MCP tools.  Design: docs/TEMPORAL_DESIGN.md §3
+"""kal_mcp — opens the personal knowledge DB through 7 MCP tools.  Design: docs/TEMPORAL_DESIGN.md §3
 
     kal_search     natural-language exploration (the main entry point)
     kal_entity     what a known name is + its sources + a change summary
@@ -7,6 +7,7 @@
     kal_neighbors  one hop in the graph
     kal_doc        citation verification — the source text
     kal_stats      what the graph holds: sources, agents, date range, types, index age
+    kal_media      the thumbnail of a photo / video linked to an entity (kal_entity lists them)
 
 ⚠ **MCP is the second outbound boundary.**
 `schema_v3.SKIP` decides "do we index this locally"; `no_llm` decides "may this leave the
@@ -1004,6 +1005,67 @@ def kal_search(query: str, top: int = 20, origin: str | None = None,
     return out
 
 
+#  ── Media (photos / videos linked to entities) ──────────────────────────────────────────────
+#  The manifest is written on the device by src/media.py and uploaded to the hosted copy; the hosted child
+#  points KAL_MEDIA_DIR at the user's folder.  Read lazily and re-read when the file's mtime moves.
+_MEDIA_CACHE = {"mtime": None, "path": None, "data": {}}
+SHA_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _media_dir():
+    return os.environ.get("KAL_MEDIA_DIR") or os.path.join(_KAL_HOME, "media")
+
+
+def _media_manifest():
+    """{sha256: media dict} from manifest.json; {} when absent or unreadable (no media is not an error)."""
+    p = os.path.join(_media_dir(), "manifest.json")
+    try:
+        mt = os.stat(p).st_mtime_ns
+    except OSError:
+        return {}
+    if _MEDIA_CACHE["mtime"] != mt or _MEDIA_CACHE["path"] != p:
+        try:
+            with open(p, encoding="utf-8") as fh:
+                m = json.load(fh)
+            data = {x["sha256"]: x for x in m.get("media", []) if SHA_RE.fullmatch(str(x.get("sha256", "")))}
+        except (OSError, ValueError, AttributeError, KeyError):
+            log.warning("media manifest unreadable: %s", p)
+            data = {}
+        _MEDIA_CACHE.update(mtime=mt, path=p, data=data)
+    return _MEDIA_CACHE["data"]
+
+
+def _released_paths():
+    """Paths of the documents allowed to leave the machine (no_llm ones are never in `_docs_index`)."""
+    global _DOCS
+    if _DOCS is None:
+        _DOCS = _docs_index()
+    return {d["path"] for d in _DOCS.values()}
+
+
+def _doc_blocked(doc, ok):
+    """A media link's source note is unavailable when it is not in the released set (fails closed).
+    An empty `doc` (links made from a sidecar file) has no note to gate."""
+    return bool(doc) and doc not in ok
+
+
+def media_of(name_norm, cap=12):
+    """The `media` field of kal_entity: links whose entity key is this entity's name_norm, best first."""
+    base = (os.environ.get("KAL_PUBLIC_APP_URL") or "").rstrip("/")
+    rows, ok = [], _released_paths()
+    for sha, m in _media_manifest().items():
+        for l in m.get("links", []):
+            if l.get("entity") == name_norm and not _doc_blocked(l.get("doc", ""), ok):
+                rows.append({"sha256": sha, "kind": m.get("kind"), "taken_at": m.get("taken_at"),
+                             "basis": l.get("basis"), "score": l.get("score"),
+                             "ocr": (m.get("ocr") or "")[:200], "doc": l.get("doc", ""),
+                             "url": f"{base}/media?sha={sha}" if base else None})
+                break
+    rows.sort(key=lambda r: r["taken_at"] or "", reverse=True)
+    rows.sort(key=lambda r: -(r["score"] or 0))      # stable: score desc, then taken_at desc
+    return rows[:cap]
+
+
 @app.tool(annotations=_READ_ONLY, description=(
     "Profile, sources and change summary for an entity you can name.  An inexact name returns candidates.\n"
     #  ⚠ These two never referenced each other, and the gap is answerable-looking: asked
@@ -1040,6 +1102,7 @@ def kal_entity(name: str, as_of: str | None = None) -> dict:
            # Only the count is reported; kal_timeline supplies them when needed.
            "events_total": events_of(row)[1],
            **docs_of(ids), **refs_of(ids)}
+    out["media"] = media_of(row.get("name_norm") or "")
     if as_of:
         out["as_of"] = as_of
         # Not counting changes **after** as_of would lie that "then and now are the same".
@@ -1339,6 +1402,35 @@ def kal_stats() -> dict:
                         "next `just index` adds it, `just sync` does not —— or a session page names an agent "
                         "kal does not know.")
     return out
+
+
+@app.tool(annotations=_READ_ONLY, structured_output=False, description=(
+    "The thumbnail of one photo or video (by the sha256 that kal_entity's `media` list gives), with what it is "
+    "linked to and why.  Read-only."))
+@_serial
+def kal_media(sha256: str):
+    """sha256: 64 lowercase hex.  Returns [text, image] — or text alone when there is no thumbnail."""
+    fresh()
+    sha = (sha256 or "").strip().lower()
+    if not SHA_RE.fullmatch(sha):
+        return "sha256 must be 64 hex characters (take it from kal_entity's media list)."
+    m = _media_manifest().get(sha)
+    if m is None:
+        return "no such media in this knowledge graph."
+    ok = _released_paths()
+    names = [f"{l['name']} ({l['basis']})" for l in m.get("links", []) if not _doc_blocked(l.get("doc", ""), ok)]
+    docs = [d for d in m.get("docs", []) if not _doc_blocked(d, ok)]
+    if m.get("docs") and not docs:
+        return "no such media in this knowledge graph."
+    meta = {"sha256": sha, "kind": m.get("kind"), "mime": m.get("mime"), "width": m.get("width"),
+            "height": m.get("height"), "duration_s": m.get("duration_s"), "taken_at": m.get("taken_at"),
+            "docs": docs[:10], "entities": names[:20], "ocr": (m.get("ocr") or "")[:400]}
+    text = json.dumps(meta, ensure_ascii=False, indent=2)
+    thumb = os.path.join(_media_dir(), sha, "thumb.webp")
+    if not os.path.isfile(thumb):
+        return text + "\n(no thumbnail on this side —— only the metadata above is available.)"
+    from mcp.server.mcpserver.utilities.types import Image
+    return [text, Image(path=thumb)]
 
 
 # ═══════════════════════ kal_extract_* — write tools, opt-in only (§11) ═══════════════════════
@@ -1921,7 +2013,7 @@ def _selftest():
     try:
         _calls = ((kal_entity, ("obsidian",)), (kal_timeline, ("obsidian",)),
                   (kal_neighbors, ("obsidian",)), (kal_doc, (999999,)),
-                  (kal_search, ("x",)), (kal_stats, ()))
+                  (kal_search, ("x",)), (kal_stats, ()), (kal_media, ("0" * 64,)))
         import asyncio as _aio_f
         assert {f.__name__ for f, _ in _calls} == {t.name for t in _aio_f.run(app.list_tools())}, \
             "a registered tool is missing from the fresh() check"
@@ -2224,6 +2316,47 @@ def _selftest():
     finally:
         os.unlink(_out.name)
 
+    # ── Media: kal_entity.media and kal_media against a temp manifest (2026-10-06) ──────────────
+    #    A link to a document outside the released set must not ride out, and kal_media must hand back
+    #    an ImageContent next to the text.  Fixture only —— nothing under the real KAL_HOME is read.
+    import tempfile as _tf
+    from PIL import Image as _PI
+    _sha_a, _sha_b = "a" * 64, "b" * 64
+    _okdoc = next(iter(_docs_index().values()))["path"]
+    _nn = resolve("obsidian")[0].get("name_norm") or "obsidian"
+    with _tf.TemporaryDirectory() as _md:
+        os.makedirs(os.path.join(_md, _sha_a))
+        _PI.new("RGB", (8, 8), "red").save(os.path.join(_md, _sha_a, "thumb.webp"), "WEBP")
+        _lk = lambda doc, basis, sc: {"entity": _nn, "name": "Obsidian", "type": "tool", "basis": basis,
+                                      "score": sc, "doc": doc}
+        _mf = {"version": 1, "generated_at": "2026-10-06T00:00:00Z", "media": [
+            {"sha256": _sha_a, "kind": "image", "mime": "image/png", "bytes": 1, "width": 8, "height": 8,
+             "duration_s": None, "taken_at": "2026-03-04T10:00:00", "source": "dir:x/a.png",
+             "variants": ["thumb"], "ocr": "x" * 300, "links": [_lk(_okdoc, "embed", 0.9)], "docs": [_okdoc]},
+            {"sha256": _sha_b, "kind": "image", "mime": "image/png", "bytes": 1, "width": 8, "height": 8,
+             "duration_s": None, "taken_at": None, "source": "dir:x/b.png", "variants": ["orig"], "ocr": "",
+             "links": [_lk("no-such-released-note.md", "embed", 0.9)], "docs": ["no-such-released-note.md"]}]}
+        with open(os.path.join(_md, "manifest.json"), "w") as _fh:
+            json.dump(_mf, _fh)
+        _old_env = {k: os.environ.get(k) for k in ("KAL_MEDIA_DIR", "KAL_PUBLIC_APP_URL")}
+        os.environ["KAL_MEDIA_DIR"], os.environ["KAL_PUBLIC_APP_URL"] = _md, "https://app.example"
+        try:
+            _me = kal_entity("obsidian")["media"]
+            assert [m["sha256"] for m in _me] == [_sha_a], f"media gate/link match wrong: {_me}"
+            assert len(_me[0]["ocr"]) == 200 and _me[0]["url"] == f"https://app.example/media?sha={_sha_a}", _me
+            _r = kal_media(_sha_a)
+            assert isinstance(_r, list) and "Obsidian" in _r[0], _r
+            from mcp.server.mcpserver.utilities.types import Image as _MI
+            assert isinstance(_r[1], _MI), "kal_media returned no image next to the text"
+            os.environ["KAL_MEDIA_DIR"] = os.path.join(_md, "empty")     # no manifest → no media, no error
+            assert kal_entity("obsidian")["media"] == [], "kal_entity.media must be empty without a manifest"
+            os.environ["KAL_MEDIA_DIR"] = _md
+            assert isinstance(kal_media("zz"), str) and isinstance(kal_media(_sha_b), str), \
+                "kal_media must answer a bad sha or a gated media with text alone"
+        finally:
+            for k, v in _old_env.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+
     # ⑮ The host must have a version to read.  An empty string hides plugin updates.
     #
     #    ⚠ Checking `_plugin_version()` alone **is not enough** —— the helper can return the
@@ -2238,7 +2371,7 @@ def _selftest():
     assert _v == _json.load(open(_mj, encoding="utf-8"))["version"], \
         "serverInfo.version and plugin.json have diverged —— there is no telling which to believe"
 
-    print(f"  ✅ self-check passed — all 6 tools called · {row['name']} · "
+    print(f"  ✅ self-check passed — all 7 tools called · {row['name']} · "
           f"docs {e['docs_total']} · refs {e['refs_status']} · search {q['hit_count']} hits · "
           f"empty-DB message · v{_v}")
 

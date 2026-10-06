@@ -371,6 +371,7 @@ selftest-py-checks:
     @{{py}} {{src}}/device_auth.py --selftest
     @{{py}} {{src}}/github_sync.py --selftest
     @{{py}} {{src}}/schema_v3.py --selftest
+    @{{py}} {{src}}/usage.py --selftest
     @{{py}} {{src}}/kal_search.py --selftest
     @{{py}} {{src}}/kal_config.py --selftest
     @{{py}} {{src}}/status.py --selftest
@@ -706,6 +707,15 @@ push:
     os.chmod(os.path.join(home, "push.json"), 0o600)
     print(f"recorded → {home}/push.json (just status shows when the index moves past this)")
     PYEOF
+
+#  Photos and videos linked to entities (see the header of src/media.py).
+#  `media` scans the vault's embeds + `media_dirs` and writes ~/.kal/media/manifest.json; `media-push`
+#  uploads only the variants the cloud does not have yet (same KAL_CLOUD_URL / KAL_CLOUD_TOKEN as `push`).
+media *args:
+    @{{py}} {{src}}/media.py scan {{args}}
+
+media-push:
+    @{{py}} {{src}}/media.py push
 
 # Incremental sync (changed documents only)
 sync *args:

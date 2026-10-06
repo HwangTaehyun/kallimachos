@@ -27,6 +27,7 @@ dependencies = [
     #  The setup wizard (src/init_tui.py).  rich comes along with textual ——
     #  it used to rely on torch dragging it in **undeclared**.
     "textual>=8.2.8",
+    "pillow>=12.3.0",
 ]
 
 [dependency-groups]
