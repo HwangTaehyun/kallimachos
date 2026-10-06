@@ -1426,8 +1426,12 @@ def kal_media(sha256: str):
             "height": m.get("height"), "duration_s": m.get("duration_s"), "taken_at": m.get("taken_at"),
             "docs": docs[:10], "entities": names[:20], "ocr": (m.get("ocr") or "")[:400]}
     text = json.dumps(meta, ensure_ascii=False, indent=2)
-    thumb = os.path.join(_media_dir(), sha, "thumb.webp")
-    if not os.path.isfile(thumb):
+    #  Two layouts: the device's store keeps `<sha>/thumb.webp`; the hosted service keeps `thumb/<sha>.webp`.
+    #  Only the first was looked for, so the hosted child answered with metadata and no picture —— every
+    #  local check passed, and the first live end-to-end run caught it (2026-10-06).
+    thumb = next((p for p in (os.path.join(_media_dir(), sha, "thumb.webp"),
+                              os.path.join(_media_dir(), "thumb", sha + ".webp")) if os.path.isfile(p)), "")
+    if not thumb:
         return text + "\n(no thumbnail on this side —— only the metadata above is available.)"
     from mcp.server.mcpserver.utilities.types import Image
     return [text, Image(path=thumb)]
@@ -2348,6 +2352,10 @@ def _selftest():
             assert isinstance(_r, list) and "Obsidian" in _r[0], _r
             from mcp.server.mcpserver.utilities.types import Image as _MI
             assert isinstance(_r[1], _MI), "kal_media returned no image next to the text"
+            os.makedirs(os.path.join(_md, "thumb"))               # the hosted layout: thumb/<sha>.webp
+            os.replace(os.path.join(_md, _sha_a, "thumb.webp"), os.path.join(_md, "thumb", _sha_a + ".webp"))
+            _r = kal_media(_sha_a)
+            assert isinstance(_r, list) and isinstance(_r[1], _MI), "kal_media found no thumbnail in the hosted layout"
             os.environ["KAL_MEDIA_DIR"] = os.path.join(_md, "empty")     # no manifest → no media, no error
             assert kal_entity("obsidian")["media"] == [], "kal_entity.media must be empty without a manifest"
             os.environ["KAL_MEDIA_DIR"] = _md
