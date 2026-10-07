@@ -180,6 +180,25 @@ class ScanTest(Base):
             m, _ = self.scan()
         self.assertFalse([x for x in m["media"] if x["source"].startswith("dir:p")])
 
+    def test_private_subfolder_of_a_public_dir(self):
+        # public ~/pics, private ~/pics/secret: the walk of the public dir must not descend into the private one,
+        # and no embed / frontmatter `media:` may reach into it either
+        pub, priv = os.path.join(self.vault, "pics"), os.path.join(self.vault, "pics", "secret")
+        os.makedirs(priv)
+        png(os.path.join(pub, "pub.png"), "purple")
+        hidden = os.path.join(priv, "hidden.png")
+        png(hidden, "orange")
+        with open(os.path.join(self.vault, "a.md"), "a", encoding="utf-8") as fh:
+            fh.write("\n![[hidden.png]]\n![h](pics/secret/hidden.png)\n")
+        with open(os.path.join(self.vault, "fm2.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nmedia: [hidden.png]\nentities: [Rare]\n---\n")
+        dirs = [{"path": pub, "alias": "pics"}, {"path": priv, "alias": "s", "private": True}]
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_DIRS": json.dumps(dirs)}):
+            m, by = self.scan()
+        self.assertIn("dir:pics/pub.png", by, "the public parent is still walked")
+        self.assertNotIn(media.sha256_of(hidden), {x["sha256"] for x in m["media"]})
+        self.assertNotIn("hidden.png", json.dumps(m))
+
     def test_exif_stripped_and_view_size(self):
         m, by = self.scan()
         shot = by["vault:a.md#shot.jpg"]
@@ -210,7 +229,8 @@ class ScanTest(Base):
 
 class Fake:
     """A media API on 127.0.0.1: HEAD / PUT blob, PUT manifest, GET usage, DELETE blob.  `fail` maps a path suffix
-    to the status its PUT answers with; `usage` is what the server says it holds."""
+    to the status its PUT answers with; `usage` is what the server holds ({key: bytes}).  Like the real one it
+    enforces the quota: a blob PUT that would take usage over `quota` answers 507; PUT / DELETE update `usage`."""
 
     def __init__(self, test):
         import http.server
@@ -240,6 +260,12 @@ class Fake:
                 fake.seen.append(("PUT", self.path, self.headers["X-Kal-Content-Type"] or self.headers["Content-Type"],
                                   self.headers["Content-Type"]))
                 code = next((c for k, c in fake.fail.items() if self.path.endswith(k)), 204)
+                key = self.path.split("/api/media/blob/")[-1]
+                if code == 204 and "/api/media/blob/" in self.path:
+                    if sum(fake.usage.values()) - fake.usage.get(key, 0) + n > fake.quota:
+                        code = 507
+                    else:
+                        fake.usage[key] = n
                 if code == 204:
                     fake.have.add(self.path)
                     if self.path.endswith("/manifest"):
@@ -256,6 +282,7 @@ class Fake:
             def do_DELETE(self):
                 fake.seen.append(("DELETE", self.path))
                 fake.have.discard(self.path)
+                fake.usage.pop(self.path.split("/api/media/blob/")[-1], None)
                 self.reply(200, b'{"ok":true,"deleted":true}')
 
         self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
@@ -365,9 +392,12 @@ class PushTest(Base):
             with mock.patch("sys.stdout", new=out):
                 self.push(prune=True)
         deleted = {x[1].split("/api/media/blob/")[1] for x in self.fake.blobs("DELETE")}
-        self.assertEqual(deleted, {f"{other}/thumb", f"{other}/orig", f"{shot}/orig"})
-        self.assertIn("deleted 3 blob(s)", out.getvalue())
-        self.assertIn("media_orig is off —— 2 original(s) uploaded earlier will be deleted", out.getvalue())
+        # the first push recorded every original (the fake keeps what it stores) → all of them are now unlisted
+        origs = {f"{x['sha256']}/orig" for x in self.m["media"]}
+        self.assertIn(f"{shot}/orig", origs)
+        self.assertEqual(deleted, {f"{other}/thumb", f"{other}/orig"} | origs)
+        self.assertIn("deleted 5 blob(s)", out.getvalue())
+        self.assertIn("media_orig is off —— 4 original(s) uploaded earlier will be deleted", out.getvalue())
         put_manifest = max(i for i, x in enumerate(self.fake.seen) if x[0] == "PUT" and x[1].endswith("/manifest"))
         first_delete = min(i for i, x in enumerate(self.fake.seen) if x[0] == "DELETE")
         self.assertLess(put_manifest, first_delete, "prune runs only after the manifest is in place")
@@ -442,6 +472,79 @@ class PushTest(Base):
         self.assertIn("--prune", str(cm.exception))
         self.assertEqual(len([x for x in self.fake.blobs() if x[1].endswith("/view")]), 1, "stops at the first 507")
         self.assertIsNone(self.fake.manifest)
+
+    def test_shrinking_copies_free_room_before_new_uploads(self):
+        # near the quota: shot's view is recorded at an older, bigger derivation (shrinks when replaced) and the inline
+        # image is new.  The end state fits exactly; uploading the new item before the delete would hit 507 mid-run.
+        sizes = {x[1].split("/api/media/blob/")[1]: s for x, s in self.sizes().items()}
+        shot, new = self.by["vault:a.md#shot.jpg"]["sha256"], self.by["vault:a.md#img/inline.png"]["sha256"]
+        self.assertLess(self.m["media"].index(self.by["vault:a.md#img/inline.png"]),
+                        self.m["media"].index(self.by["vault:a.md#shot.jpg"]), "fixture: the new item comes first")
+        start = {k: s for k, s in sizes.items() if not k.startswith(new)}
+        start[f"{shot}/view"] += 60_000
+        self.fake.usage, self.fake.have = dict(start), {"/api/media/blob/" + k for k in start}
+        self.fake.quota = sum(sizes.values()) - 1                     # one byte short of the end state → refused up front
+        with self.assertRaises(SystemExit) as cm:
+            self.push()
+        self.assertIn("over the storage quota", str(cm.exception))
+        self.assertEqual([x for x in self.fake.seen if x[0] in ("PUT", "DELETE")], [])
+        self.fake.quota += 1
+        self.push()
+        self.assertEqual(self.fake.usage, sizes)
+        self.assertEqual(len(self.fake.manifest["media"]), 3)
+        order = [x[:2] for x in self.fake.seen if x[0] in ("PUT", "DELETE")]
+        self.assertEqual(order[0], ("DELETE", f"/api/media/blob/{shot}/view"), "the delete frees room first")
+
+    def test_one_image_in_51_notes(self):
+        for i in range(51):
+            with open(os.path.join(self.vault, f"n{i:02}.md"), "w", encoding="utf-8") as fh:
+                fh.write("![[board.png]]\n")
+        m, _ = self.scan()
+        board = next(x for x in m["media"] if x["sha256"] == media.sha256_of(os.path.join(self.vault, "board.png")))
+        self.assertEqual(board["docs"], sorted(["fm.md"] + [f"n{i:02}.md" for i in range(51)])[:50])
+        self.assertEqual(media.manifest_errors(m), [])
+        self.push()
+        got = next(x for x in self.fake.manifest["media"] if x["sha256"] == board["sha256"])
+        self.assertEqual(len(got["docs"]), 50)
+
+    def test_long_note_path_is_dropped_not_cut(self):
+        # 3 × 80 "€" (3 bytes each) = 720 bytes but only 245 characters: a character cut would have kept it whole
+        deep = os.path.join(self.vault, *["€" * 80] * 3)
+        os.makedirs(deep)
+        with open(os.path.join(deep, "n.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nmedia: [board.png]\nentities: [Kal]\n---\n![[board.png]]\n")
+        m, _ = self.scan()
+        board = next(x for x in m["media"] if x["sha256"] == media.sha256_of(os.path.join(self.vault, "board.png")))
+        self.assertEqual(board["docs"], ["fm.md"])
+        self.assertEqual({l["entity"]: l["doc"] for l in board["links"]}["kal"], "", "the link stays, its doc does not")
+        self.assertEqual(media.manifest_errors(m), [])
+
+    def test_invalid_manifest_stops_before_any_request(self):
+        mp = os.path.join(self.home, "media", "manifest.json")
+        man = json.load(open(mp))
+        man["media"][0]["docs"] = [f"n{i}.md" for i in range(51)]
+        json.dump(man, open(mp, "w"))
+        with self.assertRaises(SystemExit) as cm:
+            self.push(prune=True)
+        self.assertIn("51 docs", str(cm.exception))
+        self.assertIn("nothing was sent", str(cm.exception))
+        self.assertEqual(self.fake.seen, [], "not even the usage GET")
+
+    def test_manifest_errors_mirrors_the_server(self):
+        good = dict(self.m["media"][0], links=[{"entity": "kal", "name": "Kal", "type": "", "basis": "embed",
+                                               "score": 0.9, "doc": "a.md"}])
+        ok = lambda item, version=1: media.manifest_errors({"version": version, "media": [item]})
+        self.assertEqual(ok(good), [])
+        self.assertTrue(ok(good, version=2))
+        for k, v in [("sha256", "A" * 64), ("kind", "audio"), ("links", None), ("variants", []), ("variants", ["raw"]),
+                     ("mime", ""), ("mime", "a" * 101), ("bytes", -1), ("source", "s" * 513), ("ocr", "€" * 2001),
+                     ("taken_at", "€" * 14), ("docs", ["d"] * 51), ("docs", ["€" * 171])]:
+            with self.subTest(field=k, value=str(v)[:12]):
+                self.assertTrue(ok(dict(good, **{k: v})))
+        for k, v in [("entity", ""), ("name", ""), ("name", "n" * 121), ("entity", "€" * 171), ("doc", "€" * 171),
+                     ("basis", "doc"), ("score", 1.5), ("score", None)]:
+            with self.subTest(link=k, value=str(v)[:12]):
+                self.assertTrue(ok(dict(good, links=[dict(good["links"][0], **{k: v})])))
 
     def test_rederived_copy_replaces_the_server_one(self):
         self.push()

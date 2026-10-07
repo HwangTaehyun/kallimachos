@@ -25,7 +25,10 @@ just media-push --prune                   # the same, then delete server files t
    {"media_dirs": [{"path": "~/Pictures/whiteboards", "alias": "wb", "private": false}]}
    ```
 
-   A folder marked `"private": true` is skipped entirely, including embeds that point into it.
+   A folder marked `"private": true` is skipped entirely, wherever it sits. If it is inside a
+   public folder (public `~/Pictures`, private `~/Pictures/secret`), the scan of the public
+   folder does not enter it. Embeds and frontmatter `media:` entries that point into it are
+   ignored too.
 
 Notes marked `no_llm` contribute nothing: no embed, no link and no doc. A file that only those
 notes reference is not listed.
@@ -49,7 +52,10 @@ strongest basis is kept.
 ordinary words measured at 10–54× and real names at ≤ 4×.
 
 The notes a file is embedded in are recorded in the item's `docs` list. They are not a link
-basis.
+basis. The server takes at most 50 notes per item, so when a file appears in more notes, only
+the first 50 by path are listed, with a warning. A note path longer than 512 bytes is left out
+of `docs` (and a link from that note keeps an empty `doc`). It is never shortened, because a
+shortened path would name a different note.
 
 ## Optional tools
 
@@ -77,20 +83,26 @@ is, or the 720p mp4) and `orig`. The server limits them to 1 MiB, 300 MiB and 1 
 over its limit is skipped with a warning. When a file is left with neither `view` nor `orig`, it
 is dropped from the uploaded manifest.
 
+- The manifest is checked against every rule the server applies to it (field lengths, the
+  50-note `docs` limit, required fields) **before any request**. If anything breaks a rule, push
+  stops with the list and sends nothing, so no file is uploaded or pruned for a manifest the
+  server would then refuse.
 - The manifest's size (server limit 16 MiB) is checked **before** any file is uploaded. If it is
   too big, push stops and tells you how many items or how much OCR text to cut.
 - Your storage quota is checked **before** any file is uploaded, too. Push asks the server what it
-  already holds, adds up only what this push would add, and stops if that goes over the quota. It
-  tells you how much is over and how to make room: `--prune`, or `media_orig` off. If the server
-  answers 507 (quota full) during the upload anyway, push stops the same way and does not replace
-  the manifest.
+  already holds and works out the highest usage this push will reach. It stops if that goes over
+  the quota, and tells you how much is over and how to make room: `--prune`, or `media_orig` off.
+  If the server answers 507 (quota full) during the upload anyway, push stops the same way and
+  does not replace the manifest.
 - **Per-file responses:** 400, 413 (the file is over its limit) and 415. Push skips that one file
   with a warning and continues. **Any other error response stops the run**, including 401, 402,
   410, 411, 507 and 5xx, as do network errors.
 - Files the server already has are not sent again. The exception is a thumbnail or view copy that
-  the server holds at a different size (it was derived again after an upgrade). Push deletes the
-  server's copy and uploads the new one. If that upload fails, the item shows no preview until
-  the next push. An original is identified by its content and is never replaced.
+  the server holds at a different size (it was derived again after an upgrade). Push replaces
+  it. **All of these deletes run before the first upload**, so the room they free is there when
+  new files need it, and usage never rises above the final total that the quota check measured.
+  If the run stops after the deletes, those items show no preview until the next push. An
+  original is identified by its content and is never replaced.
 - An older server without the usage endpoint gets no quota check and no multi-device warning, and
   `--prune` stops with a message.
 - The server allows 30 minutes per upload. A 1 GiB original needs a steady upload speed of about

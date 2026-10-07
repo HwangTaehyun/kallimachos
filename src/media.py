@@ -8,7 +8,8 @@ Sources
   (a) local media embedded in vault notes:  ![[file.png]]  and  ![alt](relative/path.png)
   (b) opt-in folders, config key `media_dirs` (env KAL_MEDIA_DIRS as a JSON list wins over config.json):
         [{"path": "~/Pictures/whiteboards", "alias": "wb", "private": false}]
-      A folder with "private": true is skipped entirely.
+      A folder with "private": true is skipped entirely, wherever it sits: nothing under it is read —— not by a
+      public folder that contains it, not through a vault embed or a frontmatter `media:` entry.
 
 Linking (every link carries its basis; the same (media, entity) keeps only the strongest basis):
   manual 1.0   sidecar `<file>.md` / `<file>.json` with `entities: [...]`, or the note's frontmatter
@@ -17,7 +18,8 @@ Linking (every link carries its basis; the same (media, entity) keeps only the s
                which was extracted from that very note
   ocr    0.7   an entity name (≥ 4 chars, degree ≥ 2) occurs in the picture's text, and the name is not an
                ordinary word: it appears in at most OCR_GENERIC× as many notes as the entity was extracted from
-  Those three are the only bases.  The notes a file is embedded in go to the item's `docs` list, not to a link.
+  Those three are the only bases.  The notes a file is embedded in go to the item's `docs` list, not to a link:
+  sorted by path, at most MAX_DOCS (50, the server's limit).  A note path over 512 bytes is left out, never cut.
 `no_llm` notes never contribute a reference, a link or a doc; a file referenced only by them is not listed.
 
 The server never calls an LLM and never sees a file the device did not choose to upload: everything
@@ -35,11 +37,13 @@ Push
   left with neither view nor orig is dropped from the uploaded manifest.  ANY other non-2xx response (401, 402,
   410, 411, 507, 5xx, …) and any network error stop the run.  (HEAD 404 only means "not there yet → upload", and
   a 404/405 from /api/media/usage means an older server: no quota precheck, no multi-device warning, no prune.)
-  Before any blob is sent: the manifest is checked against the server's 16 MiB limit, and what this push adds is
+  Before any request: the manifest is checked against every rule of the server's validateManifest (a violation
+  stops the run with the list) and against its 16 MiB limit.  Before any blob: the peak usage of this push is
   checked against the storage quota (GET /api/media/usage).  A 507 mid-run (quota full) stops the run.
   thumb / view are derived copies: when the server records one at a size other than the local file (re-derived
-  after DERIVE_VERSION changed), it is deleted and uploaded again —— if that upload fails, the item has no preview
-  until the next push.  orig is content-addressed and never replaced.
+  after DERIVE_VERSION changed), it is replaced.  All those deletes run before the first upload, so the room they
+  free is there when the uploads need it —— if the run then stops, those items have no preview until the next
+  push.  orig is content-addressed and never replaced.
   The uploaded manifest REPLACES the server's (last push wins) —— one device per account.  When the server holds
   items this device does not list, push says so.  `push --prune` then deletes every recorded server file the
   uploaded manifest does not list; without the flag nothing is ever deleted.  Normally it runs after the manifest
@@ -75,7 +79,10 @@ IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif"}
 VID_EXT = {".mp4", ".mov", ".m4v", ".webm"}
 MIME_FIX = {".heic": "image/heic", ".heif": "image/heif", ".m4v": "video/x-m4v", ".mov": "video/quicktime"}
 THUMB_PX, VIEW_PX, OCR_CHARS = 256, 2048, 2000
-CAPS = {"name": 120, "source": 512, "doc": 512}
+#  The server's manifest limits (cloud/api/media.go validateManifest).  name · source · ocr count characters;
+#  entity · doc · taken_at · mime count UTF-8 bytes.
+CAPS = {"name": 120, "source": 512, "doc": 512, "entity": 512, "taken_at": 40, "mime": 100}
+MAX_DOCS = 50                   # notes listed per item —— the server refuses more
 BASIS_RANK = {"manual": 3, "embed": 2, "ocr": 1}
 BASIS_SCORE = {"manual": 1.0, "embed": 0.9, "ocr": 0.7}
 VARIANTS = ("thumb", "view", "orig")
@@ -224,9 +231,11 @@ def is_media(path):
     return os.path.splitext(path)[1].lower() in IMG_EXT | VID_EXT
 
 
-def walk(root):
+def walk(root, skip=()):
+    """Every non-hidden file under root.  A folder in `skip` (the private media dirs) is not entered at all."""
+    skip = {os.path.realpath(s) for s in skip}
     for dp, dn, fn in os.walk(root):
-        dn[:] = [d for d in dn if not d.startswith(".")]
+        dn[:] = [d for d in dn if not d.startswith(".") and os.path.realpath(os.path.join(dp, d)) not in skip]
         for f in fn:
             if not f.startswith("."):
                 yield os.path.join(dp, f)
@@ -275,8 +284,12 @@ def collect(vault, dirs, docs):
     from schema_v3 import doc_meta, _blocked_by_path
     found = {}
     private = [d["path"] for d in dirs if d["private"]]
+
+    def is_private(p):          # inside ANY private dir, however deep and whichever public dir holds it
+        return any(inside(p, q) for q in private)
+
     by_name = {}
-    all_files = list(walk(vault)) if vault and os.path.isdir(vault) else []
+    all_files = list(walk(vault, private)) if vault and os.path.isdir(vault) else []
     for p in all_files:
         if is_media(p):
             by_name.setdefault(os.path.basename(p).lower(), []).append(p)
@@ -312,12 +325,12 @@ def collect(vault, dirs, docs):
         fm = parse_fm(text)
         for m in list(EMBED_WIKI.finditer(text)) + list(EMBED_MD.finditer(text)):
             p = resolve(m.group(1), note)
-            if p and not any(inside(p, q) for q in private):
+            if p and not is_private(p):
                 found.setdefault(p, {"embeds": [], "notes": [], "dir": None})["embeds"].append(
                     (rel, section_of(text, m.start()), m.group(1)))
         for name in as_list(fm.get("media")):
             p = resolve(name, note)
-            if p and not any(inside(p, q) for q in private):
+            if p and not is_private(p):
                 found.setdefault(p, {"embeds": [], "notes": [], "dir": None})["notes"].append(
                     (rel, as_list(fm.get("entities"))))
 
@@ -327,8 +340,8 @@ def collect(vault, dirs, docs):
         if not os.path.isdir(d["path"]):
             warn(f"media dir {d['path']} does not exist")
             continue
-        for p in walk(d["path"]):
-            if is_media(p):
+        for p in walk(d["path"], private):            # a private subfolder of a public dir is pruned
+            if is_media(p) and not is_private(p):
                 rec = found.setdefault(os.path.abspath(p), {"embeds": [], "notes": [], "dir": None})
                 rec["dir"] = rec["dir"] or (d["alias"], os.path.relpath(p, d["path"]))
     return found
@@ -527,10 +540,12 @@ def build_links(rec, meta, path, ents):
     links, docs = {}, []
 
     def add(key, name, typ, basis, doc):
+        if nbytes(key) > CAPS["entity"]:
+            return                  # a cut key would name another entity
         old = links.get(key)
         if old is None or BASIS_RANK[basis] > BASIS_RANK[old["basis"]]:
-            links[key] = {"entity": key[:200], "name": name[:CAPS["name"]], "type": typ, "basis": basis,
-                          "score": BASIS_SCORE[basis], "doc": doc[:CAPS["doc"]]}
+            links[key] = {"entity": key, "name": name[:CAPS["name"]], "type": typ, "basis": basis,
+                          "score": BASIS_SCORE[basis], "doc": doc if nbytes(doc) <= CAPS["doc"] else ""}
 
     for name in sidecar_entities(path):
         k, nm, ty = ents.lookup(name)
@@ -556,6 +571,10 @@ def build_links(rec, meta, path, ents):
                 add(r.get("name_norm") or r["name"].lower(), r["name"], r.get("type") or "", "ocr",
                     docs[0] if docs else "")
     return links, list(dict.fromkeys(docs))
+
+
+def nbytes(s):
+    return len((s or "").encode("utf-8"))
 
 
 def source_of(rec, path, vault):
@@ -584,7 +603,8 @@ def scan():
             m = out[meta["sha256"]] = {
                 "sha256": meta["sha256"], "kind": meta["kind"], "mime": meta["mime"], "bytes": meta["bytes"],
                 "width": meta.get("width"), "height": meta.get("height"), "duration_s": meta.get("duration_s"),
-                "taken_at": meta.get("taken_at"), "source": source_of(rec, path, vault)[:CAPS["source"]],
+                "taken_at": meta.get("taken_at") if nbytes(meta.get("taken_at")) <= CAPS["taken_at"] else None,
+                "source": source_of(rec, path, vault)[:CAPS["source"]],
                 "variants": meta["variants"], "ocr": (meta.get("ocr") or "")[:OCR_CHARS], "links": {}, "docs": []}
         for k, l in links.items():
             if k not in m["links"] or BASIS_RANK[l["basis"]] > BASIS_RANK[m["links"][k]["basis"]]:
@@ -593,6 +613,12 @@ def scan():
     media = []
     for m in out.values():
         m["links"] = sorted(m["links"].values(), key=lambda l: (-l["score"], l["entity"]))
+        docs = sorted(d for d in m["docs"] if nbytes(d) <= CAPS["doc"])     # a cut path would name another note
+        if len(docs) < len(m["docs"]):
+            warn(f"{m['source']}: {len(m['docs']) - len(docs)} note path(s) over {CAPS['doc']} bytes —— not listed")
+        if len(docs) > MAX_DOCS:
+            warn(f"{m['source']}: in {len(docs)} notes —— only the first {MAX_DOCS} (by path) are listed")
+        m["docs"] = docs[:MAX_DOCS]
         media.append(m)
     media.sort(key=lambda m: (m["taken_at"] or "", m["sha256"]))
     if len(media) > MAX_MEDIA:
@@ -618,6 +644,43 @@ def variant_ct(m, v, fname):
     if v == "thumb":
         return "image/webp"
     return {".gif": "image/gif", ".mp4": "video/mp4"}.get(os.path.splitext(fname)[1], "image/jpeg")
+
+
+def manifest_errors(manifest):
+    """Every rule of the server's validateManifest (cloud/api/media.go) → a list of problems; [] = it will be accepted.
+    Checked before any request, so blobs are never uploaded (or pruned) for a manifest the server then refuses."""
+    errs = [] if manifest.get("version") == 1 else ["version must be 1"]
+    items = manifest.get("media")
+    items = items if isinstance(items, list) else []
+    if len(items) > MAX_MEDIA:
+        errs.append(f"{len(items)} media —— the server takes {MAX_MEDIA}")
+    for i, m in enumerate(items):
+        docs, links, variants = m.get("docs") or [], m.get("links"), m.get("variants")
+        checks = [
+            (re.fullmatch(r"[0-9a-f]{64}", str(m.get("sha256"))), "sha256 must be 64 lowercase hex"),
+            (m.get("kind") in ("image", "video"), "kind must be image or video"),
+            (isinstance(links, list), "links must be a list"),
+            (isinstance(variants, list) and variants and set(variants) <= set(VARIANTS), "variants: thumb · view · orig, at least one"),
+            (m.get("mime") and nbytes(m["mime"]) <= CAPS["mime"], f"mime is required, ≤ {CAPS['mime']} bytes"),
+            (not isinstance(m.get("bytes"), int) or m["bytes"] >= 0, "bytes is negative"),
+            (len(m.get("source") or "") <= CAPS["source"], f"source over {CAPS['source']} characters"),
+            (len(m.get("ocr") or "") <= OCR_CHARS, f"ocr over {OCR_CHARS} characters"),
+            (nbytes(m.get("taken_at")) <= CAPS["taken_at"], f"taken_at over {CAPS['taken_at']} bytes"),
+            (len(docs) <= MAX_DOCS, f"{len(docs)} docs —— the server takes {MAX_DOCS}"),
+            (all(nbytes(d) <= CAPS["doc"] for d in docs), f"a docs entry over {CAPS['doc']} bytes"),
+        ]
+        for l in links if isinstance(links, list) else []:
+            checks += [
+                (l.get("entity") and l.get("name"), "a link without entity or name"),
+                (len(l.get("name") or "") <= CAPS["name"], f"a link name over {CAPS['name']} characters"),
+                (nbytes(l.get("entity")) <= CAPS["entity"] and nbytes(l.get("doc")) <= CAPS["doc"],
+                 f"a link entity or doc over {CAPS['entity']} bytes"),
+                (l.get("basis") in BASIS_RANK, "a link basis other than manual · embed · ocr"),
+                (isinstance(l.get("score"), (int, float)) and not isinstance(l.get("score"), bool)
+                 and 0 <= l["score"] <= 1, "a link score outside 0..1"),
+            ]
+        errs += [f"media[{i}] {m.get('source', '')}: {msg}" for ok, msg in checks if not ok]
+    return errs
 
 
 SOFT = (400, 413, 415)          # the server refused this one file —— skip it, the run goes on; anything else stops
@@ -693,7 +756,11 @@ def push(prune=False):
         else:
             warn(f"{m['source']}: nothing viewable left to upload —— left out")
 
-    # 2. the manifest must fit before any quota is spent
+    # 2. the manifest must be one the server accepts, and fit, before any request
+    errs = manifest_errors(dict(manifest, media=media))
+    if errs:
+        sys.exit("the manifest breaks the server's rules —— nothing was sent.  Run `just media` again; if it "
+                 "persists, report it.\n  " + "\n  ".join(errs[:20]) + (f"\n  … and {len(errs) - 20} more" if len(errs) > 20 else ""))
     body = body_of(media)
     if len(body) > MANIFEST_CAP:
         over = len(body) - MANIFEST_CAP
@@ -732,14 +799,19 @@ def push(prune=False):
             freed += size if isinstance(size, int) else 0
         print(f"media prune: deleted {len(gone)} blob(s) · {freed / (1 << 20):.1f} MiB freed")
 
-    # 4. the quota must fit before any blob is sent (--prune may free room first)
+    # 4. the quota must fit at the peak (--prune may free room first).  Every stale copy is deleted before the first
+    #    upload, so usage only falls and then only rises: the peak is the end state, total − freed + needed.
     keep = {f"{m['sha256']}/{v}" for m, paths in zip(media, plan) for v in paths}
-    need = 0
+    replace, freed, needed = set(), 0, 0
     for m, paths in zip(media, plan):
         for v, p in paths.items():
             k, size = f"{m['sha256']}/{v}", os.path.getsize(p)
-            if k not in server or stale(k, v, size):
-                need += size - server.get(k, 0)
+            if stale(k, v, size):
+                replace.add(k)
+                freed += server[k] if isinstance(server[k], int) else 0
+            if k not in server or k in replace:
+                needed += size
+    need = needed - freed
     quota, total = (usage or {}).get("quota") or 0, (usage or {}).get("total") or 0
     over = total + need - quota
     if quota and over > 0:
@@ -752,15 +824,16 @@ def push(prune=False):
         print(f"media prune: {over / (1 << 20):.1f} MiB over the quota —— pruning before the upload")
         prune_now(keep)
 
-    # 5. blobs —— one refused file does not stop the run
-    up = skipped = refused = nbytes = 0
+    # 5. stale derived copies first —— the room they free is what step 4 counted on (the server would also answer
+    #    HEAD 200 for the old copy).  Then blobs; one refused file does not stop the run.
+    for k in sorted(replace):
+        call("DELETE", f"{url}/api/media/blob/{k}")
+    up = skipped = refused = sent = 0
     for m, paths in zip(media, plan):
         for v, p in list(paths.items()):
             u = f"{url}/api/media/blob/{m['sha256']}/{v}"
             size = os.path.getsize(p)
-            if stale(f"{m['sha256']}/{v}", v, size):
-                call("DELETE", u)          # the server would answer HEAD 200 for the old copy
-            elif call("HEAD", u)[0] != 404:
+            if f"{m['sha256']}/{v}" not in replace and call("HEAD", u)[0] != 404:
                 skipped += 1
                 continue
             with open(p, "rb") as fh:      # streamed, not read whole —— an original can be up to 1 GiB
@@ -770,11 +843,11 @@ def push(prune=False):
                 refused += 1
                 continue
             up += 1
-            nbytes += size
+            sent += size
         m["variants"] = [v for v in VARIANTS if v in paths]
     media = [m for m in media if "view" in m["variants"] or "orig" in m["variants"]]
     call("PUT", f"{url}/api/media/manifest", body_of(media), "application/json")
-    print(f"media push: uploaded {up} · already there {skipped} · refused {refused} · {nbytes / (1 << 20):.1f} MiB · "
+    print(f"media push: uploaded {up} · already there {skipped} · refused {refused} · {sent / (1 << 20):.1f} MiB · "
           f"manifest {len(media)} files")
 
     # 6. --prune: delete what the uploaded manifest does not list (only after it is safely in place)
