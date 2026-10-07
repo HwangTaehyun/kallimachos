@@ -38,10 +38,15 @@ Push
   Before any blob is sent: the manifest is checked against the server's 16 MiB limit, and what this push adds is
   checked against the storage quota (GET /api/media/usage).  A 507 mid-run (quota full) stops the run.
   thumb / view are derived copies: when the server records one at a size other than the local file (re-derived
-  after DERIVE_VERSION changed), it is deleted and uploaded again.  orig is content-addressed and never replaced.
+  after DERIVE_VERSION changed), it is deleted and uploaded again —— if that upload fails, the item has no preview
+  until the next push.  orig is content-addressed and never replaced.
   The uploaded manifest REPLACES the server's (last push wins) —— one device per account.  When the server holds
   items this device does not list, push says so.  `push --prune` then deletes every recorded server file the
-  uploaded manifest does not list; without the flag nothing is ever deleted.
+  uploaded manifest does not list; without the flag nothing is ever deleted.  Normally it runs after the manifest
+  is in place; when the quota check needs the room it runs BEFORE the upload, and if the run then stops, the
+  server's previous manifest can point at deleted files until the next successful push.
+  A server that lost its records but kept the objects: push uploads and records this device's files again;
+  objects this device no longer lists stay unrecorded (so not prunable) until the account is deleted.
 """
 import datetime
 import hashlib
@@ -439,6 +444,7 @@ def derive_image(path, out_dir, ext):
 def derive_video(path, out_dir):
     pr = probe_video(path)
     vs = next((s for s in pr.get("streams", []) if s.get("codec_type") == "video"), {})
+    aus = [s for s in pr.get("streams", []) if s.get("codec_type") == "audio"]
     fmt = pr.get("format", {})
     meta = {"kind": "video", "width": vs.get("width"), "height": vs.get("height"), "ocr": "",
             "duration_s": round(float(fmt["duration"]), 2) if fmt.get("duration") else None,
@@ -457,11 +463,13 @@ def derive_video(path, out_dir):
             write_thumb(Image.open(poster), os.path.join(out_dir, "thumb.webp"))
             meta["ocr"] = ocr_text(poster)
         tmp = os.path.join(td, "view.mp4")
-        # -map_metadata -1: location tags do not ride along.  A ≤720p 8-bit 4:2:0 H.264 mp4 is only re-muxed (fast,
-        # source audio codec kept); anything taller, 4:4:4 / 10-bit (browsers cannot play those), or a re-mux over
-        # the server's view cap, is re-encoded to ≤720p —— a 4K clip must not stay 4K.
+        # -map_metadata -1: location tags do not ride along.  A ≤720p 8-bit 4:2:0 H.264 mp4 whose audio (if any) is
+        # AAC or MP3 is only re-muxed (fast); anything taller, 4:4:4 / 10-bit, PCM / Opus / other audio (browsers
+        # cannot play those in mp4), or a re-mux over the server's view cap, is re-encoded to ≤720p H.264 + AAC ——
+        # a 4K clip must not stay 4K.  10-bit / HDR goes to 8-bit without tone mapping: colours may look flat.
         ok = False
         if (vs.get("codec_name") == "h264" and vs.get("pix_fmt") == "yuv420p"
+                and all(a.get("codec_name") in ("aac", "mp3") for a in aus)
                 and os.path.splitext(path)[1].lower() in (".mp4", ".m4v") and (vs.get("height") or 1 << 30) <= 720):
             ok = (run(["ffmpeg", "-v", "error", "-y", "-i", path, "-c", "copy", "-map_metadata", "-1",
                        "-movflags", "+faststart", tmp]).returncode == 0
@@ -722,7 +730,7 @@ def push(prune=False):
             call("DELETE", f"{url}/api/media/blob/{k}")
             size = server.pop(k)
             freed += size if isinstance(size, int) else 0
-        print(f"media prune: deleted {len(gone)} blob(s) · {freed / 1e6:.1f} MB freed")
+        print(f"media prune: deleted {len(gone)} blob(s) · {freed / (1 << 20):.1f} MiB freed")
 
     # 4. the quota must fit before any blob is sent (--prune may free room first)
     keep = {f"{m['sha256']}/{v}" for m, paths in zip(media, plan) for v in paths}
@@ -737,11 +745,11 @@ def push(prune=False):
     if quota and over > 0:
         freeable = sum(s for k, s in server.items() if k not in keep and KEY_RE.fullmatch(k) and isinstance(s, int))
         if not (prune and over <= freeable):
-            sys.exit(f"push stopped before uploading: this push adds {need / 1e6:.1f} MB, the server holds "
-                     f"{total / 1e6:.1f} of {quota / 1e6:.1f} MB —— {over / 1e6:.1f} MB over the storage quota"
-                     + (f" ({freeable / 1e6:.1f} MB prunable)" if prune else "") + ".  Nothing was uploaded.  "
+            sys.exit(f"push stopped before uploading: this push adds {need / (1 << 20):.1f} MiB, the server holds "
+                     f"{total / (1 << 20):.1f} of {quota / (1 << 20):.1f} MiB —— {over / (1 << 20):.1f} MiB over the storage quota"
+                     + (f" ({freeable / (1 << 20):.1f} MiB prunable)" if prune else "") + ".  Nothing was uploaded.  "
                      + FREE_SPACE)
-        print(f"media prune: {over / 1e6:.1f} MB over the quota —— pruning before the upload")
+        print(f"media prune: {over / (1 << 20):.1f} MiB over the quota —— pruning before the upload")
         prune_now(keep)
 
     # 5. blobs —— one refused file does not stop the run
@@ -755,7 +763,7 @@ def push(prune=False):
             elif call("HEAD", u)[0] != 404:
                 skipped += 1
                 continue
-            with open(p, "rb") as fh:      # streamed, not read whole —— an original can be up to 1 GB
+            with open(p, "rb") as fh:      # streamed, not read whole —— an original can be up to 1 GiB
                 st = call("PUT", u, fh, variant_ct(m, v, p), size, soft=SOFT)[0]
             if st in SOFT:
                 del paths[v]
@@ -766,7 +774,7 @@ def push(prune=False):
         m["variants"] = [v for v in VARIANTS if v in paths]
     media = [m for m in media if "view" in m["variants"] or "orig" in m["variants"]]
     call("PUT", f"{url}/api/media/manifest", body_of(media), "application/json")
-    print(f"media push: uploaded {up} · already there {skipped} · refused {refused} · {nbytes / 1e6:.1f} MB · "
+    print(f"media push: uploaded {up} · already there {skipped} · refused {refused} · {nbytes / (1 << 20):.1f} MiB · "
           f"manifest {len(media)} files")
 
     # 6. --prune: delete what the uploaded manifest does not list (only after it is safely in place)

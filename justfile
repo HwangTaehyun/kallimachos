@@ -710,7 +710,9 @@ push:
 
 #  Photos and videos linked to entities (see the header of src/media.py).
 #  `media` scans the vault's embeds + `media_dirs` and writes ~/.kal/media/manifest.json; `media-push`
-#  uploads only the variants the cloud does not have yet (same KAL_CLOUD_URL / KAL_CLOUD_TOKEN as `push`).
+#  uploads the variants the cloud does not have yet, replaces re-derived thumb/view copies the server holds at
+#  a different size, and with `--prune` removes recorded server files the manifest no longer lists
+#  (same KAL_CLOUD_URL / KAL_CLOUD_TOKEN as `push`).
 media *args:
     @{{py}} {{src}}/media.py scan {{args}}
 

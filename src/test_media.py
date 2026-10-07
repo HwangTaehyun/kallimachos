@@ -405,7 +405,7 @@ class PushTest(Base):
         with self.assertRaises(SystemExit) as cm:
             self.push()
         msg = str(cm.exception)
-        self.assertIn("MB over the storage quota", msg)
+        self.assertIn("MiB over the storage quota", msg)
         self.assertIn("--prune", msg)
         self.assertIn("media_orig", msg)
         self.assertEqual([x for x in self.fake.seen if x[0] in ("PUT", "HEAD", "DELETE")], [])
@@ -562,6 +562,19 @@ class VideoTest(Base):
         # ≤720p H.264 mp4, but 4:4:4 —— browsers cannot play it, so no fast re-mux
         self.clip("full.mp4", "320x240", "yuv444p")
         self.assertEqual(self.view_stream("full.mp4")["pix_fmt"], "yuv420p")
+
+    def test_pcm_audio_is_reencoded(self):
+        # ≤720p 8-bit H.264 mp4, but PCM audio —— browsers cannot play it, so no fast re-mux; audio → AAC
+        v = os.path.join(self.vault, "pcm.mp4")
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=5",
+                        "-f", "lavfi", "-i", "sine=d=1", "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-c:a", "pcm_s16le", v], check=True)
+        with open(os.path.join(self.vault, "a.md"), "a") as fh:
+            fh.write("\n![[pcm.mp4]]\n")
+        _, by = self.scan()
+        d = os.path.join(self.home, "media", by["vault:a.md#pcm.mp4"]["sha256"])
+        streams = media.probe_video(os.path.join(d, "view.mp4"))["streams"]
+        self.assertEqual([s["codec_name"] for s in streams if s["codec_type"] == "audio"], ["aac"])
 
     def test_remux_over_view_cap_is_reencoded(self):
         self.clip("small.mp4", "320x240", "yuv420p")
