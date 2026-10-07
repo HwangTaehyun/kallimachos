@@ -61,7 +61,8 @@ basis. The server takes at most 50 notes per item, so when a file appears in mor
 the first 50 by path are listed, with a warning. A note path longer than 512 bytes is never
 shortened, because a shortened path would name a different note. Instead it is left out of
 `docs`, and every link that would name it as its `doc` is dropped. An item whose notes **all**
-have such paths is left out of the manifest with a warning. An empty `docs` list or `doc` means
+have such paths is left out of the manifest with a warning, unless the file also sits in a public
+media folder: that alone puts it in, with no note listed. An empty `docs` list or `doc` means
 "not from a note" (a media folder or a sidecar), and the MCP tools show those without a note
 check, so a file from a note must never end up with one. Items from media folders and sidecars
 are not affected.

@@ -621,7 +621,8 @@ def scan():
                 "width": meta.get("width"), "height": meta.get("height"), "duration_s": meta.get("duration_s"),
                 "taken_at": meta.get("taken_at") if nbytes(meta.get("taken_at")) <= CAPS["taken_at"] else None,
                 "source": source_of(rec, path, vault)[:CAPS["source"]],
-                "variants": meta["variants"], "ocr": (meta.get("ocr") or "")[:OCR_CHARS], "links": {}, "docs": []}
+                "variants": meta["variants"], "ocr": (meta.get("ocr") or "")[:OCR_CHARS], "links": {}, "docs": [], "_dir": False}
+        m["_dir"] = m["_dir"] or bool(rec.get("dir"))     # chosen through a public media folder
         for k, l in links.items():
             if k not in m["links"] or BASIS_RANK[l["basis"]] > BASIS_RANK[m["links"][k]["basis"]]:
                 m["links"][k] = l
@@ -630,8 +631,10 @@ def scan():
     for m in out.values():
         m["links"] = sorted(m["links"].values(), key=lambda l: (-l["score"], l["entity"]))
         docs = sorted(d for d in m["docs"] if nbytes(d) <= CAPS["doc"])     # a cut path would name another note
-        if m["docs"] and not docs:
-            #  docs [] reads as "not from a note" → ungated in MCP, even after the note is blocked.  Leave it out.
+        if m["docs"] and not docs and not m["_dir"]:
+            #  docs [] reads as "not from a note" → ungated in MCP, even after the note is blocked.  Leave it out —— unless
+            #  the file also sits in a public media folder: that alone puts it in (its note links are already gone).
+            #  Dropping those too hid a folder photo the moment one long-path note embedded it (adversarial review 3).
             warn(f"{m['source']}: every note it is in has a path over {CAPS['doc']} bytes —— left out")
             continue
         if len(docs) < len(m["docs"]):
@@ -639,6 +642,7 @@ def scan():
         if len(docs) > MAX_DOCS:
             warn(f"{m['source']}: in {len(docs)} notes —— only the first {MAX_DOCS} (by path) are listed")
         m["docs"] = docs[:MAX_DOCS]
+        del m["_dir"]
         media.append(m)
     media.sort(key=lambda m: (m["taken_at"] or "", m["sha256"]))
     if len(media) > MAX_MEDIA:
@@ -670,6 +674,10 @@ def manifest_errors(manifest):
     """Every rule of the server's validateManifest (cloud/api/media.go) → a list of problems; [] = it will be accepted.
     Checked before any request, so blobs are never uploaded (or pruned) for a manifest the server then refuses."""
     errs = [] if type(manifest.get("version")) is int and manifest["version"] == 1 else ["version must be 1"]
+    try:   # Python writes NaN/Infinity, which is not JSON —— the server would refuse the whole body (adversarial review 3)
+        json.dumps(manifest, allow_nan=False)
+    except ValueError:
+        errs.append("a number is NaN or infinite —— not valid JSON")
     items = manifest.get("media")
     items = items if isinstance(items, list) else []
     if len(items) > MAX_MEDIA:
@@ -681,7 +689,8 @@ def manifest_errors(manifest):
             errs.append(f"media[{i}]: not an object")
             continue
         links = m.get("links")
-        bad = [f for f in ("bytes", "width", "height") if m.get(f) is not None and type(m[f]) is not int]
+        #  Go reads bytes as int64: out of range refuses the whole manifest (adversarial review 3).
+        bad = [f for f in ("bytes", "width", "height") if m.get(f) is not None and not (type(m[f]) is int and -(1 << 63) <= m[f] < (1 << 63))]
         bad += [f for f in ("duration_s",) if m.get(f) is not None and not _num(m[f])]
         bad += [f for f in ("sha256", "kind", "source", "ocr", "taken_at", "mime") if not isinstance(m.get(f), (str, type(None)))]
         bad += [f for f in ("variants", "docs") if not (m.get(f) is None or isinstance(m[f], list) and all(isinstance(x, str) for x in m[f]))]

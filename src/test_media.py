@@ -606,6 +606,32 @@ class PushTest(Base):
         self.assertEqual(by["dir:wb/dir.png"]["docs"], [])
         self.assertTrue(all(x["docs"] for x in m["media"] if x["source"].startswith("vault:")))
 
+    def test_folder_photo_survives_a_long_path_note(self):
+        # adversarial review 3: one long-path note embedding a public-folder photo used to drop the photo entirely.
+        deep = os.path.join(self.vault, *["€" * 80] * 3)
+        os.makedirs(deep)
+        pic = os.path.join(deep, "kept.png")
+        png(pic, "teal")
+        with open(os.path.join(deep, "n.md"), "w", encoding="utf-8") as fh:
+            fh.write("# Redis\n![[kept.png]]\n")
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_DIRS": json.dumps([{"path": deep, "alias": "deep"}])}), \
+                mock.patch("sys.stderr", new=__import__("io").StringIO()):
+            m, _ = self.scan()
+        item = next((x for x in m["media"] if x["sha256"] == media.sha256_of(pic)), None)
+        self.assertIsNotNone(item, "a public-folder photo must not vanish because a long-path note embeds it")
+        self.assertEqual(item["docs"], [])
+        self.assertFalse([l for l in item["links"] if l.get("doc")], "the long-path note must not appear as provenance")
+
+    def test_numbers_the_server_cannot_read(self):
+        base = {"version": 1, "media": [{"sha256": "a" * 64, "kind": "image", "mime": "image/png", "bytes": 1,
+                                          "source": "dir:x/a.png", "variants": ["thumb"], "links": [], "docs": []}]}
+        for field, value in (("bytes", 1 << 63), ("duration_s", float("nan")), ("duration_s", float("inf"))):
+            with self.subTest(field=field, value=value):
+                bad = json.loads(json.dumps(base))
+                bad["media"][0][field] = value
+                self.assertTrue(media.manifest_errors(bad), f"{field}={value} must be refused before any request")
+        self.assertEqual(media.manifest_errors(base), [])
+
     def test_invalid_manifest_stops_before_any_request(self):
         mp = os.path.join(self.home, "media", "manifest.json")
         man = json.load(open(mp))
