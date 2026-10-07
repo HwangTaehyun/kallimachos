@@ -28,6 +28,7 @@ dependencies = [
     #  it used to rely on torch dragging it in **undeclared**.
     "textual>=8.2.8",
     "pillow>=12.3.0",
+    "pillow-heif>=1.8.0",
 ]
 
 [dependency-groups]

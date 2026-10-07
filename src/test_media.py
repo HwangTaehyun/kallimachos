@@ -208,38 +208,81 @@ class ScanTest(Base):
         self.assertEqual(strip(m1), strip(m2))
 
 
-class PushTest(Base):
-    def test_push_uploads_missing_variants_once(self):
+class Fake:
+    """A media API on 127.0.0.1: HEAD / PUT blob, PUT manifest, GET usage, DELETE blob.  `fail` maps a path suffix
+    to the status its PUT answers with; `usage` is what the server says it holds."""
+
+    def __init__(self, test):
         import http.server
         import threading
-        seen, have = [], set()
+        self.seen, self.have, self.fail, self.usage, self.manifest = [], set(), {}, {}, None
+        fake = self
 
         class H(http.server.BaseHTTPRequestHandler):
             def log_message(self, *a):
                 pass
 
+            def reply(self, code, body=b""):
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_HEAD(self):
-                seen.append(("HEAD", self.path, self.headers["Authorization"]))
-                self.send_response(200 if self.path in have else 404)
+                fake.seen.append(("HEAD", self.path, self.headers["Authorization"]))
+                self.send_response(200 if self.path in fake.have else 404)
                 self.end_headers()
 
             def do_PUT(self):
                 n = int(self.headers["Content-Length"])
-                self.rfile.read(n)
-                seen.append(("PUT", self.path, self.headers["X-Kal-Content-Type"] or self.headers["Content-Type"], self.headers["Content-Type"]))
-                have.add(self.path)
-                self.send_response(204)
-                self.end_headers()
+                data = self.rfile.read(n)
+                fake.seen.append(("PUT", self.path, self.headers["X-Kal-Content-Type"] or self.headers["Content-Type"],
+                                  self.headers["Content-Type"]))
+                code = next((c for k, c in fake.fail.items() if self.path.endswith(k)), 204)
+                if code == 204:
+                    fake.have.add(self.path)
+                    if self.path.endswith("/manifest"):
+                        fake.manifest = json.loads(data)
+                self.reply(code, b'{"error":"refused"}' if code != 204 else b"")
 
-        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        self.addCleanup(srv.shutdown)
-        self.scan()
-        with mock.patch.dict(os.environ, {"KAL_CLOUD_URL": f"http://127.0.0.1:{srv.server_port}", "KAL_CLOUD_TOKEN": "fixture"}):
-            media.push()
-            puts1 = [x for x in seen if x[0] == "PUT"]
-            media.push()
-        puts2 = [x for x in seen if x[0] == "PUT"]
+            def do_GET(self):
+                fake.seen.append(("GET", self.path))
+                body = json.dumps({"bytes": fake.usage, "total": sum(fake.usage.values()), "quota": 1 << 34}).encode()
+                self.reply(200, body)
+
+            def do_DELETE(self):
+                fake.seen.append(("DELETE", self.path))
+                self.reply(200, b'{"ok":true,"deleted":true}')
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        test.addCleanup(self.srv.shutdown)
+        env = mock.patch.dict(os.environ, {"KAL_CLOUD_URL": f"http://127.0.0.1:{self.srv.server_port}",
+                                           "KAL_CLOUD_TOKEN": "fixture", "KAL_MEDIA_ORIG": "1"})
+        env.start()
+        test.addCleanup(env.stop)
+
+    def blobs(self, method="PUT"):
+        return [x for x in self.seen if x[0] == method and "/api/media/blob/" in x[1]]
+
+
+class PushTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.m, self.by = self.scan()
+        self.fake = Fake(self)
+
+    def push(self, *a, **kw):
+        with mock.patch("sys.stderr", new=__import__("io").StringIO()) as err:
+            media.push(*a, **kw)
+        return err.getvalue()
+
+    def test_push_uploads_missing_variants_once(self):
+        f = self.fake
+        self.push()
+        puts1 = [x for x in f.seen if x[0] == "PUT"]
+        self.push()
+        puts2 = [x for x in f.seen if x[0] == "PUT"]
         blobs = [x for x in puts1 if "/api/media/blob/" in x[1]]
         self.assertEqual(len(blobs), 9)                              # 3 media x thumb/view/orig
         self.assertEqual({x[2] for x in blobs if x[1].endswith("/thumb")}, {"image/webp"})
@@ -248,7 +291,125 @@ class PushTest(Base):
         #  The server's guard only takes octet-stream bodies for blobs; the real type rides in a header.
         self.assertEqual({x[3] for x in blobs}, {"application/octet-stream"})
         self.assertEqual(len(puts2) - len(puts1), 1)                 # second push: only the manifest
-        self.assertTrue(all(x[2] == "Bearer fixture" for x in seen if x[0] == "HEAD"))
+        self.assertTrue(all(x[2] == "Bearer fixture" for x in f.seen if x[0] == "HEAD"))
+
+    def test_caps_skip_variant(self):
+        # thumb over its cap: skipped, the item stays.  orig over its cap too: the view still carries the item.
+        with mock.patch.dict(media.CAP, {"thumb": 10, "orig": 10}):
+            err = self.push()
+        self.assertIn("over the server's", err)
+        self.assertEqual({x[1].rsplit("/", 1)[1] for x in self.fake.blobs()}, {"view"})
+        self.assertEqual(len(self.fake.manifest["media"]), 3)
+        self.assertEqual({tuple(x["variants"]) for x in self.fake.manifest["media"]}, {("view",)})
+        # neither view nor orig fits → the item is left out
+        with mock.patch.dict(media.CAP, {"view": 10, "orig": 10}):
+            self.push()
+        self.assertEqual(self.fake.manifest["media"], [])
+
+    def test_refused_file_does_not_stop_the_run(self):
+        shot = self.by["vault:a.md#shot.jpg"]["sha256"]
+        self.fake.fail = {f"{shot}/view": 413, f"{shot}/orig": 415}
+        err = self.push()
+        self.assertIn("413", err)
+        got = {x["sha256"]: x for x in self.fake.manifest["media"]}
+        self.assertNotIn(shot, got, "an item left with only a thumb must be dropped")
+        self.assertEqual(len(got), 2, "the other files still went up and the manifest was still sent")
+        # one refused variant of an item that keeps another viewable one: only that variant drops
+        self.fake.fail = {f"{shot}/orig": 400}
+        self.push()
+        got = {x["sha256"]: x for x in self.fake.manifest["media"]}
+        self.assertEqual(got[shot]["variants"], ["thumb", "view"])
+
+    def test_hard_errors_still_abort(self):
+        self.fake.fail = {"/thumb": 402}
+        with self.assertRaises(SystemExit):
+            self.push()
+        self.assertIsNone(self.fake.manifest)
+
+    def test_manifest_size_checked_before_any_blob(self):
+        with mock.patch.object(media, "MANIFEST_CAP", 100):
+            with self.assertRaises(SystemExit) as cm:
+                self.push()
+        self.assertIn("Nothing was uploaded", str(cm.exception))
+        self.assertRegex(str(cm.exception), r"cut about \d+ of 3 items")
+        self.assertEqual([x for x in self.fake.seen if x[0] in ("PUT", "HEAD")], [])
+
+    def test_orig_opt_out(self):
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_ORIG": "0"}):
+            self.push()
+        self.assertFalse([x for x in self.fake.blobs() if x[1].endswith("/orig")])
+        self.assertTrue(all("orig" not in x["variants"] for x in self.fake.manifest["media"]))
+        cfg = os.path.join(self.home, "config.json")
+        with open(cfg, "w") as fh:
+            json.dump({"media_orig": False}, fh)
+        import kal_config
+        os.environ.pop("KAL_MEDIA_ORIG")                      # the config key alone also turns it off
+        with mock.patch.object(kal_config, "CONFIG_PATH", cfg):
+            self.assertFalse(media.want_orig())
+
+    def test_multi_device_warning_and_prune(self):
+        other = "f" * 64
+        shot = self.by["vault:a.md#shot.jpg"]["sha256"]
+        self.fake.usage = {f"{other}/thumb": 1000, f"{other}/orig": 5_000_000, f"{shot}/thumb": 10}
+        err = self.push()
+        self.assertIn("1 item(s) this device does not list", err)
+        self.assertEqual(self.fake.blobs("DELETE"), [], "nothing is ever deleted without --prune")
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_ORIG": "0"}):       # the shot's orig is now unlisted too
+            self.fake.usage[f"{shot}/orig"] = 7
+            out = __import__("io").StringIO()
+            with mock.patch("sys.stdout", new=out):
+                self.push(prune=True)
+        deleted = {x[1].split("/api/media/blob/")[1] for x in self.fake.blobs("DELETE")}
+        self.assertEqual(deleted, {f"{other}/thumb", f"{other}/orig", f"{shot}/orig"})
+        self.assertIn("deleted 3 blob(s)", out.getvalue())
+        put_manifest = max(i for i, x in enumerate(self.fake.seen) if x[0] == "PUT" and x[1].endswith("/manifest"))
+        first_delete = min(i for i, x in enumerate(self.fake.seen) if x[0] == "DELETE")
+        self.assertLess(put_manifest, first_delete, "prune runs only after the manifest is in place")
+
+    def test_main_parses_prune(self):
+        with mock.patch.object(media, "push") as p:
+            media.main(["media.py", "push", "--prune"])
+            media.main(["media.py", "push"])
+        self.assertEqual([c.kwargs for c in p.call_args_list], [{"prune": True}, {"prune": False}])
+        with self.assertRaises(SystemExit):
+            media.main(["media.py", "push", "--prnue"])
+
+
+class ScanExtraTest(Base):
+    def test_no_doc_basis(self):
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_DIRS": json.dumps([{"path": self.vault, "alias": "v"}])}):
+            m, _ = self.scan()
+        bases = {l["basis"] for x in m["media"] for l in x["links"]}
+        self.assertTrue(bases and bases <= {"manual", "embed", "ocr"}, bases)
+
+    def test_icc_kept_exif_stripped(self):
+        from PIL import ImageCms
+        icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        p = os.path.join(self.vault, "p3.jpg")
+        ex = Image.Exif()
+        ex.get_ifd(0x8825)[1] = "N"
+        Image.new("RGB", (3000, 100), "teal").save(p, "JPEG", icc_profile=icc, exif=ex)
+        with open(os.path.join(self.vault, "a.md"), "a") as fh:
+            fh.write("\n![[p3.jpg]]\n")
+        _, by = self.scan()
+        d = os.path.join(self.home, "media", by["vault:a.md#p3.jpg"]["sha256"])
+        for f in ("view.jpg", "thumb.webp"):
+            im = Image.open(os.path.join(d, f))
+            self.assertEqual(im.info.get("icc_profile"), icc, f"{f} lost its colour profile")
+            self.assertEqual(len(im.getexif()), 0, f"{f} kept EXIF")
+
+    def test_heic(self):
+        try:
+            import pillow_heif
+            p = os.path.join(self.vault, "phone.heic")
+            pillow_heif.from_pillow(Image.new("RGB", (64, 48), "orange")).save(p)
+        except Exception as e:      # no HEIF encoder in this build
+            self.skipTest(f"cannot write a HEIC fixture: {e}")
+        with open(os.path.join(self.vault, "a.md"), "a") as fh:
+            fh.write("\n![[phone.heic]]\n")
+        _, by = self.scan()
+        x = by["vault:a.md#phone.heic"]
+        self.assertEqual((x["mime"], x["variants"]), ("image/heic", ["thumb", "view", "orig"]))
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg/ffprobe not installed")
@@ -269,6 +430,18 @@ class VideoTest(Base):
         d = os.path.join(self.home, "media", clip["sha256"])
         self.assertEqual(max(Image.open(os.path.join(d, "thumb.webp")).size), 256)
         self.assertTrue(os.path.getsize(os.path.join(d, "view.mp4")) > 0)
+
+    def test_tall_h264_is_reencoded(self):
+        # an H.264 mp4 over 720p used to be re-muxed as is (4K stayed 4K); now its view copy is ≤720p
+        v = os.path.join(self.vault, "tall.mp4")
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=1280x960:rate=5",
+                        "-t", "1", "-c:v", "libx264", "-pix_fmt", "yuv420p", v], check=True)
+        with open(os.path.join(self.vault, "a.md"), "a") as fh:
+            fh.write("\n![[tall.mp4]]\n")
+        _, by = self.scan()
+        d = os.path.join(self.home, "media", by["vault:a.md#tall.mp4"]["sha256"])
+        vs = media.probe_video(os.path.join(d, "view.mp4"))["streams"][0]
+        self.assertEqual((vs["width"], vs["height"]), (960, 720))
 
 
 if __name__ == "__main__":

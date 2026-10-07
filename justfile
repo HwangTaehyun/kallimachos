@@ -714,8 +714,8 @@ push:
 media *args:
     @{{py}} {{src}}/media.py scan {{args}}
 
-media-push:
-    @{{py}} {{src}}/media.py push
+media-push *args:
+    @{{py}} {{src}}/media.py push {{args}}
 
 # Incremental sync (changed documents only)
 sync *args:

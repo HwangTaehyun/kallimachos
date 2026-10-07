@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Photos and videos linked to entities —— the device side.
 
-    python src/media.py scan     collect → derive (thumb / view / OCR) → link → $KAL_HOME/media/manifest.json
-    python src/media.py push     upload what the cloud does not have yet, then the manifest
+    python src/media.py scan            collect → derive (thumb / view / OCR) → link → $KAL_HOME/media/manifest.json
+    python src/media.py push [--prune]  upload what the cloud does not have yet, then the manifest
 
 Sources
   (a) local media embedded in vault notes:  ![[file.png]]  and  ![alt](relative/path.png)
@@ -17,12 +17,26 @@ Linking (every link carries its basis; the same (media, entity) keeps only the s
                which was extracted from that very note
   ocr    0.7   an entity name (≥ 4 chars, degree ≥ 2) occurs in the picture's text, and the name is not an
                ordinary word: it appears in at most OCR_GENERIC× as many notes as the entity was extracted from
-  doc          the note path is recorded in `docs` (a link to the document, not to an entity)
+  Those three are the only bases.  The notes a file is embedded in go to the item's `docs` list, not to a link.
 `no_llm` notes never contribute a reference, a link or a doc; a file referenced only by them is not listed.
 
 The server never calls an LLM and never sees a file the device did not choose to upload: everything
-interpretive happens here.  EXIF is stripped from the thumbnail and the view copy; the original is
-uploaded as it is.
+interpretive happens here.
+
+Privacy
+  EXIF (incl. GPS) is stripped from the thumbnail and the JPEG view copy; their colour profile (ICC) is kept.
+  A GIF's view copy is the file as it is, so whatever metadata the GIF carries is kept.
+  The ORIGINAL is uploaded byte for byte —— its EXIF, including GPS, is kept.  To keep originals on the device,
+  set `"media_orig": false` in config.json (or env KAL_MEDIA_ORIG=0): `orig` is then never uploaded nor listed.
+
+Push
+  Each variant over its server cap (thumb 1 MiB · view 300 MiB · orig 1 GiB) is skipped with a warning; a file the
+  server refuses (400 / 413 / 415) is skipped too and the run goes on.  An item left with neither view nor orig is
+  dropped from the uploaded manifest.  Network errors, 401, 402 and 5xx stop the run.
+  The manifest is checked against the server's 16 MiB limit BEFORE any blob is sent.
+  The uploaded manifest REPLACES the server's (last push wins) —— one device per account.  When the server holds
+  items this device does not list, push says so.  `push --prune` then deletes every server blob the uploaded
+  manifest does not list; without the flag nothing is ever deleted.
 """
 import datetime
 import hashlib
@@ -41,14 +55,22 @@ import urllib.request
 import vault_path
 from frontmatter import FM_RE
 
-IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"}
+try:                            # HEIC / HEIF (iPhone photos); optional —— without it those files are skipped
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except ImportError:
+    pass
+
+IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif"}
 VID_EXT = {".mp4", ".mov", ".m4v", ".webm"}
-MIME_FIX = {".heic": "image/heic", ".m4v": "video/x-m4v", ".mov": "video/quicktime"}
+MIME_FIX = {".heic": "image/heic", ".heif": "image/heif", ".m4v": "video/x-m4v", ".mov": "video/quicktime"}
 THUMB_PX, VIEW_PX, OCR_CHARS = 256, 2048, 2000
 CAPS = {"name": 120, "source": 512, "doc": 512}
 BASIS_RANK = {"manual": 3, "embed": 2, "ocr": 1}
 BASIS_SCORE = {"manual": 1.0, "embed": 0.9, "ocr": 0.7}
 VARIANTS = ("thumb", "view", "orig")
+CAP = {"thumb": 1 << 20, "view": 300 << 20, "orig": 1 << 30}     # the server's per-variant limits
+MANIFEST_CAP = 16 << 20                                          # the server's manifest body limit
 MAX_MEDIA = 50_000
 
 
@@ -85,6 +107,15 @@ def media_dirs():
             out.append({"path": p, "alias": str(d.get("alias") or os.path.basename(p)),
                         "private": bool(d.get("private"))})
     return out
+
+
+def want_orig():
+    """env KAL_MEDIA_ORIG ("0" = off) > config.json `media_orig` > on.  Off → originals stay on the device."""
+    raw = os.environ.get("KAL_MEDIA_ORIG")
+    if raw is not None:
+        return raw.strip() != "0"
+    import kal_config
+    return kal_config.read_file()[0].get("media_orig", True) not in (False, 0, "0")
 
 
 # ───────────────────────── graph (read only) ─────────────────────────
@@ -345,12 +376,13 @@ def flat_rgb(im):
     return im.convert("RGB")
 
 
-def write_thumb(im, out):
-    """256px longest side, WebP.  Saved without exif=, so no metadata survives."""
+def write_thumb(im, out, icc=None):
+    """256px longest side, WebP.  Saved without exif=, so no EXIF survives; the ICC profile is kept
+    (a Display-P3 photo read as sRGB looks washed out)."""
     im = im.copy()
     im.thumbnail((THUMB_PX, THUMB_PX))
     im = im.convert("RGBA") if im.mode in ("RGBA", "LA", "P") else im.convert("RGB")
-    im.save(out, "WEBP", quality=80)
+    im.save(out, "WEBP", quality=80, icc_profile=icc)
 
 
 def ocr_text(path):
@@ -383,17 +415,17 @@ def derive_image(path, out_dir, ext):
         warn(f"{os.path.basename(path)}: cannot open ({type(e).__name__}) —— skipped")
         return None
     meta = {"kind": "image", "taken_at": exif_time(im)}
-    gif = im.format == "GIF"
+    gif, icc = im.format == "GIF", im.info.get("icc_profile")
     im = ImageOps.exif_transpose(im)
     meta["width"], meta["height"], meta["duration_s"] = im.width, im.height, None
-    write_thumb(im, os.path.join(out_dir, "thumb.webp"))
+    write_thumb(im, os.path.join(out_dir, "thumb.webp"), icc)
     if gif:
         shutil.copyfile(path, os.path.join(out_dir, "view.gif"))       # animation kept as is
     else:
         v = flat_rgb(im)
         if max(v.size) > VIEW_PX:
             v.thumbnail((VIEW_PX, VIEW_PX))
-        v.save(os.path.join(out_dir, "view.jpg"), "JPEG", quality=85)
+        v.save(os.path.join(out_dir, "view.jpg"), "JPEG", quality=85, icc_profile=icc)
     meta["ocr"] = ocr_text(path)
     return meta
 
@@ -419,15 +451,19 @@ def derive_video(path, out_dir):
             write_thumb(Image.open(poster), os.path.join(out_dir, "thumb.webp"))
             meta["ocr"] = ocr_text(poster)
         tmp = os.path.join(td, "view.mp4")
-        # -map_metadata -1: location tags do not ride along.  An H.264 mp4 is only re-muxed, never re-encoded.
-        if vs.get("codec_name") == "h264" and os.path.splitext(path)[1].lower() in (".mp4", ".m4v"):
-            cmd = ["ffmpeg", "-v", "error", "-y", "-i", path, "-c", "copy", "-map_metadata", "-1",
-                   "-movflags", "+faststart", tmp]
-        else:
-            cmd = ["ffmpeg", "-v", "error", "-y", "-i", path, "-vf", "scale=-2:'min(720,ih)'",
-                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
-                   "-c:a", "aac", "-map_metadata", "-1", "-movflags", "+faststart", tmp]
-        if run(cmd).returncode == 0 and os.path.isfile(tmp):
+        # -map_metadata -1: location tags do not ride along.  A ≤720p H.264 mp4 is only re-muxed (fast); anything
+        # taller, or a re-mux over the server's view cap, is re-encoded to ≤720p —— a 4K clip must not stay 4K.
+        ok = False
+        if (vs.get("codec_name") == "h264" and os.path.splitext(path)[1].lower() in (".mp4", ".m4v")
+                and (vs.get("height") or 1 << 30) <= 720):
+            ok = (run(["ffmpeg", "-v", "error", "-y", "-i", path, "-c", "copy", "-map_metadata", "-1",
+                       "-movflags", "+faststart", tmp]).returncode == 0
+                  and os.path.isfile(tmp) and os.path.getsize(tmp) <= CAP["view"])
+        if not ok:
+            ok = run(["ffmpeg", "-v", "error", "-y", "-i", path, "-vf", "scale=-2:'min(720,ih)'",
+                      "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
+                      "-c:a", "aac", "-map_metadata", "-1", "-movflags", "+faststart", tmp]).returncode == 0
+        if ok and os.path.isfile(tmp):
             shutil.copyfile(tmp, os.path.join(out_dir, "view.mp4"))
         else:
             warn(f"{os.path.basename(path)}: no view copy (ffmpeg failed)")
@@ -567,7 +603,11 @@ def variant_ct(m, v, fname):
     return {".gif": "image/gif", ".mp4": "video/mp4"}.get(os.path.splitext(fname)[1], "image/jpeg")
 
 
-def push():
+SOFT = (400, 413, 415)          # the server refused this one file —— skip it, the run goes on
+KEY_RE = re.compile(r"[0-9a-f]{64}/(thumb|view|orig)")
+
+
+def push(prune=False):
     url = (os.environ.get("KAL_CLOUD_URL") or "").rstrip("/")
     token = os.environ.get("KAL_CLOUD_TOKEN")
     if not url or not token:
@@ -575,12 +615,12 @@ def push():
     mp = os.path.join(media_dir(), "manifest.json")
     if not os.path.isfile(mp):
         sys.exit("no manifest —— run `just media` first")
-    with open(mp, "rb") as fh:
-        body = fh.read()
-    manifest = json.loads(body)
+    with open(mp, encoding="utf-8") as fh:
+        manifest = json.load(fh)
     auth = {"Authorization": f"Bearer {token}"}
 
-    def call(method, u, data=None, ct=None, length=None):
+    def call(method, u, data=None, ct=None, length=None, soft=()):
+        """→ (status, body).  An HTTP code in `soft` is returned; any other failure stops the run."""
         h = dict(auth)
         if ct == "application/json":
             h["Content-Type"] = ct
@@ -594,38 +634,104 @@ def push():
         req = urllib.request.Request(u, data=data, method=method, headers=h)
         try:
             with urllib.request.urlopen(req, timeout=600) as r:
-                return r.status
+                return r.status, r.read()
         except urllib.error.HTTPError as e:
             if method == "HEAD" and e.code == 404:
-                return 404
+                return 404, b""
             detail = e.read(300).decode("utf-8", "replace") if method != "HEAD" else ""
+            if e.code in soft:
+                warn(f"{method} {u.replace(url, '')} → {e.code} {detail}".rstrip())
+                return e.code, b""
             sys.exit(f"push failed: {method} {u.replace(url, '')} → {e.code} {detail}")
         except urllib.error.URLError as e:
             sys.exit(f"push failed: {method} {u.replace(url, '')} → {e.reason}")
 
-    up = skipped = nbytes = 0
+    def body_of(media):
+        return json.dumps(dict(manifest, media=media), ensure_ascii=False).encode("utf-8")
+
+    # 1. what to send: caps and the originals opt-out, decided before anything leaves the device
+    keep_orig = want_orig()
+    media, plan = [], []
     for m in manifest["media"]:
         with open(os.path.join(media_dir(), m["sha256"], "meta.json"), encoding="utf-8") as fh:
             files = json.load(fh)["files"]
+        paths = {}
         for v in m["variants"]:
-            u = f"{url}/api/media/blob/{m['sha256']}/{v}"
-            if call("HEAD", u) != 404:
-                skipped += 1
+            if v == "orig" and not keep_orig:
                 continue
             p = os.path.join(media_dir(), m["sha256"], files[v])
+            if os.path.getsize(p) > CAP[v]:
+                warn(f"{m['source']}: {v} is {os.path.getsize(p) / (1 << 20):.1f} MiB, over the server's "
+                     f"{CAP[v] >> 20} MiB —— not uploaded")
+                continue
+            paths[v] = p
+        if "view" in paths or "orig" in paths:
+            media.append(dict(m, variants=[v for v in VARIANTS if v in paths]))
+            plan.append(paths)
+        else:
+            warn(f"{m['source']}: nothing viewable left to upload —— left out")
+
+    # 2. the manifest must fit before any quota is spent
+    body = body_of(media)
+    if len(body) > MANIFEST_CAP:
+        over = len(body) - MANIFEST_CAP
+        ocr = sum(len((m.get("ocr") or "").encode("utf-8")) for m in media)
+        sys.exit(f"manifest is {len(body) / (1 << 20):.1f} MiB; the server takes {MANIFEST_CAP >> 20} MiB —— cut about "
+                 f"{-(-over * len(media) // len(body))} of {len(media)} items (narrow media_dirs) or "
+                 f"{over / (1 << 20):.1f} MiB of the {ocr / (1 << 20):.1f} MiB of OCR text.  Nothing was uploaded.")
+
+    # 3. blobs —— one refused file does not stop the run
+    up = skipped = refused = nbytes = 0
+    for m, paths in zip(media, plan):
+        for v, p in list(paths.items()):
+            u = f"{url}/api/media/blob/{m['sha256']}/{v}"
+            if call("HEAD", u)[0] != 404:
+                skipped += 1
+                continue
             size = os.path.getsize(p)
             with open(p, "rb") as fh:      # streamed, not read whole —— an original can be up to 1 GB
-                call("PUT", u, fh, variant_ct(m, v, files[v]), size)
+                st = call("PUT", u, fh, variant_ct(m, v, p), size, soft=SOFT)[0]
+            if st in SOFT:
+                del paths[v]
+                refused += 1
+                continue
             up += 1
             nbytes += size
+        m["variants"] = [v for v in VARIANTS if v in paths]
+    media = [m for m in media if "view" in m["variants"] or "orig" in m["variants"]]
+    body = body_of(media)
+
+    # 4. the manifest replaces the server's —— say so when another device's items would vanish from view
+    st, raw = call("GET", f"{url}/api/media/usage", soft=(404, 405))
+    server = {} if st in (404, 405) else (json.loads(raw).get("bytes") or {})
+    if st in (404, 405) and prune:
+        sys.exit("this server cannot list its media (no /api/media/usage) —— nothing to prune")
+    local = {m["sha256"] for m in manifest["media"]}
+    foreign = {k.split("/")[0] for k in server if k.split("/")[0] not in local}
+    if foreign and not prune:
+        warn(f"the server holds {len(foreign)} item(s) this device does not list.  The manifest is replaced (last "
+             "push wins), so the web view will now show only this device's items.  If that is intended, "
+             "`push --prune` also deletes their files.")
     call("PUT", f"{url}/api/media/manifest", body, "application/json")
-    print(f"media push: uploaded {up} · already there {skipped} · {nbytes / 1e6:.1f} MB · manifest {len(manifest['media'])} files")
+    print(f"media push: uploaded {up} · already there {skipped} · refused {refused} · {nbytes / 1e6:.1f} MB · "
+          f"manifest {len(media)} files")
+
+    # 5. --prune: delete what the uploaded manifest does not list (only after it is safely in place)
+    if prune:
+        keep = {f"{m['sha256']}/{v}" for m in media for v in m["variants"]}
+        n = freed = 0
+        for k, size in server.items():
+            if k not in keep and KEY_RE.fullmatch(k):
+                call("DELETE", f"{url}/api/media/blob/{k}")
+                n += 1
+                freed += size if isinstance(size, int) else 0
+        print(f"media prune: deleted {n} blob(s) · {freed / 1e6:.1f} MB freed")
 
 
 def main(argv):
-    if len(argv) < 2 or argv[1] not in ("scan", "push"):
+    if len(argv) < 2 or argv[1] not in ("scan", "push") or set(argv[2:]) - ({"--prune"} if argv[1] == "push" else set()):
         sys.exit(__doc__)
-    scan() if argv[1] == "scan" else push()
+    scan() if argv[1] == "scan" else push(prune="--prune" in argv[2:])
 
 
 if __name__ == "__main__":

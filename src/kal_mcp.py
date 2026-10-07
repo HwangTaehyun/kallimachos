@@ -1049,16 +1049,24 @@ def _doc_blocked(doc, ok):
     return bool(doc) and doc not in ok
 
 
+def _media_visible(m, ok):
+    """One rule for kal_entity.media and kal_media: an item that came from notes (`docs` non-empty) is
+    invisible when none of those notes is released.  Link-level `doc` gating applies on top."""
+    docs = m.get("docs") or []
+    return not docs or any(not _doc_blocked(d, ok) for d in docs)
+
+
 def media_of(name_norm, cap=12):
     """The `media` field of kal_entity: links whose entity key is this entity's name_norm, best first."""
     base = (os.environ.get("KAL_PUBLIC_APP_URL") or "").rstrip("/")
     rows, ok = [], _released_paths()
     for sha, m in _media_manifest().items():
+        if not _media_visible(m, ok):
+            continue
         for l in m.get("links", []):
             if l.get("entity") == name_norm and not _doc_blocked(l.get("doc", ""), ok):
                 rows.append({"sha256": sha, "kind": m.get("kind"), "taken_at": m.get("taken_at"),
-                             "basis": l.get("basis"), "score": l.get("score"),
-                             "ocr": (m.get("ocr") or "")[:200], "doc": l.get("doc", ""),
+                             "basis": l.get("basis"), "score": l.get("score"), "doc": l.get("doc", ""),
                              "url": f"{base}/media?sha={sha}" if base else None})
                 break
     rows.sort(key=lambda r: r["taken_at"] or "", reverse=True)
@@ -1418,10 +1426,10 @@ def kal_media(sha256: str):
     if m is None:
         return "no such media in this knowledge graph."
     ok = _released_paths()
+    if not _media_visible(m, ok):
+        return "no such media in this knowledge graph."
     names = [f"{l['name']} ({l['basis']})" for l in m.get("links", []) if not _doc_blocked(l.get("doc", ""), ok)]
     docs = [d for d in m.get("docs", []) if not _doc_blocked(d, ok)]
-    if m.get("docs") and not docs:
-        return "no such media in this knowledge graph."
     meta = {"sha256": sha, "kind": m.get("kind"), "mime": m.get("mime"), "width": m.get("width"),
             "height": m.get("height"), "duration_s": m.get("duration_s"), "taken_at": m.get("taken_at"),
             "docs": docs[:10], "entities": names[:20], "ocr": (m.get("ocr") or "")[:400]}
@@ -2325,7 +2333,7 @@ def _selftest():
     #    an ImageContent next to the text.  Fixture only —— nothing under the real KAL_HOME is read.
     import tempfile as _tf
     from PIL import Image as _PI
-    _sha_a, _sha_b = "a" * 64, "b" * 64
+    _sha_a, _sha_b, _sha_c = "a" * 64, "b" * 64, "c" * 64
     _okdoc = next(iter(_docs_index().values()))["path"]
     _nn = resolve("obsidian")[0].get("name_norm") or "obsidian"
     with _tf.TemporaryDirectory() as _md:
@@ -2339,7 +2347,12 @@ def _selftest():
              "variants": ["thumb"], "ocr": "x" * 300, "links": [_lk(_okdoc, "embed", 0.9)], "docs": [_okdoc]},
             {"sha256": _sha_b, "kind": "image", "mime": "image/png", "bytes": 1, "width": 8, "height": 8,
              "duration_s": None, "taken_at": None, "source": "dir:x/b.png", "variants": ["orig"], "ocr": "",
-             "links": [_lk("no-such-released-note.md", "embed", 0.9)], "docs": ["no-such-released-note.md"]}]}
+             "links": [_lk("no-such-released-note.md", "embed", 0.9)], "docs": ["no-such-released-note.md"]},
+            #  a sidecar link (doc "") on an item whose only note is unreleased: one predicate hides it in BOTH
+            #  tools —— kal_entity.media used to list it while kal_media refused it.
+            {"sha256": _sha_c, "kind": "image", "mime": "image/png", "bytes": 1, "width": 8, "height": 8,
+             "duration_s": None, "taken_at": None, "source": "dir:x/c.png", "variants": ["orig"], "ocr": "",
+             "links": [_lk("", "manual", 1.0)], "docs": ["no-such-released-note.md"]}]}
         with open(os.path.join(_md, "manifest.json"), "w") as _fh:
             json.dump(_mf, _fh)
         _old_env = {k: os.environ.get(k) for k in ("KAL_MEDIA_DIR", "KAL_PUBLIC_APP_URL")}
@@ -2347,7 +2360,8 @@ def _selftest():
         try:
             _me = kal_entity("obsidian")["media"]
             assert [m["sha256"] for m in _me] == [_sha_a], f"media gate/link match wrong: {_me}"
-            assert len(_me[0]["ocr"]) == 200 and _me[0]["url"] == f"https://app.example/media?sha={_sha_a}", _me
+            assert "ocr" not in _me[0] and _me[0]["url"] == f"https://app.example/media?sha={_sha_a}", _me
+            assert kal_media(_sha_c) == "no such media in this knowledge graph.", "kal_media must hide an item whose notes are all unreleased"
             _r = kal_media(_sha_a)
             assert isinstance(_r, list) and "Obsidian" in _r[0], _r
             from mcp.server.mcpserver.utilities.types import Image as _MI
