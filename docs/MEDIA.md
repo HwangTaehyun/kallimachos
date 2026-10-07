@@ -30,6 +30,11 @@ just media-push --prune                   # the same, then delete server files t
    folder does not enter it. Embeds and frontmatter `media:` entries that point into it are
    ignored too.
 
+   Paths are compared after resolving symlinks. A note, a media file or a sidecar that is a
+   symlink into a private folder is not read, wherever the link itself sits, and a directory
+   symlink is never followed. Only the folder itself and what is inside it count as private:
+   with `~/Pictures/secret` private, `~/Pictures/secret2` is still scanned.
+
 Notes marked `no_llm` contribute nothing: no embed, no link and no doc. A file that only those
 notes reference is not listed.
 
@@ -53,9 +58,13 @@ ordinary words measured at 10–54× and real names at ≤ 4×.
 
 The notes a file is embedded in are recorded in the item's `docs` list. They are not a link
 basis. The server takes at most 50 notes per item, so when a file appears in more notes, only
-the first 50 by path are listed, with a warning. A note path longer than 512 bytes is left out
-of `docs` (and a link from that note keeps an empty `doc`). It is never shortened, because a
-shortened path would name a different note.
+the first 50 by path are listed, with a warning. A note path longer than 512 bytes is never
+shortened, because a shortened path would name a different note. Instead it is left out of
+`docs`, and every link that would name it as its `doc` is dropped. An item whose notes **all**
+have such paths is left out of the manifest with a warning. An empty `docs` list or `doc` means
+"not from a note" (a media folder or a sidecar), and the MCP tools show those without a note
+check, so a file from a note must never end up with one. Items from media folders and sidecars
+are not affected.
 
 ## Optional tools
 
@@ -83,8 +92,11 @@ is, or the 720p mp4) and `orig`. The server limits them to 1 MiB, 300 MiB and 1 
 over its limit is skipped with a warning. When a file is left with neither `view` nor `orig`, it
 is dropped from the uploaded manifest.
 
-- The manifest is checked against every rule the server applies to it (field lengths, the
-  50-note `docs` limit, required fields) **before any request**. If anything breaks a rule, push
+- The manifest is checked against every rule the server applies to it (field types, field
+  lengths, the 50-note `docs` limit, required fields) **before any request**. Types follow the
+  server's decoder: `bytes`, `width` and `height` must be integers (not `true`, not `"10"`),
+  `duration_s` and a link's `score` numbers, text fields strings, and `docs` and `variants` lists
+  of strings. If anything breaks a rule, push
   stops with the list and sends nothing, so no file is uploaded or pruned for a manifest the
   server would then refuse.
 - The manifest's size (server limit 16 MiB) is checked **before** any file is uploaded. If it is
@@ -96,13 +108,17 @@ is dropped from the uploaded manifest.
   does not replace the manifest.
 - **Per-file responses:** 400, 413 (the file is over its limit) and 415. Push skips that one file
   with a warning and continues. **Any other error response stops the run**, including 401, 402,
-  410, 411, 507 and 5xx, as do network errors.
+  409 (another upload of the same file is in progress), 410, 411, 507 and 5xx, as do network
+  errors. Push uploads one file at a time, so a 409 most likely means another push to the same
+  account is running.
 - Files the server already has are not sent again. The exception is a thumbnail or view copy that
   the server holds at a different size (it was derived again after an upgrade). Push replaces
-  it. **All of these deletes run before the first upload**, so the room they free is there when
-  new files need it, and usage never rises above the final total that the quota check measured.
-  If the run stops after the deletes, those items show no preview until the next push. An
-  original is identified by its content and is never replaced.
+  it. Normally each old copy is deleted right before its own replacement is uploaded, so a run
+  that stops leaves at most one item without a preview. The quota check walks that order and
+  takes its highest point. Only when that point is over the quota (while the end state fits),
+  push says so and **deletes all the old copies before the first upload** instead: usage then
+  never rises above the final total, but if the run stops, those items show no preview until the
+  next push. An original is identified by its content and is never replaced.
 - An older server without the usage endpoint gets no quota check and no multi-device warning, and
   `--prune` stops with a message.
 - The server allows 30 minutes per upload. A 1 GiB original needs a steady upload speed of about

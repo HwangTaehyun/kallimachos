@@ -199,6 +199,48 @@ class ScanTest(Base):
         self.assertNotIn(media.sha256_of(hidden), {x["sha256"] for x in m["media"]})
         self.assertNotIn("hidden.png", json.dumps(m))
 
+    def test_symlinks_into_a_private_dir(self):
+        # privacy is judged by REAL path: a public-looking note, media file or sidecar that is a symlink into a
+        # private dir contributes nothing, and a directory symlink into it is never walked
+        priv = os.path.join(self.tmp, "priv")
+        os.makedirs(priv)
+        hidden = os.path.join(priv, "hidden.png")
+        png(hidden, "orange")
+        with open(os.path.join(priv, "real.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nmedia: [board.png]\nentities: [Leaked Entity]\n---\n# Redis\n![[shot.jpg]] Redis\n")
+        with open(os.path.join(priv, "side.json"), "w", encoding="utf-8") as fh:
+            json.dump({"entities": ["Sidecar Secret"]}, fh)
+        os.symlink(os.path.join(priv, "real.md"), os.path.join(self.vault, "linked.md"))
+        os.symlink(hidden, os.path.join(self.vault, "alias.png"))
+        os.symlink(priv, os.path.join(self.vault, "plink"))
+        png(os.path.join(self.vault, "pub.png"), "purple")
+        os.symlink(os.path.join(priv, "side.json"), os.path.join(self.vault, "pub.png.json"))
+        with open(os.path.join(self.vault, "a.md"), "a", encoding="utf-8") as fh:
+            fh.write("\n![[alias.png]]\n![[pub.png]]\n![p](plink/hidden.png)\n")
+        dirs = [{"path": self.vault, "alias": "v"}, {"path": priv, "alias": "s", "private": True}]
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_DIRS": json.dumps(dirs)}):
+            m, by = self.scan()
+        dump = json.dumps(m)
+        for leak in ("linked.md", "real.md", "Leaked Entity", "leaked entity", "Sidecar Secret", "sidecar secret"):
+            self.assertNotIn(leak, dump)
+        self.assertNotIn(media.sha256_of(hidden), {x["sha256"] for x in m["media"]})
+        self.assertFalse([l for l in by["vault:a.md#pub.png"]["links"] if l["basis"] == "manual"],
+                         "the file itself is public; its sidecar is not")
+        # the shot keeps exactly what the real public note gives it
+        self.assertEqual(by["vault:a.md#shot.jpg"]["docs"], ["a.md"])
+
+    def test_similar_prefix_sibling_is_not_private(self):
+        pics = os.path.join(self.vault, "pics")
+        for d in ("secret", "secret2"):
+            os.makedirs(os.path.join(pics, d))
+        png(os.path.join(pics, "secret", "s.png"), "orange")
+        png(os.path.join(pics, "secret2", "ok.png"), "purple")
+        dirs = [{"path": pics, "alias": "pics"}, {"path": os.path.join(pics, "secret"), "alias": "s", "private": True}]
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_DIRS": json.dumps(dirs)}):
+            _, by = self.scan()
+        self.assertIn("dir:pics/secret2/ok.png", by, '"/pics/secret2" is not inside "/pics/secret"')
+        self.assertNotIn("dir:pics/secret/s.png", by)
+
     def test_exif_stripped_and_view_size(self):
         m, by = self.scan()
         shot = by["vault:a.md#shot.jpg"]
@@ -411,11 +453,13 @@ class PushTest(Base):
             media.main(["media.py", "push", "--prnue"])
 
     def test_any_other_status_stops_the_run(self):
-        self.fake.fail = {"/thumb": 410}         # 410 is not a per-file status: stop, never a partial manifest
-        with self.assertRaises(SystemExit) as cm:
-            self.push()
-        self.assertIn("410", str(cm.exception))
-        self.assertIsNone(self.fake.manifest)
+        for code in (409, 410):                  # not per-file statuses: stop, never a partial manifest
+            with self.subTest(code=code):
+                self.fake.fail = {"/thumb": code}
+                with self.assertRaises(SystemExit) as cm:
+                    self.push()
+                self.assertIn(str(code), str(cm.exception))
+                self.assertIsNone(self.fake.manifest)
 
     def test_old_server_without_usage(self):
         self.fake.usage_status = 404
@@ -489,11 +533,33 @@ class PushTest(Base):
         self.assertIn("over the storage quota", str(cm.exception))
         self.assertEqual([x for x in self.fake.seen if x[0] in ("PUT", "DELETE")], [])
         self.fake.quota += 1
-        self.push()
+        out = __import__("io").StringIO()
+        with mock.patch("sys.stdout", new=out):
+            self.push()
+        self.assertIn("deleting all 1 stale preview(s) first", out.getvalue())
         self.assertEqual(self.fake.usage, sizes)
         self.assertEqual(len(self.fake.manifest["media"]), 3)
         order = [x[:2] for x in self.fake.seen if x[0] in ("PUT", "DELETE")]
         self.assertEqual(order[0], ("DELETE", f"/api/media/blob/{shot}/view"), "the delete frees room first")
+
+    def test_stale_copies_replaced_in_place_when_the_quota_allows(self):
+        # ample quota: each stale copy is deleted right before its own re-upload, not all of them first ——
+        # a run that stops on the first upload must not leave every other item without a preview
+        self.push()
+        sizes = {x[1].split("/api/media/blob/")[1]: s for x, s in self.sizes().items()}
+        stale = [f"{x['sha256']}/view" for x in self.m["media"]]
+        self.fake.usage = dict(sizes, **{k: sizes[k] + 1 for k in stale})
+        self.fake.seen.clear()
+        out = __import__("io").StringIO()
+        with mock.patch("sys.stdout", new=out):
+            self.push()
+        self.assertNotIn("stale preview(s) first", out.getvalue())
+        order = [x[:2] for x in self.fake.seen if x[0] in ("PUT", "DELETE") and "/api/media/blob/" in x[1]]
+        self.assertEqual(len(order), 2 * len(stale))
+        for i in range(0, len(order), 2):
+            self.assertEqual(order[i][0], "DELETE")
+            self.assertEqual(order[i + 1], ("PUT", order[i][1]), "the delete immediately precedes its own upload")
+        self.assertEqual(self.fake.usage, sizes)
 
     def test_one_image_in_51_notes(self):
         for i in range(51):
@@ -516,8 +582,29 @@ class PushTest(Base):
         m, _ = self.scan()
         board = next(x for x in m["media"] if x["sha256"] == media.sha256_of(os.path.join(self.vault, "board.png")))
         self.assertEqual(board["docs"], ["fm.md"])
-        self.assertEqual({l["entity"]: l["doc"] for l in board["links"]}["kal"], "", "the link stays, its doc does not")
+        # a link whose doc would be "" looks unattached (ungated in MCP) —— the link from the long note is dropped
+        self.assertNotIn("kal", self.links(board))
+        self.assertTrue(all(l["doc"] or l["basis"] == "manual" for l in board["links"]))
         self.assertEqual(media.manifest_errors(m), [])
+
+    def test_item_only_from_long_paths_is_left_out(self):
+        # docs [] would read as "not from a note" → ungated in MCP even after the note is blocked.  Leave it out.
+        deep = os.path.join(self.vault, *["€" * 80] * 3)
+        os.makedirs(deep)
+        lone = os.path.join(deep, "lone.png")
+        png(lone, "olive")
+        with open(os.path.join(deep, "n.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nmedia: [lone.png]\nentities: [Kal]\n---\n# Redis\n![[lone.png]]\n")
+        d = os.path.join(self.tmp, "wb")          # a media-dir item has no note provenance: unaffected
+        os.makedirs(d)
+        png(os.path.join(d, "dir.png"), "navy")
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_DIRS": json.dumps([{"path": d, "alias": "wb"}])}), \
+                mock.patch("sys.stderr", new=__import__("io").StringIO()) as err:
+            m, by = self.scan()
+        self.assertNotIn(media.sha256_of(lone), {x["sha256"] for x in m["media"]})
+        self.assertIn("left out", err.getvalue())
+        self.assertEqual(by["dir:wb/dir.png"]["docs"], [])
+        self.assertTrue(all(x["docs"] for x in m["media"] if x["source"].startswith("vault:")))
 
     def test_invalid_manifest_stops_before_any_request(self):
         mp = os.path.join(self.home, "media", "manifest.json")
@@ -538,13 +625,31 @@ class PushTest(Base):
         self.assertTrue(ok(good, version=2))
         for k, v in [("sha256", "A" * 64), ("kind", "audio"), ("links", None), ("variants", []), ("variants", ["raw"]),
                      ("mime", ""), ("mime", "a" * 101), ("bytes", -1), ("source", "s" * 513), ("ocr", "€" * 2001),
-                     ("taken_at", "€" * 14), ("docs", ["d"] * 51), ("docs", ["€" * 171])]:
+                     ("taken_at", "€" * 14), ("docs", ["d"] * 51), ("docs", ["€" * 171]),
+                     # Go decodes into typed fields: a wrong JSON type refuses the whole manifest
+                     ("bytes", "10"), ("bytes", True), ("bytes", 1.5), ("width", "3"), ("height", True),
+                     ("duration_s", "2"), ("duration_s", False), ("taken_at", 5), ("mime", 7), ("sha256", 5),
+                     ("docs", "a.md"), ("docs", [1]), ("variants", "thumb"), ("links", [1]), ("links", {})]:
             with self.subTest(field=k, value=str(v)[:12]):
                 self.assertTrue(ok(dict(good, **{k: v})))
         for k, v in [("entity", ""), ("name", ""), ("name", "n" * 121), ("entity", "€" * 171), ("doc", "€" * 171),
-                     ("basis", "doc"), ("score", 1.5), ("score", None)]:
+                     ("basis", "doc"), ("score", 1.5), ("score", None), ("score", True), ("score", "0.5"),
+                     ("doc", 5), ("entity", 3)]:
             with self.subTest(link=k, value=str(v)[:12]):
                 self.assertTrue(ok(dict(good, links=[dict(good["links"][0], **{k: v})])))
+
+    def test_wrong_type_stops_before_any_request(self):
+        mp = os.path.join(self.home, "media", "manifest.json")
+        for bad in ("10", True):
+            with self.subTest(bytes=bad):
+                man = json.load(open(mp))
+                man["media"][0]["bytes"] = bad
+                json.dump(man, open(mp, "w"))
+                self.fake.seen.clear()
+                with self.assertRaises(SystemExit) as cm:
+                    self.push()
+                self.assertIn("wrong type: bytes", str(cm.exception))
+                self.assertEqual(self.fake.seen, [], "not even the usage GET")
 
     def test_rederived_copy_replaces_the_server_one(self):
         self.push()
