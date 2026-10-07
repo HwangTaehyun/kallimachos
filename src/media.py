@@ -30,13 +30,18 @@ Privacy
   set `"media_orig": false` in config.json (or env KAL_MEDIA_ORIG=0): `orig` is then never uploaded nor listed.
 
 Push
-  Each variant over its server cap (thumb 1 MiB · view 300 MiB · orig 1 GiB) is skipped with a warning; a file the
-  server refuses (400 / 413 / 415) is skipped too and the run goes on.  An item left with neither view nor orig is
-  dropped from the uploaded manifest.  Network errors, 401, 402 and 5xx stop the run.
-  The manifest is checked against the server's 16 MiB limit BEFORE any blob is sent.
+  Each variant over its server cap (thumb 1 MiB · view 300 MiB · orig 1 GiB) is skipped with a warning.
+  Per-file statuses: 400 / 413 / 415 on a blob → that file is skipped with a warning and the run goes on.  An item
+  left with neither view nor orig is dropped from the uploaded manifest.  ANY other non-2xx response (401, 402,
+  410, 411, 507, 5xx, …) and any network error stop the run.  (HEAD 404 only means "not there yet → upload", and
+  a 404/405 from /api/media/usage means an older server: no quota precheck, no multi-device warning, no prune.)
+  Before any blob is sent: the manifest is checked against the server's 16 MiB limit, and what this push adds is
+  checked against the storage quota (GET /api/media/usage).  A 507 mid-run (quota full) stops the run.
+  thumb / view are derived copies: when the server records one at a size other than the local file (re-derived
+  after DERIVE_VERSION changed), it is deleted and uploaded again.  orig is content-addressed and never replaced.
   The uploaded manifest REPLACES the server's (last push wins) —— one device per account.  When the server holds
-  items this device does not list, push says so.  `push --prune` then deletes every server blob the uploaded
-  manifest does not list; without the flag nothing is ever deleted.
+  items this device does not list, push says so.  `push --prune` then deletes every recorded server file the
+  uploaded manifest does not list; without the flag nothing is ever deleted.
 """
 import datetime
 import hashlib
@@ -72,6 +77,7 @@ VARIANTS = ("thumb", "view", "orig")
 CAP = {"thumb": 1 << 20, "view": 300 << 20, "orig": 1 << 30}     # the server's per-variant limits
 MANIFEST_CAP = 16 << 20                                          # the server's manifest body limit
 MAX_MEDIA = 50_000
+DERIVE_VERSION = 2              # bump when thumb / view derivation changes: cached copies are re-derived, push replaces them
 
 
 def home():
@@ -451,16 +457,17 @@ def derive_video(path, out_dir):
             write_thumb(Image.open(poster), os.path.join(out_dir, "thumb.webp"))
             meta["ocr"] = ocr_text(poster)
         tmp = os.path.join(td, "view.mp4")
-        # -map_metadata -1: location tags do not ride along.  A ≤720p H.264 mp4 is only re-muxed (fast); anything
-        # taller, or a re-mux over the server's view cap, is re-encoded to ≤720p —— a 4K clip must not stay 4K.
+        # -map_metadata -1: location tags do not ride along.  A ≤720p 8-bit 4:2:0 H.264 mp4 is only re-muxed (fast,
+        # source audio codec kept); anything taller, 4:4:4 / 10-bit (browsers cannot play those), or a re-mux over
+        # the server's view cap, is re-encoded to ≤720p —— a 4K clip must not stay 4K.
         ok = False
-        if (vs.get("codec_name") == "h264" and os.path.splitext(path)[1].lower() in (".mp4", ".m4v")
-                and (vs.get("height") or 1 << 30) <= 720):
+        if (vs.get("codec_name") == "h264" and vs.get("pix_fmt") == "yuv420p"
+                and os.path.splitext(path)[1].lower() in (".mp4", ".m4v") and (vs.get("height") or 1 << 30) <= 720):
             ok = (run(["ffmpeg", "-v", "error", "-y", "-i", path, "-c", "copy", "-map_metadata", "-1",
                        "-movflags", "+faststart", tmp]).returncode == 0
                   and os.path.isfile(tmp) and os.path.getsize(tmp) <= CAP["view"])
-        if not ok:
-            ok = run(["ffmpeg", "-v", "error", "-y", "-i", path, "-vf", "scale=-2:'min(720,ih)'",
+        if not ok:      # even height: yuv420p cannot encode 479 lines
+            ok = run(["ffmpeg", "-v", "error", "-y", "-i", path, "-vf", "scale=-2:'2*trunc(min(720,ih)/2)'",
                       "-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-pix_fmt", "yuv420p",
                       "-c:a", "aac", "-map_metadata", "-1", "-movflags", "+faststart", tmp]).returncode == 0
         if ok and os.path.isfile(tmp):
@@ -480,10 +487,12 @@ def process(path):
         try:
             with open(mj, encoding="utf-8") as fh:
                 meta = json.load(fh)
-            if all(os.path.isfile(os.path.join(d, f)) for f in meta["files"].values()):
+            if (meta.get("derive_version") == DERIVE_VERSION
+                    and all(os.path.isfile(os.path.join(d, f)) for f in meta["files"].values())):
                 return meta
         except (OSError, ValueError, KeyError):
             pass
+    shutil.rmtree(d, ignore_errors=True)        # no stale copy from an older derivation may be picked up below
     os.makedirs(d, exist_ok=True)
     meta = derive_image(path, d, ext) if ext in IMG_EXT else derive_video(path, d)
     if meta is None:
@@ -494,7 +503,7 @@ def process(path):
         for n in names:
             if os.path.isfile(os.path.join(d, n)):
                 files[v] = n
-    meta.update(sha256=sha, bytes=os.path.getsize(path), files=files, variants=[v for v in VARIANTS if v in files],
+    meta.update(derive_version=DERIVE_VERSION, sha256=sha, bytes=os.path.getsize(path), files=files, variants=[v for v in VARIANTS if v in files],
                 mime=MIME_FIX.get(ext) or mimetypes.guess_type(path)[0] or "application/octet-stream")
     tmp = mj + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -603,8 +612,10 @@ def variant_ct(m, v, fname):
     return {".gif": "image/gif", ".mp4": "video/mp4"}.get(os.path.splitext(fname)[1], "image/jpeg")
 
 
-SOFT = (400, 413, 415)          # the server refused this one file —— skip it, the run goes on
+SOFT = (400, 413, 415)          # the server refused this one file —— skip it, the run goes on; anything else stops
 KEY_RE = re.compile(r"[0-9a-f]{64}/(thumb|view|orig)")
+FREE_SPACE = ("To make room: `push --prune` deletes server files this device no longer lists, and "
+              "`\"media_orig\": false` in config.json (or KAL_MEDIA_ORIG=0) keeps originals on this device.")
 
 
 def push(prune=False):
@@ -642,6 +653,9 @@ def push(prune=False):
             if e.code in soft:
                 warn(f"{method} {u.replace(url, '')} → {e.code} {detail}".rstrip())
                 return e.code, b""
+            if e.code == 507:       # not this file's fault: nothing after it would fit either
+                sys.exit("push stopped: the server's storage quota is full (507).  The manifest was not replaced.  "
+                         + FREE_SPACE)
             sys.exit(f"push failed: {method} {u.replace(url, '')} → {e.code} {detail}")
         except urllib.error.URLError as e:
             sys.exit(f"push failed: {method} {u.replace(url, '')} → {e.reason}")
@@ -680,15 +694,67 @@ def push(prune=False):
                  f"{-(-over * len(media) // len(body))} of {len(media)} items (narrow media_dirs) or "
                  f"{over / (1 << 20):.1f} MiB of the {ocr / (1 << 20):.1f} MiB of OCR text.  Nothing was uploaded.")
 
-    # 3. blobs —— one refused file does not stop the run
+    # 3. what the server holds.  An older server has no usage endpoint: no precheck, no warning, no prune.
+    st, raw = call("GET", f"{url}/api/media/usage", soft=(404, 405))
+    usage = None if st in (404, 405) else json.loads(raw)
+    if usage is None and prune:
+        sys.exit("this server cannot list its media (no /api/media/usage) —— nothing to prune.  Nothing was uploaded.")
+    server = (usage or {}).get("bytes") or {}
+    local = {m["sha256"] for m in manifest["media"]}
+    foreign = {k.split("/")[0] for k in server if k.split("/")[0] not in local}
+    if foreign and not prune:
+        warn(f"the server holds {len(foreign)} item(s) this device does not list.  The manifest is replaced (last "
+             "push wins), so the web view will now show only this device's items.  If that is intended, "
+             "`push --prune` also deletes their files.")
+
+    def stale(k, v, size):
+        """A derived copy the server records at another size (re-derived since) —— replaced, never orig."""
+        return v != "orig" and server.get(k, size) != size
+
+    def prune_now(keep):
+        gone = [k for k in server if k not in keep and KEY_RE.fullmatch(k)]
+        n_orig = sum(k.endswith("/orig") for k in gone)
+        if n_orig and not keep_orig:
+            print(f"media prune: media_orig is off —— {n_orig} original(s) uploaded earlier will be deleted from "
+                  "the server")
+        freed = 0
+        for k in gone:
+            call("DELETE", f"{url}/api/media/blob/{k}")
+            size = server.pop(k)
+            freed += size if isinstance(size, int) else 0
+        print(f"media prune: deleted {len(gone)} blob(s) · {freed / 1e6:.1f} MB freed")
+
+    # 4. the quota must fit before any blob is sent (--prune may free room first)
+    keep = {f"{m['sha256']}/{v}" for m, paths in zip(media, plan) for v in paths}
+    need = 0
+    for m, paths in zip(media, plan):
+        for v, p in paths.items():
+            k, size = f"{m['sha256']}/{v}", os.path.getsize(p)
+            if k not in server or stale(k, v, size):
+                need += size - server.get(k, 0)
+    quota, total = (usage or {}).get("quota") or 0, (usage or {}).get("total") or 0
+    over = total + need - quota
+    if quota and over > 0:
+        freeable = sum(s for k, s in server.items() if k not in keep and KEY_RE.fullmatch(k) and isinstance(s, int))
+        if not (prune and over <= freeable):
+            sys.exit(f"push stopped before uploading: this push adds {need / 1e6:.1f} MB, the server holds "
+                     f"{total / 1e6:.1f} of {quota / 1e6:.1f} MB —— {over / 1e6:.1f} MB over the storage quota"
+                     + (f" ({freeable / 1e6:.1f} MB prunable)" if prune else "") + ".  Nothing was uploaded.  "
+                     + FREE_SPACE)
+        print(f"media prune: {over / 1e6:.1f} MB over the quota —— pruning before the upload")
+        prune_now(keep)
+
+    # 5. blobs —— one refused file does not stop the run
     up = skipped = refused = nbytes = 0
     for m, paths in zip(media, plan):
         for v, p in list(paths.items()):
             u = f"{url}/api/media/blob/{m['sha256']}/{v}"
-            if call("HEAD", u)[0] != 404:
+            size = os.path.getsize(p)
+            if stale(f"{m['sha256']}/{v}", v, size):
+                call("DELETE", u)          # the server would answer HEAD 200 for the old copy
+            elif call("HEAD", u)[0] != 404:
                 skipped += 1
                 continue
-            size = os.path.getsize(p)
             with open(p, "rb") as fh:      # streamed, not read whole —— an original can be up to 1 GB
                 st = call("PUT", u, fh, variant_ct(m, v, p), size, soft=SOFT)[0]
             if st in SOFT:
@@ -699,33 +765,13 @@ def push(prune=False):
             nbytes += size
         m["variants"] = [v for v in VARIANTS if v in paths]
     media = [m for m in media if "view" in m["variants"] or "orig" in m["variants"]]
-    body = body_of(media)
-
-    # 4. the manifest replaces the server's —— say so when another device's items would vanish from view
-    st, raw = call("GET", f"{url}/api/media/usage", soft=(404, 405))
-    server = {} if st in (404, 405) else (json.loads(raw).get("bytes") or {})
-    if st in (404, 405) and prune:
-        sys.exit("this server cannot list its media (no /api/media/usage) —— nothing to prune")
-    local = {m["sha256"] for m in manifest["media"]}
-    foreign = {k.split("/")[0] for k in server if k.split("/")[0] not in local}
-    if foreign and not prune:
-        warn(f"the server holds {len(foreign)} item(s) this device does not list.  The manifest is replaced (last "
-             "push wins), so the web view will now show only this device's items.  If that is intended, "
-             "`push --prune` also deletes their files.")
-    call("PUT", f"{url}/api/media/manifest", body, "application/json")
+    call("PUT", f"{url}/api/media/manifest", body_of(media), "application/json")
     print(f"media push: uploaded {up} · already there {skipped} · refused {refused} · {nbytes / 1e6:.1f} MB · "
           f"manifest {len(media)} files")
 
-    # 5. --prune: delete what the uploaded manifest does not list (only after it is safely in place)
+    # 6. --prune: delete what the uploaded manifest does not list (only after it is safely in place)
     if prune:
-        keep = {f"{m['sha256']}/{v}" for m in media for v in m["variants"]}
-        n = freed = 0
-        for k, size in server.items():
-            if k not in keep and KEY_RE.fullmatch(k):
-                call("DELETE", f"{url}/api/media/blob/{k}")
-                n += 1
-                freed += size if isinstance(size, int) else 0
-        print(f"media prune: deleted {n} blob(s) · {freed / 1e6:.1f} MB freed")
+        prune_now({f"{m['sha256']}/{v}" for m in media for v in m["variants"]})
 
 
 def main(argv):

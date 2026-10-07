@@ -216,6 +216,7 @@ class Fake:
         import http.server
         import threading
         self.seen, self.have, self.fail, self.usage, self.manifest = [], set(), {}, {}, None
+        self.usage_status, self.quota = 200, 1 << 34
         fake = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -247,11 +248,14 @@ class Fake:
 
             def do_GET(self):
                 fake.seen.append(("GET", self.path))
-                body = json.dumps({"bytes": fake.usage, "total": sum(fake.usage.values()), "quota": 1 << 34}).encode()
-                self.reply(200, body)
+                if fake.usage_status != 200:
+                    return self.reply(fake.usage_status)
+                body = json.dumps({"bytes": fake.usage, "total": sum(fake.usage.values()), "quota": fake.quota})
+                self.reply(200, body.encode())
 
             def do_DELETE(self):
                 fake.seen.append(("DELETE", self.path))
+                fake.have.discard(self.path)
                 self.reply(200, b'{"ok":true,"deleted":true}')
 
         self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
@@ -350,7 +354,8 @@ class PushTest(Base):
     def test_multi_device_warning_and_prune(self):
         other = "f" * 64
         shot = self.by["vault:a.md#shot.jpg"]["sha256"]
-        self.fake.usage = {f"{other}/thumb": 1000, f"{other}/orig": 5_000_000, f"{shot}/thumb": 10}
+        thumb = os.path.getsize(os.path.join(self.home, "media", shot, "thumb.webp"))
+        self.fake.usage = {f"{other}/thumb": 1000, f"{other}/orig": 5_000_000, f"{shot}/thumb": thumb}
         err = self.push()
         self.assertIn("1 item(s) this device does not list", err)
         self.assertEqual(self.fake.blobs("DELETE"), [], "nothing is ever deleted without --prune")
@@ -362,6 +367,7 @@ class PushTest(Base):
         deleted = {x[1].split("/api/media/blob/")[1] for x in self.fake.blobs("DELETE")}
         self.assertEqual(deleted, {f"{other}/thumb", f"{other}/orig", f"{shot}/orig"})
         self.assertIn("deleted 3 blob(s)", out.getvalue())
+        self.assertIn("media_orig is off —— 2 original(s) uploaded earlier will be deleted", out.getvalue())
         put_manifest = max(i for i, x in enumerate(self.fake.seen) if x[0] == "PUT" and x[1].endswith("/manifest"))
         first_delete = min(i for i, x in enumerate(self.fake.seen) if x[0] == "DELETE")
         self.assertLess(put_manifest, first_delete, "prune runs only after the manifest is in place")
@@ -373,6 +379,83 @@ class PushTest(Base):
         self.assertEqual([c.kwargs for c in p.call_args_list], [{"prune": True}, {"prune": False}])
         with self.assertRaises(SystemExit):
             media.main(["media.py", "push", "--prnue"])
+
+    def test_any_other_status_stops_the_run(self):
+        self.fake.fail = {"/thumb": 410}         # 410 is not a per-file status: stop, never a partial manifest
+        with self.assertRaises(SystemExit) as cm:
+            self.push()
+        self.assertIn("410", str(cm.exception))
+        self.assertIsNone(self.fake.manifest)
+
+    def test_old_server_without_usage(self):
+        self.fake.usage_status = 404
+        self.fake.usage = {"f" * 64 + "/thumb": 1}           # would warn, but the old server never says so
+        err = self.push()
+        self.assertNotIn("does not list", err)
+        self.assertEqual(len(self.fake.manifest["media"]), 3, "no precheck: everything still goes up")
+        self.fake.seen.clear()
+        with self.assertRaises(SystemExit) as cm:
+            self.push(prune=True)
+        self.assertIn("nothing to prune", str(cm.exception))
+        self.assertEqual([x for x in self.fake.seen if x[0] in ("PUT", "HEAD", "DELETE")], [])
+
+    def test_quota_precheck_stops_before_any_blob(self):
+        other = "f" * 64
+        self.fake.usage, self.fake.quota = {f"{other}/orig": 5_000_000}, 5_000_100
+        with self.assertRaises(SystemExit) as cm:
+            self.push()
+        msg = str(cm.exception)
+        self.assertIn("MB over the storage quota", msg)
+        self.assertIn("--prune", msg)
+        self.assertIn("media_orig", msg)
+        self.assertEqual([x for x in self.fake.seen if x[0] in ("PUT", "HEAD", "DELETE")], [])
+        # it fits once the other device's file is gone → --prune frees that room before the upload
+        out = __import__("io").StringIO()
+        with mock.patch("sys.stdout", new=out):
+            self.push(prune=True)
+        self.assertIn("pruning before the upload", out.getvalue())
+        order = [x[1] for x in self.fake.seen if x[0] in ("PUT", "DELETE") and "/api/media/blob/" in x[1]]
+        self.assertTrue(order[0].endswith(f"{other}/orig"), "the delete comes before the first blob")
+        self.assertEqual(len(self.fake.manifest["media"]), 3)
+        # what the server already records at the same size costs nothing: a full quota still passes
+        self.fake.seen.clear()
+        self.fake.usage = {x[1].split("/api/media/blob/")[1]: s for x, s in self.sizes().items()}
+        self.fake.quota = sum(self.fake.usage.values())
+        self.push()
+        self.assertEqual(self.fake.blobs(), [])
+
+    def sizes(self):
+        """{("PUT", blob path): local size} for every variant this device holds."""
+        out = {}
+        for x in self.m["media"]:
+            files = json.load(open(os.path.join(self.home, "media", x["sha256"], "meta.json")))["files"]
+            for v, f in files.items():
+                out[("PUT", f"/api/media/blob/{x['sha256']}/{v}")] = os.path.getsize(
+                    os.path.join(self.home, "media", x["sha256"], f))
+        return out
+
+    def test_507_mid_run_stops(self):
+        self.fake.fail = {"/view": 507}
+        with self.assertRaises(SystemExit) as cm:
+            self.push()
+        self.assertIn("storage quota is full", str(cm.exception))
+        self.assertIn("--prune", str(cm.exception))
+        self.assertEqual(len([x for x in self.fake.blobs() if x[1].endswith("/view")]), 1, "stops at the first 507")
+        self.assertIsNone(self.fake.manifest)
+
+    def test_rederived_copy_replaces_the_server_one(self):
+        self.push()
+        shot = self.by["vault:a.md#shot.jpg"]["sha256"]
+        self.fake.usage = {x[1].split("/api/media/blob/")[1]: s for x, s in self.sizes().items()}
+        self.fake.usage[f"{shot}/view"] += 1          # the server holds an older derivation
+        self.fake.usage[f"{shot}/orig"] += 1          # orig is content-addressed: never replaced
+        self.fake.seen.clear()
+        self.push()
+        self.assertEqual([x[1] for x in self.fake.blobs("DELETE")], [f"/api/media/blob/{shot}/view"])
+        self.assertEqual([x[1] for x in self.fake.blobs()], [f"/api/media/blob/{shot}/view"])
+        i = [x[:2] for x in self.fake.seen]
+        self.assertLess(i.index(("DELETE", f"/api/media/blob/{shot}/view")),
+                        [n for n, x in enumerate(self.fake.seen) if x[0] == "PUT"][0])
 
 
 class ScanExtraTest(Base):
@@ -397,6 +480,18 @@ class ScanExtraTest(Base):
             im = Image.open(os.path.join(d, f))
             self.assertEqual(im.info.get("icc_profile"), icc, f"{f} lost its colour profile")
             self.assertEqual(len(im.getexif()), 0, f"{f} kept EXIF")
+
+    def test_stale_meta_is_rederived(self):
+        m, _ = self.scan()
+        mj = os.path.join(self.home, "media", m["media"][0]["sha256"], "meta.json")
+        meta = json.load(open(mj))
+        self.assertEqual(meta["derive_version"], media.DERIVE_VERSION)
+        del meta["derive_version"]                    # a copy from before DERIVE_VERSION existed
+        json.dump(meta, open(mj, "w"))
+        with mock.patch.object(media, "derive_image", wraps=media.derive_image) as d:
+            self.scan()
+        self.assertEqual(d.call_count, 1, "only the stale item is derived again")
+        self.assertEqual(json.load(open(mj))["derive_version"], media.DERIVE_VERSION)
 
     def test_heic(self):
         try:
@@ -442,6 +537,42 @@ class VideoTest(Base):
         d = os.path.join(self.home, "media", by["vault:a.md#tall.mp4"]["sha256"])
         vs = media.probe_video(os.path.join(d, "view.mp4"))["streams"][0]
         self.assertEqual((vs["width"], vs["height"]), (960, 720))
+
+    def clip(self, name, size, pix_fmt, codec="libx264"):
+        v = os.path.join(self.vault, name)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc=size={size}:rate=5",
+                        "-t", "1", "-c:v", codec, "-pix_fmt", pix_fmt, v], check=True)
+        with open(os.path.join(self.vault, "a.md"), "a") as fh:
+            fh.write(f"\n![[{name}]]\n")
+        return v
+
+    def view_stream(self, name):
+        _, by = self.scan()
+        d = os.path.join(self.home, "media", by[f"vault:a.md#{name}"]["sha256"])
+        return media.probe_video(os.path.join(d, "view.mp4"))["streams"][0]
+
+    def test_odd_height_reencodes(self):
+        # 640x479 used to fail: "height not divisible by 2"
+        self.clip("odd.mov", "640x479", "yuv444p")
+        vs = self.view_stream("odd.mov")
+        self.assertEqual((vs["width"] % 2, vs["height"] % 2, vs["pix_fmt"]), (0, 0, "yuv420p"))
+        self.assertEqual(vs["height"], 478)
+
+    def test_yuv444_h264_is_reencoded(self):
+        # ≤720p H.264 mp4, but 4:4:4 —— browsers cannot play it, so no fast re-mux
+        self.clip("full.mp4", "320x240", "yuv444p")
+        self.assertEqual(self.view_stream("full.mp4")["pix_fmt"], "yuv420p")
+
+    def test_remux_over_view_cap_is_reencoded(self):
+        self.clip("small.mp4", "320x240", "yuv420p")
+        cmds = []
+        real = media.run
+        with mock.patch.object(media, "run", lambda c, **kw: cmds.append(c) or real(c, **kw)), \
+                mock.patch.dict(media.CAP, {"view": 10}):
+            self.view_stream("small.mp4")
+        enc = [c for c in cmds if c[0] == "ffmpeg" and "small.mp4" in c[c.index("-i") + 1]]
+        self.assertIn("copy", enc[-2], "the re-mux was tried first")
+        self.assertIn("libx264", enc[-1], "then re-encoded because the re-mux was over the cap")
 
 
 if __name__ == "__main__":

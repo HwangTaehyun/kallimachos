@@ -59,8 +59,14 @@ basis.
 | `tesseract` with `kor` and `eng` data | OCR text and `ocr` links | no OCR links (falls back to `eng` when `kor` is missing) |
 | `pillow-heif` (a declared dependency) | HEIC/HEIF thumbnails and view copies | `.heic` files are skipped with a warning |
 
-An H.264 mp4 that is already ≤ 720p is only re-muxed, which is fast. Anything taller, and any
-re-mux that would exceed the view cap, is re-encoded to ≤ 720p.
+An H.264 `.mp4` or `.m4v` that is already ≤ 720p and 8-bit 4:2:0 (`yuv420p`) is only re-muxed,
+which is fast and keeps the source audio codec as it is. Anything taller, 4:4:4 or 10-bit H.264
+(browsers cannot play those), and any re-mux that would exceed the view cap, is re-encoded to
+≤ 720p H.264 with AAC audio. Odd heights are rounded down to an even number.
+
+Derived copies (thumbnails and view copies) are cached in `~/.kal/media/<sha256>/` and stamped
+with `DERIVE_VERSION`. When an upgrade changes how they are made, the old copies are derived
+again automatically on the next scan, and the next push replaces them on the server.
 
 ## What `push` sends
 
@@ -71,9 +77,22 @@ is dropped from the uploaded manifest.
 
 - The manifest's size (server limit 16 MiB) is checked **before** any file is uploaded. If it is
   too big, push stops and tells you how many items or how much OCR text to cut.
-- If the server refuses one file (400, 413 or 415), push skips it and continues. Network errors
-  and 401, 402 and 5xx responses stop the run.
-- Files the server already has are not sent again.
+- Your storage quota is checked **before** any file is uploaded, too. Push asks the server what it
+  already holds, adds up only what this push would add, and stops if that goes over the quota. It
+  tells you how much is over and how to make room: `--prune`, or `media_orig` off. If the server
+  answers 507 (quota full) during the upload anyway, push stops the same way and does not replace
+  the manifest.
+- **Per-file responses:** 400, 413 (the file is over its limit) and 415. Push skips that one file
+  with a warning and continues. **Any other error response stops the run**, including 401, 402,
+  410, 411, 507 and 5xx, as do network errors.
+- Files the server already has are not sent again. The exception is a thumbnail or view copy that
+  the server holds at a different size (it was derived again after an upgrade). Push deletes the
+  server's copy and uploads the new one. An original is identified by its content and is never
+  replaced.
+- An older server without the usage endpoint gets no quota check and no multi-device warning, and
+  `--prune` stops with a message.
+- The server allows 30 minutes per upload. A 1 GiB original needs a steady upload speed of about
+  0.6 MB/s to finish in time. On a slow connection, set `media_orig` off.
 
 ### One device per account
 
@@ -82,8 +101,13 @@ to the same account, the web view shows only the items from the device that push
 other device's files stay on the server and keep counting toward your storage. When the server
 holds items that this device does not list, push warns you before it replaces the manifest.
 
-`--prune` deletes every server file that the newly uploaded manifest does not list. It runs only
-after the manifest upload succeeds. Without the flag, push never deletes anything.
+`--prune` deletes every server file that the server has a record of and that the newly uploaded
+manifest does not list. It runs after the manifest upload succeeds, unless the quota check needs
+the room first. Then it runs before the upload. Without the flag, push never deletes anything. With
+`media_orig` off, push prints a line saying that the originals you uploaded earlier will be deleted.
+
+**Treat the push token like a password.** Anyone who has it can upload to your account, and with
+`--prune` or a direct DELETE they can delete your media.
 
 ## Privacy
 
