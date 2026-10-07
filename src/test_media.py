@@ -622,6 +622,18 @@ class PushTest(Base):
         self.assertEqual(item["docs"], [])
         self.assertFalse([l for l in item["links"] if l.get("doc")], "the long-path note must not appear as provenance")
 
+    def test_embed_ignores_its_own_markup(self):
+        # Real-vault run 2026-10-08: the extractor made entities of the embedded file name and folder; the
+        # section text contains them only inside ![[...]], so every picture linked to its own file name.
+        rows = [{"name": "shot.png", "name_norm": "shot.png", "type": "artifact", "doc_ids": [1], "degree": 2},
+                {"name": "assets/", "name_norm": "assets/", "type": "artifact", "doc_ids": [1], "degree": 2},
+                {"name": "Redis", "name_norm": "redis", "type": "tool", "doc_ids": [1], "degree": 3}]
+        ents = media.Entities(rows, {"n.md": (1, False)})
+        rec = {"embeds": [("n.md", "# Cache\nRedis holds it.\n![[assets/shot.png]]\n![x](assets/shot.png)\n", "assets/shot.png")],
+               "notes": [], "dir": None}
+        links, _ = media.build_links(rec, {"ocr": ""}, "/v/assets/shot.png", ents, [])
+        self.assertEqual(set(links), {"redis"}, links)
+
     def test_numbers_the_server_cannot_read(self):
         base = {"version": 1, "media": [{"sha256": "a" * 64, "kind": "image", "mime": "image/png", "bytes": 1,
                                           "source": "dir:x/a.png", "variants": ["thumb"], "links": [], "docs": []}]}

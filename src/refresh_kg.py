@@ -164,10 +164,12 @@ def main():
     #  `--aliases-only` is **a different step** in status.py (`apply_aliases`).
     #  Recording it under the same name would leave that row on screen permanently empty.
     with record("apply_aliases" if a.aliases_only else "refresh_kg"):
-        return _do_refresh(a)
+        return _do_refresh(a, db, latest)
 
 
-def _do_refresh(a):
+def _do_refresh(a, db, latest):
+    #  db · latest come from main() —— they were read here as free names and every refresh that got past
+    #  the build died with NameError at the final report (2026-10-08).
     t0 = time.time()
     if a.aliases_only:
         # Aliases are applied by build_canon, and **both** lr_extract and schema_v3 call it.

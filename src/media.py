@@ -573,7 +573,10 @@ def build_links(rec, meta, path, ents, private=()):
                 add(k, nm, ty, "manual", note)
     for note, section, _ref in rec["embeds"]:
         docs.append(note)
-        low = section.lower()
+        #  Match against the prose only: the embed markup itself carries file names and paths, and on a real graph the
+        #  extractor had made entities of exactly those ("storage-whiteboard.png", "raw/media/…/"), so every picture
+        #  linked to its own file name (2026-10-08, real-vault run).
+        low = EMBED_MD.sub(" ", EMBED_WIKI.sub(" ", section)).lower()
         did = ents.docs.get(note, (None, False))[0]
         for r in ents.by_doc.get(did, []) if did is not None else []:
             if occurs(r["name"], low):

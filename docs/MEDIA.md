@@ -15,7 +15,7 @@ just media-push --prune                   # the same, then delete server files t
 
 ## What gets scanned
 
-1. **Embeds in notes.** `![[file.png]]` and `![alt](relative/path.png)`, resolved the way
+1. **Embeds in notes.** `![[file.png]]` and `![alt](<relative/path.png>)`, resolved the way
    Obsidian does it: relative to the note, then the vault root, then by file name anywhere in
    the vault. URLs and `data:` links are ignored.
 2. **Folders you opt in**, with the config key `media_dirs` in `~/.kal/config.json`. The env var
@@ -162,3 +162,11 @@ this device's files again. Stored files that this device no longer lists stay un
   You can also set the env var `KAL_MEDIA_ORIG=0`. With either one, `orig` is never uploaded and
   never listed. Originals that are already on the server are deleted only when you run
   `push --prune`.
+
+## The cloud copy is for viewing, not a backup
+
+Your device holds the source. The hosted service keeps the uploaded files so you can see them from
+anywhere, but it does **not** back up originals or view copies: if the storage is lost, it is
+refilled by running `just media-push` again from the device. Only the small records (thumbnails,
+the manifest and the usage ledger) are kept in the service's daily backup. Keep your own copy of
+every photo and video — do not delete a file from your device because it is in the cloud.
