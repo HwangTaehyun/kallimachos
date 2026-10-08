@@ -782,6 +782,23 @@ class ScanExtraTest(Base):
             self.scan()
             self.assertEqual(len(calls), n, "a clean result was derived again")
 
+    def test_timeout_retries_are_capped(self):
+        # A file that times out every time is retried RETRIES times, not on every scan forever (round 3).
+        calls, orig = [], media.derive_image
+
+        def always_slow(*a):
+            calls.append(1)
+            media._TIMED_OUT.append("tesseract")
+            return orig(*a)
+        per = []
+        with mock.patch.object(media, "derive_image", always_slow):
+            for _ in range(media.RETRIES + 3):
+                n = len(calls)
+                self.scan()
+                per.append(len(calls) - n)
+        self.assertGreater(per[1], 0, "a timed-out file was not retried")
+        self.assertEqual(per[-1], 0, f"timed-out files were retried on every scan: {per}")
+
     def test_cache_without_tools_record_is_not_rederived(self):
         # Caches from before `tools` existed must not all be re-derived on the first scan after upgrading (round 2).
         _, by = self.scan()

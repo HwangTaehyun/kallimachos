@@ -385,6 +385,7 @@ def have(tool):
 #  Seconds a tool may take on one file.  There was no limit: one pathological file hung the whole scan
 #  (review 2026-10-09).  ffmpeg gets the most —— a long clip's re-encode is legitimately slow.
 TIMEOUT = {"tesseract": 120, "ffprobe": 120, "ffmpeg": 1800}
+RETRIES = 2                     # scans that retry a file whose derivation timed out
 _WARNED = set()                 # one "tool missing" warning per scan, not one per file (cleared by scan())
 _TIMED_OUT = []                 # set by run(); process() marks that file's cache for a retry on the next scan
 
@@ -394,7 +395,8 @@ def run(cmd, **kw):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT.get(cmd[0], 1800), **kw)
     except subprocess.TimeoutExpired:
-        src = cmd[cmd.index("-i") + 1] if "-i" in cmd else cmd[1]       # the input, not the last argument
+        #  the input file: ffmpeg's follows -i, tesseract's is first, ffprobe's is last
+        src = cmd[cmd.index("-i") + 1] if "-i" in cmd else cmd[1] if cmd[0] == "tesseract" else cmd[-1]
         warn(f"{cmd[0]} gave up after {TIMEOUT.get(cmd[0], 1800)}s on {os.path.basename(src)}")
         _TIMED_OUT.append(cmd[0])
         return subprocess.CompletedProcess(cmd, -1, "", "")
@@ -546,10 +548,12 @@ def process(path):
     sha = sha256_of(path)       # ponytail: re-hashes every file each run; cache by (path, size, mtime) if slow
     d = os.path.join(media_dir(), sha)
     mj = os.path.join(d, "meta.json")
+    prev_retries = 0
     if os.path.isfile(mj):
         try:
             with open(mj, encoding="utf-8") as fh:
                 meta = json.load(fh)
+            prev_retries = int(meta.get("retries", 0))
             #  A file derived while a tool was missing (no OCR without tesseract, no view without ffmpeg) was cached
             #  as complete forever, even after the tool was installed (2026-10-09).  `tools` records what was there.
             if "tools" in meta:
@@ -572,8 +576,10 @@ def process(path):
     meta = derive_image(path, d, ext) if ext in IMG_EXT else derive_video(path, d)
     if meta is None:
         return None
-    if _TIMED_OUT:
-        meta["retry"] = True
+    #  Retried on the next scan, at most RETRIES times: a clip that always needs more than the limit must not
+    #  re-encode for 30 minutes on every scan forever (round 3).
+    if _TIMED_OUT and prev_retries < RETRIES:
+        meta["retry"], meta["retries"] = True, prev_retries + 1
     meta["tools"] = [t for t in TOOLS[meta["kind"]] if have(t)]
     shutil.copyfile(path, os.path.join(d, "orig" + ext))
     files = {}
