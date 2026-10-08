@@ -378,7 +378,13 @@ func TestStartRunRefusesRepoStepWithoutRepo(t *testing.T) {
 	mk := func(src string) *Server {
 		//  Case ② deliberately passes the guard, which starts a real run —— give it a runs/
 		//  directory so the background writer does not fail against a temp dir it does not own.
-		home := t.TempDir()
+		//  Not t.TempDir: that run's writer outlives the test and races the cleanup ("unlinkat …/runs: directory not
+		//  empty", CI 2026-10-09).  The leftover is best-effort removed.
+		home, err := os.MkdirTemp("", "kal-run-home-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(home) })
 		if err := os.MkdirAll(filepath.Join(home, "runs"), 0o755); err != nil {
 			t.Fatal(err)
 		}
