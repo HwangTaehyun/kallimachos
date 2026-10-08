@@ -35,7 +35,7 @@ re-run from where when something changes**.
    ┌─ reading ────────────────────────────────────────────────┐
    │  kal_search.py       a person, at the CLI                 │
    │  /kal-search skill    Claude, through the CLI             │
-   │  kal_mcp.py          Claude, **directly over MCP**  ← 6 tools │
+   │  kal_mcp.py          Claude, **directly over MCP**  ← 7 tools │
    └──────────────────────────────────────────────────────────┘
 ```
 

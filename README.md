@@ -137,7 +137,7 @@ The decision note and the **conversation where the decision actually happened** 
 |---|---|---|
 | Index · hybrid search · CLI | Prebuilt image on GHCR (`docker pull`) | Multi-vault comparison |
 | Entity/relation extraction via your `claude` CLI | | Graph-aware note suggestions |
-| Claude Code **MCP plugin** (6 tools, containerised) | | |
+| Claude Code **MCP plugin** (7 tools, containerised) | | |
 | Hosted remote MCP at [kallimachos.dev](https://kallimachos.dev) | | |
 | Obsidian **galaxy view** plugin + web build | | |
 | Local web UI (Docker) | | |
@@ -295,6 +295,7 @@ KAL_VAULT=$PWD/docs/demo-vault KAL_HOME=/tmp/kal-demo .venv/bin/python src/kal_s
 | `kal_neighbors(name, min_degree?, limit?)` | One hop of the graph around an entity — the connected names and the relation text. | **20 relations, hard.** `neighbor_total` says how many exist |
 | `kal_doc(doc_id, max_chars?)` | Verify a citation — the original document. | `max_chars` 200–20,000, default 4,000 |
 | `kal_stats()` | What the graph holds: documents by source and by agent, date range, entities by type, and how old the index is. Call it first if you have not used kal before. | counts only |
+| `kal_media(sha256)` | Look at a photo or video linked to an entity — `kal_entity` lists them under `media`, each with why it is linked. Returns the picture itself (a video's poster frame) plus its metadata. | one thumbnail |
 
 `kal_search` takes a **ranking mode**, and which one you pick changes what comes back:
 
@@ -323,7 +324,7 @@ tells you what is beyond it.
 Every entity/relation response carries its sources (`docs` — path, title, date). External references (`refs`) ride when the entity has any that resolve; `refs_status` says `none`, `unresolved` or `ok`, and `refs_unresolved` counts the ones recorded but not resolvable, which are omitted rather than handed over as dead citations. `kal_search` and `kal_doc` return `docs` but not `refs`. One rule for time arguments: `as_of` = the **state** at a moment; `since`/`until` = the **list of changes** in a range.
 
 ```bash
-python src/kal_mcp.py --selftest    # exercises all 6 tools + boundary checks
+python src/kal_mcp.py --selftest    # exercises all 7 tools + boundary checks
 ```
 
 > ⚠ **The installed plugin serves a pinned image, not your working tree.** `claude plugin
@@ -367,6 +368,7 @@ Entities are **grouped into topics** automatically: Louvain community detection 
 - **Hybrid retrieval** — BM25, chunk vectors, entity vectors and relation vectors fused with weights measured against 991 judged pairs ([methodology](docs/HYBRID_METHODOLOGY.md), including its honest limits).
 - **stdio only** — the MCP server never opens a network listener ([`docs/STACK.md`](docs/STACK.md) §7 explains why that boundary exists).
 - **Incremental** — `just run sync` re-indexes only changed documents in seconds; `just status` knows what's stale.
+- **Photos and videos per entity** — pictures and videos embedded in your notes (or in folders you choose) are linked to the entities they show, each link with its reason: you tagged it, it sits in the section that names the entity, or the name is written in the picture. Linking runs on your machine; `just media` scans, `just media-push` uploads to the hosted service, and `kal_media` hands Claude the picture itself ([`docs/MEDIA.md`](docs/MEDIA.md)).
 
 ## Bringing your own knowledge in
 
@@ -427,7 +429,7 @@ Everything, unless you say otherwise. Two steps can send note content off your m
 - `KAL_NO_LLM=Private:work/Finance` blocks whole folders, matched as path components from the vault root. Since 2026-09-05 the path rule is resolved **at index time** into the same `no_llm` mark the frontmatter sets, so the local MCP, `just push` and the remote MCP all honour it —— before that only extraction did (an index built earlier needs `just run index` or a sync to pick it up).
 - The optional [hosted service](https://kallimachos.dev) exists for people who want the same graph on every device; the self-hosted pipeline is complete without it.
 
-  What actually differs — the tools are the same six either way:
+  What actually differs — the tools are the same seven either way:
 
   | | Self-host | Hosted |
   |---|---|---|
@@ -492,6 +494,7 @@ What the relay will not do:
 | [`docs/OPENWIKI-PIPELINE.md`](docs/OPENWIKI-PIPELINE.md) | Sessions **and** any Markdown tree → an OKF bundle → the DB |
 | [`docs/PIPELINE.md`](docs/PIPELINE.md) | Steps 1–7, caches, what to re-run when |
 | [`docs/ERD.md`](docs/ERD.md) | Schema, key design, integrity constraints |
+| [`docs/MEDIA.md`](docs/MEDIA.md) | Photos and videos per entity — what is scanned, how links are made, what `push` sends, privacy |
 | [`docs/HYBRID_METHODOLOGY.md`](docs/HYBRID_METHODOLOGY.md) | How search quality was measured — and its limits |
 | [`docs/CONNECTING-AGENTS.md`](docs/CONNECTING-AGENTS.md) | Hooking the graph to Buzz, Hermes and other MCP clients — also `kal login`/`kal sync`, its "Install and sync on each device" section |
 | [`docs/DOCKER-SETUP.md`](docs/DOCKER-SETUP.md) | Container setup in order — .env, the relay, changing the vault, what breaks |

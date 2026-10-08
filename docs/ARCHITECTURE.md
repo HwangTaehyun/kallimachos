@@ -68,7 +68,7 @@ node "docker compose" {
 node "host (macOS)" {
   component "claude-relay\n<<Python · 127.0.0.1:8791>>\nstands in for claude -p" as RELAY
   component "just / CLI\n<<Python>>\nthe same code without a container" as CLI
-  component "kal-mcp\n<<Python · stdio>>\n6 tools · no network listener" as MCP
+  component "kal-mcp\n<<Python · stdio>>\n7 tools · no network listener" as MCP
   database "LanceDB\n~/.kal/db · 8 tables" as LANCE
   folder "vault\n376 markdown documents" as VAULT
   folder "cache\nlr_cache.jsonl · lr_kg.json" as CACHE

@@ -337,7 +337,7 @@ Any other harness passes those strings literally and `docker run` dies:
 
 ### Checking that it connected
 
-`just mcp-test` actually calls all six read-only tools by default; four extraction tools only
+`just mcp-test` actually calls all seven read-only tools by default; four extraction tools only
 when `KAL_MCP_WRITE=1` on a host stdio server (see `skills/kal-extract`) — it needs a real vault
 (`kal_doc` reads a document). On Claude Code, `claude mcp list` should show kal as ✔ Connected. Pasting the app's
 Claude Code line runs `claude mcp add … --header "Authorization: Bearer $KAL_CLOUD_TOKEN"`; while
