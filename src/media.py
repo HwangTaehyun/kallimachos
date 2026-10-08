@@ -386,6 +386,7 @@ def have(tool):
 #  (review 2026-10-09).  ffmpeg gets the most —— a long clip's re-encode is legitimately slow.
 TIMEOUT = {"tesseract": 120, "ffprobe": 120, "ffmpeg": 1800}
 _WARNED = set()                 # one "tool missing" warning per scan, not one per file (cleared by scan())
+_TIMED_OUT = []                 # set by run(); process() marks that file's cache for a retry on the next scan
 
 
 def run(cmd, **kw):
@@ -393,7 +394,9 @@ def run(cmd, **kw):
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT.get(cmd[0], 1800), **kw)
     except subprocess.TimeoutExpired:
-        warn(f"{cmd[0]} gave up after {TIMEOUT.get(cmd[0], 1800)}s on {os.path.basename(cmd[-1])}")
+        src = cmd[cmd.index("-i") + 1] if "-i" in cmd else cmd[1]       # the input, not the last argument
+        warn(f"{cmd[0]} gave up after {TIMEOUT.get(cmd[0], 1800)}s on {os.path.basename(src)}")
+        _TIMED_OUT.append(cmd[0])
         return subprocess.CompletedProcess(cmd, -1, "", "")
 
 
@@ -480,8 +483,11 @@ def derive_image(path, out_dir, ext):
         v.save(os.path.join(out_dir, "view.jpg"), "JPEG", quality=85, icc_profile=icc)
     #  OCR reads the derived JPEG when there is one: tesseract cannot open HEIC (rc 1, measured 2026-10-09), so
     #  every iPhone photo silently got no OCR links.  The view is also upright (EXIF rotation applied).
+    #  Only for HEIC/HEIF —— the view is ≤2048 px, and a 5K screenshot scaled to 0.4× drops UI text below what
+    #  tesseract reads (review round 2).  Every other format is read at full resolution as before.
     view = os.path.join(out_dir, "view.jpg")
-    meta["ocr"] = ocr_text(view if os.path.isfile(view) else path)
+    use_view = ext in (".heic", ".heif") and os.path.isfile(view)
+    meta["ocr"] = ocr_text(view if use_view else path)
     return meta
 
 
@@ -546,17 +552,28 @@ def process(path):
                 meta = json.load(fh)
             #  A file derived while a tool was missing (no OCR without tesseract, no view without ffmpeg) was cached
             #  as complete forever, even after the tool was installed (2026-10-09).  `tools` records what was there.
-            later = [t for t in TOOLS[meta.get("kind")] if t not in meta.get("tools", []) and have(t)]
-            if (meta.get("derive_version") == DERIVE_VERSION and not later
+            if "tools" in meta:
+                later = [t for t in TOOLS[meta.get("kind")] if t not in meta["tools"] and have(t)]
+            else:
+                #  Caches from before `tools` existed: assume the tools were there, except where the cache itself shows
+                #  one missing (a video with no view copy).  Treating every old item as "missing everything" re-ran OCR on
+                #  every image and re-encoded every video on the first scan after upgrading (review round 2).
+                later = ["ffmpeg"] if (meta.get("kind") == "video" and "view" not in meta.get("files", {})
+                                       and have("ffmpeg")) else []
+            #  A timeout is not a verdict: the tool was present, so `tools` alone would cache the gap forever (round 2).
+            if (meta.get("derive_version") == DERIVE_VERSION and not later and not meta.get("retry")
                     and all(os.path.isfile(os.path.join(d, f)) for f in meta["files"].values())):
                 return meta
         except (OSError, ValueError, KeyError):
             pass
     shutil.rmtree(d, ignore_errors=True)        # no stale copy from an older derivation may be picked up below
     os.makedirs(d, exist_ok=True)
+    _TIMED_OUT.clear()
     meta = derive_image(path, d, ext) if ext in IMG_EXT else derive_video(path, d)
     if meta is None:
         return None
+    if _TIMED_OUT:
+        meta["retry"] = True
     meta["tools"] = [t for t in TOOLS[meta["kind"]] if have(t)]
     shutil.copyfile(path, os.path.join(d, "orig" + ext))
     files = {}

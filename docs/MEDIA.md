@@ -82,11 +82,13 @@ exceed the view cap, is re-encoded to ≤ 720p H.264 with AAC audio. Odd heights
 to an even number. 10-bit and HDR video is converted to 8-bit without tone mapping, so its
 colours may look flat.
 
-OCR reads the derived JPEG view copy (≤ 2048 px, upright), not the original: tesseract cannot
-open HEIC, so iPhone photos would otherwise get no OCR text. Each tool run has a time limit
-(tesseract and ffprobe 120 s, ffmpeg 30 min); a run that hits it counts as that file's failure
-and the scan goes on. Every cached item records which of these tools were installed when it was
-derived, and is derived again once a missing one appears.
+OCR reads the original at full resolution, except HEIC/HEIF: tesseract cannot open those, so they
+are read from the derived JPEG view copy (≤ 2048 px, upright). Each tool run has a time limit
+(tesseract and ffprobe 120 s per attempt, ffmpeg 30 min); a run that hits it counts as that file's
+failure, the scan goes on, and the next scan tries that file again. Every cached item records
+which of these tools were installed when it was derived, and is derived again once a missing one
+appears. Items cached before that record existed are kept as they are, except a video with no view
+copy, which is derived again when ffmpeg is now installed.
 
 Derived copies (thumbnails and view copies) are cached in `~/.kal/media/<sha256>/` and stamped
 with `DERIVE_VERSION`. When an upgrade changes how they are made, the old copies are derived

@@ -743,14 +743,58 @@ class ScanExtraTest(Base):
         self.assertEqual(d.call_count, 1, "only the stale item is derived again")
         self.assertEqual(json.load(open(mj))["derive_version"], media.DERIVE_VERSION)
 
-    def test_ocr_reads_the_view_copy(self):
-        # tesseract cannot open HEIC (rc 1, 2026-10-09): OCR must be given the derived view.jpg, not the original
+    def test_ocr_reads_full_resolution_except_heic(self):
+        # The view is <=2048 px: a 5K screenshot scaled to 0.4x drops UI text below what tesseract reads (round 2).
+        # Only HEIC/HEIF, which tesseract cannot open (rc 1, 2026-10-09), goes through the derived view.jpg.
         seen = []
+        heic = None
+        try:
+            import pillow_heif
+            heic = os.path.join(self.vault, "phone.heic")
+            pillow_heif.from_pillow(Image.new("RGB", (64, 48), "orange")).save(heic)
+            with open(os.path.join(self.vault, "a.md"), "a") as fh:
+                fh.write("\n![[phone.heic]]\n")
+        except Exception:
+            heic = None
         with mock.patch.object(media, "ocr_text", lambda p: seen.append(p) or ""):
             _, by = self.scan()
-        d = os.path.join(self.home, "media", by["vault:a.md#shot.jpg"]["sha256"])
-        self.assertIn(os.path.join(d, "view.jpg"), seen)
-        self.assertFalse([p for p in seen if p.startswith(self.vault)], "an original was handed to OCR")
+        self.assertIn(os.path.join(self.vault, "shot.jpg"), seen, "a JPEG must be read at full resolution")
+        if heic:
+            d = os.path.join(self.home, "media", by["vault:a.md#phone.heic"]["sha256"])
+            self.assertIn(os.path.join(d, "view.jpg"), seen)
+            self.assertNotIn(heic, seen, "a HEIC original was handed to tesseract")
+
+    def test_timed_out_derivation_is_retried(self):
+        # A timeout is not a verdict: the tool was there, so `tools` alone cached the gap forever (round 2).
+        calls, orig = [], media.derive_image
+
+        def slow(*a):
+            calls.append(1)
+            if len(calls) == 1:
+                media._TIMED_OUT.append("tesseract")
+            return orig(*a)
+        with mock.patch.object(media, "derive_image", slow):
+            self.scan()
+            n = len(calls)
+            self.scan()
+            self.assertGreater(len(calls), n, "a timed-out file was not derived again")
+            n = len(calls)
+            self.scan()
+            self.assertEqual(len(calls), n, "a clean result was derived again")
+
+    def test_cache_without_tools_record_is_not_rederived(self):
+        # Caches from before `tools` existed must not all be re-derived on the first scan after upgrading (round 2).
+        _, by = self.scan()
+        mj = os.path.join(self.home, "media", by["vault:a.md#shot.jpg"]["sha256"], "meta.json")
+        with open(mj) as fh:
+            meta = json.load(fh)
+        meta.pop("tools", None)
+        with open(mj, "w") as fh:
+            json.dump(meta, fh)
+        calls = []
+        with mock.patch.object(media, "derive_image", lambda *a: calls.append(1)):
+            self.scan()
+        self.assertEqual(calls, [], "an old cache entry was re-derived")
 
     @unittest.skipUnless(shutil.which("tesseract"), "tesseract not installed")
     def test_heic_gets_ocr_text(self):

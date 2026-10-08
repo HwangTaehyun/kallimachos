@@ -321,13 +321,13 @@ Any other harness passes those strings literally and `docker run` dies:
 |---|---|
 | `${user_config.vault_dir}` | absolute path to your notes folder |
 | `${user_config.kal_dir}` | the knowledge DB folder (usually `~/.kal`) |
+| `${user_config.run_as}` | `id -u`:`id -g` (e.g. `501:20`) |
 
 `.mcp.json` mounts `<kal_dir>/db` and `<kal_dir>/media` read-only. When `<kal_dir>/media` does not
 exist yet, `docker run -v` creates it ([Docker docs, bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)):
 on Docker Desktop it belongs to you, but **on Linux it belongs to root**, and a later `just media`
 cannot write into it (it stops and prints the `chown` that fixes it). Run `mkdir -p ~/.kal/media`
 before the first start to avoid that.
-| `${user_config.run_as}` | `id -u`:`id -g` (e.g. `501:20`) |
 
 ---
 
