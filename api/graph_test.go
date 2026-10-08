@@ -540,7 +540,13 @@ func TestVaultGuardTellsFailureFromEmptiness(t *testing.T) {
 		t.Fatalf("the project venv is missing (%v) —— run `uv sync`", err)
 	}
 	broken := mk(py)
-	broken.src = t.TempDir() // no schema_v3 here
+	//  A schema_v3 that fails on import —— an empty folder no longer does: `uv sync` installs kal as a
+	//  package, so schema_v3 imported from site-packages and the guard answered "no notes" instead
+	//  (CI 2026-10-08).  A module placed first on sys.path shadows the installed one.
+	broken.src = t.TempDir()
+	if err := os.WriteFile(filepath.Join(broken.src, "schema_v3.py"), []byte("import kal_no_such_module_for_test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	code, body = post(broken)
 	if code != 412 {
 		t.Fatalf("an import failure returned %d, want 412 (%q)", code, body)

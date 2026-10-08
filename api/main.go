@@ -39,6 +39,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 type Step struct {
@@ -160,6 +161,20 @@ var allowedArgs = map[string]map[string]bool{
 }
 
 func validRunID(id string) bool { return runIDRx.MatchString(id) }
+
+// last —— the tail of s, for a Python traceback: the exception line is the last one, so cutting the
+// head (first) dropped exactly the part a person can act on (CI 2026-10-08).  Cut on a rune boundary.
+func last(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= n {
+		return s
+	}
+	i := len(s) - n
+	for i < len(s) && !utf8.RuneStart(s[i]) {
+		i++
+	}
+	return "…" + s[i:]
+}
 
 func first(s string, n int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
@@ -589,7 +604,7 @@ print(indexable_count(sys.argv[1], int(sys.argv[2])))
 	out, err := cmd.Output()
 	if err != nil {
 		return 0, fmt.Errorf("could not ask schema_v3 how many documents are indexable: %w (%s)",
-			err, first(strings.TrimSpace(errb.String()), 300))
+			err, last(strings.TrimSpace(errb.String()), 300))
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
 	if err != nil {
