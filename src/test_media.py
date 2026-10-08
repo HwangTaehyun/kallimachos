@@ -799,6 +799,23 @@ class ScanExtraTest(Base):
         self.assertGreater(per[1], 0, "a timed-out file was not retried")
         self.assertEqual(per[-1], 0, f"timed-out files were retried on every scan: {per}")
 
+    def test_retry_is_per_scan_not_per_path(self):
+        # Three copies of one file must not spend the first attempt and both retries in one scan (Codex round 4).
+        for n in ("dup1.jpg", "dup2.jpg"):
+            shutil.copyfile(os.path.join(self.vault, "shot.jpg"), os.path.join(self.vault, n))
+        with open(os.path.join(self.vault, "a.md"), "a") as fh:
+            fh.write("\n![[dup1.jpg]]\n![[dup2.jpg]]\n")
+        orig = media.derive_image
+
+        def slow(*a):
+            media._TIMED_OUT.append("tesseract")
+            return orig(*a)
+        with mock.patch.object(media, "derive_image", slow):
+            self.scan()
+        sha = media.sha256_of(os.path.join(self.vault, "shot.jpg"))
+        with open(os.path.join(self.home, "media", sha, "meta.json")) as fh:
+            self.assertEqual(json.load(fh).get("retries"), 1)
+
     def test_cache_without_tools_record_is_not_rederived(self):
         # Caches from before `tools` existed must not all be re-derived on the first scan after upgrading (round 2).
         _, by = self.scan()

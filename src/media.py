@@ -388,6 +388,7 @@ TIMEOUT = {"tesseract": 120, "ffprobe": 120, "ffmpeg": 1800}
 RETRIES = 2                     # scans that retry a file whose derivation timed out
 _WARNED = set()                 # one "tool missing" warning per scan, not one per file (cleared by scan())
 _TIMED_OUT = []                 # set by run(); process() marks that file's cache for a retry on the next scan
+_SEEN = set()                   # sha256 derived (or reused) this scan —— the same bytes at three paths are one attempt
 
 
 def run(cmd, **kw):
@@ -565,7 +566,9 @@ def process(path):
                 later = ["ffmpeg"] if (meta.get("kind") == "video" and "view" not in meta.get("files", {})
                                        and have("ffmpeg")) else []
             #  A timeout is not a verdict: the tool was present, so `tools` alone would cache the gap forever (round 2).
-            if (meta.get("derive_version") == DERIVE_VERSION and not later and not meta.get("retry")
+            #  `sha in _SEEN`: a retry is per scan, not per path —— three copies of one file used to spend the first
+            #  attempt and both retries in a single scan (Codex round 4).
+            if (meta.get("derive_version") == DERIVE_VERSION and not later and (not meta.get("retry") or sha in _SEEN)
                     and all(os.path.isfile(os.path.join(d, f)) for f in meta["files"].values())):
                 return meta
         except (OSError, ValueError, KeyError):
@@ -573,6 +576,7 @@ def process(path):
     shutil.rmtree(d, ignore_errors=True)        # no stale copy from an older derivation may be picked up below
     os.makedirs(d, exist_ok=True)
     _TIMED_OUT.clear()
+    _SEEN.add(sha)
     meta = derive_image(path, d, ext) if ext in IMG_EXT else derive_video(path, d)
     if meta is None:
         return None
@@ -656,6 +660,7 @@ def source_of(rec, path, vault):
 
 def scan():
     _WARNED.clear()
+    _SEEN.clear()
     md = media_dir()
     if os.path.isdir(md) and not os.access(md, os.W_OK):
         #  The plugin mounts this folder read-only into its container; on Linux docker creates a missing bind-mount
