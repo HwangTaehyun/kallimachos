@@ -858,7 +858,7 @@ during a read, and what needs blocking is writers colliding with each other.
 
 ### What decides that something is "stale"
 
-A `content_hash` comparison in `diff_vault()` ([`schema_v3.py:920`](../src/schema_v3.py)) ——
+A `content_hash` comparison in `diff_vault()` ([`schema_v3.py:975`](../src/schema_v3.py)) ——
 plus a flipped `no_llm` gate, which changes no text but changes what may leave the machine.
 **Not mtime** — opening and closing a file leaves no mark.
 
@@ -887,7 +887,7 @@ Three things to know:
    ③ a rebuild clears it   the marks it started with —— doc_ids and the KG are both remade,
                         so those are false alarms.  A mark sync_v3 adds mid-rebuild survives,
                         and a note edited since the extraction is marked anew.  With nothing
-                        left, schema_v3.py:1489 does drop_table("stale_docs")
+                        left, schema_v3.py:1679 does drop_table("stale_docs")
 ```
 
 ### Clearing it — `refresh_kg.py`
