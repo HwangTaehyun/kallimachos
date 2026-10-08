@@ -42,8 +42,10 @@ class DistillationFailureTests(unittest.TestCase):
         self.state = self.home / "state"
         self.out = self.state / "distilled"
         self.bundle = self.root / "bundle"
+        self.vault = self.root / "vault"
         (self.state / "sessions").mkdir(parents=True)
         self.bundle.mkdir()
+        self.vault.mkdir()
         self.corpus = self.state / "sessions/session_docs.json"
         self.calls = self.root / "calls.txt"
         self.env = {key: value for key, value in os.environ.items()
@@ -51,6 +53,10 @@ class DistillationFailureTests(unittest.TestCase):
                     and key not in ("PYTHONPATH", "PYTHONHOME", "VAULT_DIR")}
         self.env.update(HOME=str(self.home), KAL_HOME=str(self.state), KAL_DISTILLED=str(self.out),
                         KAL_DEVICE="test-device", FIXTURE_SRC=str(SRC), FIXTURE_CALLS=str(self.calls),
+                        #  The vault is passed explicitly, and it is not the bundle (distill writes .kal-sync/ into
+                        #  the vault).  With KAL_VAULT stripped, vault_path fell back to the developer's kal/.env —
+                        #  their real vault — so these tests passed on a machine with one and failed in CI.
+                        KAL_VAULT=str(self.vault),
                         GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
                         HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
         self.git("init", "-b", "main")
