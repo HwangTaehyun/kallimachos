@@ -286,7 +286,7 @@ Codex         ~/.agents/skills/<name>/SKILL.md          copy or symlink
 
 | Skill | What | Status |
 |---|---|---|
-| `kal-recall` | search and recall (the selection rules for the 6 tools) | exists |
+| `kal-recall` | search and recall (the selection rules for the 6 tools of the time; 7 since `kal_media`, 2026-10-06) | exists |
 | `kal-ingest` | outside documents into the vault | new |
 | `kal-maintain` | pipeline status and refresh | new |
 
@@ -307,7 +307,7 @@ judgement.
 | 2 | multi-arch build and push, `buildx --platform linux/amd64,linux/arm64` | both arch manifests present |
 | 3 | replace `.mcp.json` with §5.1 (keep the host-python form as a comment) | kal healthy in `claude mcp list` |
 | 4 | declare `mcpServers` and `skills` in `plugin.json` + `marketplace.json` | local install succeeds |
-| 5 | Codex `config.toml` example + `.agents/skills` distribution | 6 tools in Codex |
+| 5 | Codex `config.toml` example + `.agents/skills` distribution | 6 tools in Codex (7 today) |
 | 6 | add 2 skills · retire `kal-search` | frontmatter `name` present |
 | 7 | `just dc selftest` · docker-only `just setup` path | self-checks pass in the container |
 | 8 | README install section · update the `justfile:7-8` scope statement | — |

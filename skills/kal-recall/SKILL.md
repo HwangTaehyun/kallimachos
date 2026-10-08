@@ -15,7 +15,7 @@ description: |
 
 ## What it is
 
-Searches a personal knowledge base through the six tools the `kal` MCP server exposes. What
+Searches a personal knowledge base through the seven tools the `kal` MCP server exposes. What
 makes it different from a web search is that **the sources always ride along in the response** —
 you never have to look them up separately in order to cite.
 

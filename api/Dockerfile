@@ -13,7 +13,7 @@
 # The build context is the **repository root** (src/, pyproject.toml, uv.lock and aliases.yml go in too).
 # That is why the Go source paths are prefixed with api/.
 # ── The Go build ──────────────────────────────────────────────────────
-FROM golang:1.25-alpine AS gobuild
+FROM golang:1.26-alpine AS gobuild
 WORKDIR /build
 COPY api/go.mod ./
 RUN go mod download

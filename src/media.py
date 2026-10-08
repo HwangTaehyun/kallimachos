@@ -57,6 +57,7 @@ Push
   A server that lost its records but kept the objects: push uploads and records this device's files again;
   objects this device no longer lists stay unrecorded (so not prunable) until the account is deleted.
 """
+import contextlib
 import datetime
 import hashlib
 import json
@@ -381,8 +382,19 @@ def have(tool):
     return shutil.which(tool) is not None
 
 
+#  Seconds a tool may take on one file.  There was no limit: one pathological file hung the whole scan
+#  (review 2026-10-09).  ffmpeg gets the most —— a long clip's re-encode is legitimately slow.
+TIMEOUT = {"tesseract": 120, "ffprobe": 120, "ffmpeg": 1800}
+_WARNED = set()                 # one "tool missing" warning per scan, not one per file (cleared by scan())
+
+
 def run(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    """A timed-out tool is that file's failure (returncode -1, no output), never a hung scan."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT.get(cmd[0], 1800), **kw)
+    except subprocess.TimeoutExpired:
+        warn(f"{cmd[0]} gave up after {TIMEOUT.get(cmd[0], 1800)}s on {os.path.basename(cmd[-1])}")
+        return subprocess.CompletedProcess(cmd, -1, "", "")
 
 
 def sha256_of(path):
@@ -424,6 +436,10 @@ def write_thumb(im, out, icc=None):
 def ocr_text(path):
     """First 2,000 chars of tesseract output; "" when tesseract is missing or finds nothing."""
     if not have("tesseract"):
+        #  Used to be silent: a scan without tesseract produced 0 OCR links and said nothing (2026-10-09).
+        if "tesseract" not in _WARNED:
+            _WARNED.add("tesseract")
+            warn("tesseract missing —— no OCR text, no ocr links (cached items are re-read once it is installed)")
         return ""
     for lang in ("kor+eng", "eng"):
         r = run(["tesseract", path, "-", "-l", lang])
@@ -462,7 +478,10 @@ def derive_image(path, out_dir, ext):
         if max(v.size) > VIEW_PX:
             v.thumbnail((VIEW_PX, VIEW_PX))
         v.save(os.path.join(out_dir, "view.jpg"), "JPEG", quality=85, icc_profile=icc)
-    meta["ocr"] = ocr_text(path)
+    #  OCR reads the derived JPEG when there is one: tesseract cannot open HEIC (rc 1, measured 2026-10-09), so
+    #  every iPhone photo silently got no OCR links.  The view is also upright (EXIF rotation applied).
+    view = os.path.join(out_dir, "view.jpg")
+    meta["ocr"] = ocr_text(view if os.path.isfile(view) else path)
     return meta
 
 
@@ -481,7 +500,9 @@ def derive_video(path, out_dir):
     with tempfile.TemporaryDirectory() as td:
         poster = os.path.join(td, "poster.png")
         for ss in ("1", "0"):          # a clip shorter than 1s has no frame there
-            run(["ffmpeg", "-v", "error", "-y", "-ss", ss, "-i", path, "-frames:v", "1", poster])
+            if run(["ffmpeg", "-v", "error", "-y", "-ss", ss, "-i", path, "-frames:v", "1", poster]).returncode:
+                with contextlib.suppress(OSError):
+                    os.remove(poster)          # a timed-out run may leave a half-written frame
             if os.path.isfile(poster):
                 break
         if os.path.isfile(poster):
@@ -510,6 +531,9 @@ def derive_video(path, out_dir):
     return meta
 
 
+TOOLS = {"image": ("tesseract",), "video": ("ffprobe", "ffmpeg", "tesseract")}    # what a derivation can use
+
+
 def process(path):
     """Derive (or reuse) the variants of one file → its meta dict (sha256, mime, bytes, variants, …) or None."""
     ext = os.path.splitext(path)[1].lower()
@@ -520,7 +544,10 @@ def process(path):
         try:
             with open(mj, encoding="utf-8") as fh:
                 meta = json.load(fh)
-            if (meta.get("derive_version") == DERIVE_VERSION
+            #  A file derived while a tool was missing (no OCR without tesseract, no view without ffmpeg) was cached
+            #  as complete forever, even after the tool was installed (2026-10-09).  `tools` records what was there.
+            later = [t for t in TOOLS[meta.get("kind")] if t not in meta.get("tools", []) and have(t)]
+            if (meta.get("derive_version") == DERIVE_VERSION and not later
                     and all(os.path.isfile(os.path.join(d, f)) for f in meta["files"].values())):
                 return meta
         except (OSError, ValueError, KeyError):
@@ -530,6 +557,7 @@ def process(path):
     meta = derive_image(path, d, ext) if ext in IMG_EXT else derive_video(path, d)
     if meta is None:
         return None
+    meta["tools"] = [t for t in TOOLS[meta["kind"]] if have(t)]
     shutil.copyfile(path, os.path.join(d, "orig" + ext))
     files = {}
     for v, names in (("thumb", ["thumb.webp"]), ("view", ["view.jpg", "view.gif", "view.mp4"]), ("orig", ["orig" + ext])):
@@ -604,6 +632,13 @@ def source_of(rec, path, vault):
 
 
 def scan():
+    _WARNED.clear()
+    md = media_dir()
+    if os.path.isdir(md) and not os.access(md, os.W_OK):
+        #  The plugin mounts this folder read-only into its container; on Linux docker creates a missing bind-mount
+        #  folder as root, and every derive below would then die on a PermissionError (2026-10-09).
+        sys.exit(f"{md} is not writable (docker creates a missing mounted folder as root on Linux) —— "
+                 f"sudo chown -R $(id -u):$(id -g) {md}")
     vault = vault_path.vault()
     ents_rows, docs = load_graph()
     ents = Entities(ents_rows, docs, load_texts)

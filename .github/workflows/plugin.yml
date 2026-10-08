@@ -52,7 +52,7 @@ jobs:
       #  two lines from 2026-09-04 on, and every check listed after them never ran in CI (implementation
       #  review 2026-09-26, completeness).  The name comes from kal_config —— the
       #  same source the indexer reads —— and the download is cached across runs.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/huggingface
           key: hf-model-${{ hashFiles('src/kal_config.py') }}
@@ -106,7 +106,7 @@ jobs:
           mkdir -p /tmp/emptydb /tmp/emptyvault
           python src/plugin_probe.py --expect-empty --kal /tmp/emptydb --vault /tmp/emptyvault
 
-      # Checks the 6 tools against real data.  It builds a small vault on the spot.
+      # Checks the 7 tools against real data.  It builds a small vault on the spot.
       - name: Index → acceptance test
         run: |
           mkdir -p /tmp/vault/notes /tmp/kal

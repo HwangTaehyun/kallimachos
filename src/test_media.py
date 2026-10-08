@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import media
 from PIL import Image
 
+REAL_OCR = media.ocr_text       # Base mocks it; the tests that need the real one take it from here
 
 def gps_jpeg(path, size=(3000, 2000)):
     im = Image.new("RGB", size, (200, 30, 30))
@@ -84,8 +85,11 @@ class Base(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         for p in (mock.patch.object(media, "load_graph", lambda: (ENTS, DOCS)),
+                  #  OCR is handed the derived view.jpg, not the original (2026-10-09) —— so ocr.png is told by its
+                  #  colour: the only black fixture
                   mock.patch.object(media, "ocr_text",
-                                    lambda path: "fatal: KAL_CLOUD_TOKEN missing" if path.endswith("ocr.png") else "")):
+                                    lambda path: "fatal: KAL_CLOUD_TOKEN missing"
+                                    if Image.open(path).convert("RGB").getpixel((0, 0)) == (0, 0, 0) else "")):
             p.start()
             self.addCleanup(p.stop)
 
@@ -738,6 +742,55 @@ class ScanExtraTest(Base):
             self.scan()
         self.assertEqual(d.call_count, 1, "only the stale item is derived again")
         self.assertEqual(json.load(open(mj))["derive_version"], media.DERIVE_VERSION)
+
+    def test_ocr_reads_the_view_copy(self):
+        # tesseract cannot open HEIC (rc 1, 2026-10-09): OCR must be given the derived view.jpg, not the original
+        seen = []
+        with mock.patch.object(media, "ocr_text", lambda p: seen.append(p) or ""):
+            _, by = self.scan()
+        d = os.path.join(self.home, "media", by["vault:a.md#shot.jpg"]["sha256"])
+        self.assertIn(os.path.join(d, "view.jpg"), seen)
+        self.assertFalse([p for p in seen if p.startswith(self.vault)], "an original was handed to OCR")
+
+    @unittest.skipUnless(shutil.which("tesseract"), "tesseract not installed")
+    def test_heic_gets_ocr_text(self):
+        try:
+            import pillow_heif
+            from PIL import ImageDraw
+            im = Image.new("RGB", (600, 150), "white")
+            ImageDraw.Draw(im).text((10, 50), "KALLIMACHOS LANCEDB", fill="black")
+            p = os.path.join(self.vault, "text.heic")
+            pillow_heif.from_pillow(im.resize((1800, 450))).save(p)
+        except Exception as e:
+            self.skipTest(f"cannot write a HEIC fixture: {e}")
+        with open(os.path.join(self.vault, "a.md"), "a") as fh:
+            fh.write("\n![[text.heic]]\n")
+        with mock.patch.object(media, "ocr_text", REAL_OCR):
+            _, by = self.scan()
+        self.assertIn("LANCEDB", by["vault:a.md#text.heic"]["ocr"].upper())
+
+    def test_missing_tesseract_warns_once_and_is_retried(self):
+        have = media.have
+        with mock.patch.object(media, "ocr_text", REAL_OCR), \
+                mock.patch.object(media, "have", lambda t: t != "tesseract" and have(t)), \
+                mock.patch("sys.stderr", new=__import__("io").StringIO()) as err:
+            self.scan()
+        self.assertEqual(err.getvalue().count("tesseract missing"), 1, err.getvalue())
+        # installed later: what was derived without it is derived again (and only that)
+        with mock.patch.object(media, "have", lambda t: t == "tesseract" or have(t)), \
+                mock.patch.object(media, "derive_image", wraps=media.derive_image) as d:
+            self.scan()
+        self.assertEqual(d.call_count, 3)
+        with mock.patch.object(media, "have", lambda t: t == "tesseract" or have(t)), \
+                mock.patch.object(media, "derive_image", side_effect=AssertionError("re-derived")):
+            self.scan()
+
+    def test_tool_timeout_is_that_files_failure(self):
+        with mock.patch.dict(media.TIMEOUT, {"sleep": 0.2}), \
+                mock.patch("sys.stderr", new=__import__("io").StringIO()) as err:
+            r = media.run(["sleep", "5"])
+        self.assertEqual((r.returncode, r.stdout), (-1, ""))
+        self.assertIn("gave up", err.getvalue())
 
     def test_heic(self):
         try:

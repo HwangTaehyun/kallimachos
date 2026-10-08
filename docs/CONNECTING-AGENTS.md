@@ -1,6 +1,6 @@
 # Connecting to agent runtimes — Buzz · Hermes · others
 
-kal is an **MCP server**. It exposes six read-only tools by default; four extraction tools only
+kal is an **MCP server**. It exposes seven read-only tools by default; four extraction tools only
 when `KAL_MCP_WRITE=1` on a host stdio server (see `skills/kal-extract`):
 
 | Tool | What |
@@ -11,9 +11,10 @@ when `KAL_MCP_WRITE=1` on a host stdio server (see `skills/kal-extract`):
 | `kal_neighbors` | one hop in the graph |
 | `kal_doc` | citation verification — the source text |
 | `kal_stats` | what the graph holds — sources, agents, date range, types, index age |
+| `kal_media` | one thumbnail of a photo, or a video's poster frame, linked to an entity (`sha256` from `kal_entity`'s `media`) |
 
-`kal_stats` arrives with 0.2.0. Images built from v0.1.2 or earlier source expose only the first
-five. Go by the source, not the tag: the README builds whatever you have checked out and tags it
+`kal_stats` and `kal_media` arrive with 0.2.0. Images built from v0.1.2 or earlier source expose
+only the first five. Go by the source, not the tag: the README builds whatever you have checked out and tags it
 with the manifest's version.
 
 ### The four write tools — local stdio only, opt-in
@@ -320,6 +321,12 @@ Any other harness passes those strings literally and `docker run` dies:
 |---|---|
 | `${user_config.vault_dir}` | absolute path to your notes folder |
 | `${user_config.kal_dir}` | the knowledge DB folder (usually `~/.kal`) |
+
+`.mcp.json` mounts `<kal_dir>/db` and `<kal_dir>/media` read-only. When `<kal_dir>/media` does not
+exist yet, `docker run -v` creates it ([Docker docs, bind mounts](https://docs.docker.com/engine/storage/bind-mounts/)):
+on Docker Desktop it belongs to you, but **on Linux it belongs to root**, and a later `just media`
+cannot write into it (it stops and prints the `chown` that fixes it). Run `mkdir -p ~/.kal/media`
+before the first start to avoid that.
 | `${user_config.run_as}` | `id -u`:`id -g` (e.g. `501:20`) |
 
 ---

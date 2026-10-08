@@ -218,6 +218,7 @@ docker run --rm --user $(id -u):$(id -g) -v ~/.kal:/data -v /path/to/vault:/vaul
   ghcr.io/hwangtaehyun/kal:$KAL_VER src/schema_v3.py      # index again to pick them up
 
 # 5. Register and install the plugin — paths are yours, so they are asked for
+mkdir -p ~/.kal/media     # mounted read-only; on Linux docker would create a missing one as root
 claude plugin marketplace add /path/to/kal
 claude plugin install kal@kallimachos \
   --config vault_dir=/path/to/vault \

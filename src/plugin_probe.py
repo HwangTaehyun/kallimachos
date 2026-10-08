@@ -58,7 +58,10 @@ def docker_args(image, kal_dir, vault_dir, hardened=True):
         a += ["--network", "none", "--read-only",
               "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
               "--tmpfs", "/tmp"]
+    #  media: kal_media reads $KAL_HOME/media (= /data/media here).  Only db was mounted, so the plugin's
+    #  kal_entity listed no media and kal_media found none (review 2026-10-09).
     a += ["-v", f"{kal_dir}/db:/data/db:ro",
+          "-v", f"{kal_dir}/media:/data/media:ro",
           "-v", f"{vault_dir}:/vault:ro",
           image]
     return a
@@ -347,8 +350,15 @@ def _selftest():
     #     Passing with looser flags leaves it green while the real install breaks.
     a = " ".join(docker_args("img", "/k", "/v"))
     for need in ("--network none", "--read-only", "--cap-drop ALL",
-                 "no-new-privileges", "/k/db:/data/db:ro", "/v:/vault:ro"):
+                 "no-new-privileges", "/k/db:/data/db:ro", "/k/media:/data/media:ro", "/v:/vault:ro"):
         assert need in a, f"the probe does not use `{need}` —— it has diverged from .mcp.json"
+    #     …and every mount `.mcp.json` really makes is one the probe makes too (the list above is hand-kept).
+    _ma = json.load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".mcp.json"),
+                         encoding="utf-8"))["mcpServers"]["kal"]["args"]
+    for _i, _x in enumerate(_ma[:-1]):
+        if _x == "-v":
+            _m = _ma[_i + 1].replace("${user_config.kal_dir}", "/k").replace("${user_config.vault_dir}", "/v")
+            assert _m in a, f"`.mcp.json` mounts `{_m}` and the probe does not —— they have diverged"
 
     #  ⑥ does the manifest-drift judgement itself run (against the repository's current state)
     assert manifest_drift() == [], f"the repository is already divergent: {manifest_drift()}"

@@ -72,7 +72,7 @@ are not affected.
 | tool | what it adds | without it |
 |------|--------------|------------|
 | `ffmpeg` + `ffprobe` | video thumbnail and a ≤ 720p H.264 view copy | the video goes up as the original only |
-| `tesseract` with `kor` and `eng` data | OCR text and `ocr` links | no OCR links (falls back to `eng` when `kor` is missing) |
+| `tesseract` with `kor` and `eng` data | OCR text and `ocr` links | no OCR links, with one warning per scan (falls back to `eng` when `kor` is missing) |
 | `pillow-heif` (a declared dependency) | HEIC/HEIF thumbnails and view copies | `.heic` files are skipped with a warning |
 
 An H.264 `.mp4` or `.m4v` that is already ≤ 720p and 8-bit 4:2:0 (`yuv420p`), with AAC or MP3
@@ -81,6 +81,12 @@ in any other codec such as PCM or Opus (browsers cannot play those), and any re-
 exceed the view cap, is re-encoded to ≤ 720p H.264 with AAC audio. Odd heights are rounded down
 to an even number. 10-bit and HDR video is converted to 8-bit without tone mapping, so its
 colours may look flat.
+
+OCR reads the derived JPEG view copy (≤ 2048 px, upright), not the original: tesseract cannot
+open HEIC, so iPhone photos would otherwise get no OCR text. Each tool run has a time limit
+(tesseract and ffprobe 120 s, ffmpeg 30 min); a run that hits it counts as that file's failure
+and the scan goes on. Every cached item records which of these tools were installed when it was
+derived, and is derived again once a missing one appears.
 
 Derived copies (thumbnails and view copies) are cached in `~/.kal/media/<sha256>/` and stamped
 with `DERIVE_VERSION`. When an upgrade changes how they are made, the old copies are derived

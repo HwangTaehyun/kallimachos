@@ -87,11 +87,11 @@ build-kal:
     docker build -t kal:local .
 
 # ★ The acceptance test —— does the plugin **really start**.  It performs a real stdio
-#   handshake with the same hardened flags as `.mcp.json` and checks the 6 tools, the version
+#   handshake with the same hardened flags as `.mcp.json` and checks the 7 tools, the version
 #   and a clean stdout.  Why it is not called `plugin-test`: in this repository "the plugin"
 #   already means `plugin/` (the Obsidian plugin kal-galaxy) —— see `just build-plugin`.
 
-# The acceptance test —— does the container's MCP really start over stdio (6 tools · version · stdout)
+# The acceptance test —— does the container's MCP really start over stdio (7 tools · version · stdout)
 mcp-plugin-test:
     @docker image inspect kal:local >/dev/null 2>&1 || just build-kal
     @{{py}} {{src}}/plugin_probe.py \
@@ -644,7 +644,7 @@ openwiki-plan wiki=openwiki_dir vault=vault_dir:
 homonyms *args:
     @{{py}} {{src}}/homonym_suggest.py {{args}}
 
-# An MCP server check —— it really calls all 6 tools
+# An MCP server check —— it really calls all 7 tools
 mcp-test:
     @#  ⚠ This test reads a document for real through `kal_doc`, **so it needs a real vault**.
     @#     `kal_mcp.py` used to hardcode the author's path as a default, so it passed on that

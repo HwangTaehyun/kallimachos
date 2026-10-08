@@ -1027,8 +1027,11 @@ def _media_manifest():
         try:
             with open(p, encoding="utf-8") as fh:
                 m = json.load(fh)
-            data = {x["sha256"]: x for x in m.get("media", []) if SHA_RE.fullmatch(str(x.get("sha256", "")))}
-        except (OSError, ValueError, AttributeError, KeyError):
+            #  `"media": null` or an item's `"links"` / `"docs"`: null raised TypeError and broke kal_entity and
+            #  kal_media outright (review 2026-10-09).  A null collection reads as an empty one.
+            data = {x["sha256"]: dict(x, links=x.get("links") or [], docs=x.get("docs") or [])
+                    for x in m.get("media") or [] if SHA_RE.fullmatch(str(x.get("sha256", "")))}
+        except (OSError, ValueError, AttributeError, KeyError, TypeError):
             log.warning("media manifest unreadable: %s", p)
             data = {}
         _MEDIA_CACHE.update(mtime=mt, path=p, data=data)

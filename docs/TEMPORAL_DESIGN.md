@@ -305,7 +305,7 @@ neighbors  limit 20 by default · doc_ids only, not docs[]
 > 🔒 **`refs[].url` is unverified user content.**  A model that follows it automatically turns
 > it into a prompt-injection path.  The response carries that warning with it.
 
-### 3.4 The 6 tools
+### 3.4 The 7 tools
 
 | Tool | When | Arguments |
 |---|---|---|
@@ -315,6 +315,7 @@ neighbors  limit 20 by default · doc_ids only, not docs[]
 | `kal_neighbors` | one hop in the graph | `name`, `min_degree?`, `limit=20` |
 | `kal_doc` | citation checking — the source text | **`doc_id` only** (§3.6) |
 | `kal_stats` | what the graph holds and how old the index is (added 2026-09-25) | none |
+| `kal_media` | one thumbnail of a photo, or a video's poster frame, linked to an entity (added 2026-10-06) | `sha256` |
 
 **`as_of` was removed from `kal_search`** —— it was ambiguous between a document-date filter and
 an entity-state filter (§4.5's example queries split across 3 tools), and state belongs to `entity`/`timeline`.
