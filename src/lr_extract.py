@@ -384,11 +384,12 @@ def collect():
         cs += chunks_of(t, rel)
     # Show what leaves the machine every time —— stops a new folder slipping in silently
     tops = collections.Counter(p.split("/")[0] if "/" in p else "(root)" for p in DOC_HASHES)
+    #  stderr: `status --json` calls this, and its stdout must be JSON only
     print(f"  sending to the LLM: {len(DOC_HASHES)} docs · {len(cs)} chunks"
-          + (f" · {len(skipped_llm)} excluded from transmission" if skipped_llm else ""))
-    print("    " + " · ".join(f"{k} {v}" for k, v in tops.most_common()))
+          + (f" · {len(skipped_llm)} excluded from transmission" if skipped_llm else ""), file=sys.stderr)
+    print("    " + " · ".join(f"{k} {v}" for k, v in tops.most_common()), file=sys.stderr)
     for x in skipped_llm[:5]:
-        print(f"    excluded: {x}")
+        print(f"    excluded: {x}", file=sys.stderr)
     return cs
 
 

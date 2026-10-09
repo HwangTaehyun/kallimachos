@@ -707,12 +707,22 @@ push:
     os.chmod(os.path.join(home, "push.json"), 0o600)
     print(f"recorded → {home}/push.json (just status shows when the index moves past this)")
     PYEOF
+    #  Media rides along (src/media.py `sync`): scan + upload once media is in use AND this device already ran
+    #  `media-push` to this server + account (or `media_push` opts in) —— originals carry EXIF/GPS.  It deletes the
+    #  server files this device uploaded earlier that the manifest no longer lists (a forgotten `media-push --prune`
+    #  left deleted photos on the server), and refuses to send anything when a source cannot be read (an unplugged
+    #  drive is not a deletion).  Another device's files are only warned about; `just media-push --prune` removes them.
+    if ! {{py}} {{src}}/media.py sync; then
+        echo "media sync failed (above) —— the graph push already succeeded.  Fix the cause, then: just media-push" >&2
+        exit 1
+    fi
 
 #  Photos and videos linked to entities (see the header of src/media.py).
 #  `media` scans the vault's embeds + `media_dirs` and writes ~/.kal/media/manifest.json; `media-push`
 #  uploads the variants the cloud does not have yet, replaces re-derived thumb/view copies the server holds at
-#  a different size, and with `--prune` removes recorded server files the manifest no longer lists
-#  (same KAL_CLOUD_URL / KAL_CLOUD_TOKEN as `push`).
+#  a different size, deletes the files this device uploaded earlier that the manifest no longer lists, and with
+#  `--prune` every recorded server file it does not list (same KAL_CLOUD_URL / KAL_CLOUD_TOKEN as `push`,
+#  which runs both steps itself once media is in use and opted in).
 media *args:
     @{{py}} {{src}}/media.py scan {{args}}
 

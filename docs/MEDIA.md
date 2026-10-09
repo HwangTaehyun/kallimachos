@@ -8,7 +8,44 @@ receives the files you upload, and it never calls an LLM.
 just media                                # scan → ~/.kal/media/manifest.json
 just media-push                           # upload what the server lacks, then the manifest
 just media-push --prune                   # the same, then delete server files the manifest no longer lists
+just push                                 # the graph, then (once you opted in) `just media` + `just media-push`
 ```
+
+`just push` runs the media step after the graph upload has succeeded, but only when both hold:
+
+- media is in use: a manifest exists (you ran `just media` once), `media_dirs` is set, or this
+  device has a push record for the same server and account (so `just reset` does not switch it
+  off). Embeds in notes alone do not count.
+- you opted in to uploading: this device already ran `just media-push` to the same server and
+  account (there is a `pushed.json` record for them), or `~/.kal/config.json` has
+  `"media_push": true` (env `KAL_MEDIA_PUSH=1`).
+
+Originals go up with their EXIF and GPS, so running `just media` locally never starts uploads by
+itself. When either condition fails, the step prints one line saying how to turn it on and
+sends nothing.
+
+Only one media push runs at a time on a device: a second one stops at once with "another media
+push is running". (An older push that pruned after a newer one had published could otherwise
+delete the newer one's files.)
+
+**A source that cannot be read never causes a deletion.** If the vault or a folder in
+`media_dirs` is missing, unreadable or not a directory, or a subfolder, photo, video or note inside
+them cannot be read, when the scan runs (an unplugged photo
+drive, a moved vault), the scan warns and notes it in `manifest.json` (that note is never sent).
+The media step of `just push` then sends nothing at all, neither the manifest nor any deletion.
+An explicit `just media-push` still replaces the server's manifest, so the web view stops
+showing those files, but it deletes nothing from the server, and `--prune` refuses. Reconnect
+the source (or remove it from `media_dirs`) and scan again. A folder that exists but is empty,
+such as an unmounted mount point on Linux, cannot be told apart from an empty one. A file that no longer derives (a HEIC after its decoder was removed, a read error) counts the same way, and a `config.json` or `KAL_MEDIA_DIRS` that cannot be parsed stops the scan before anything changes.
+
+If the media step fails, `just push` exits
+non-zero and says that the graph upload already went through; fix the cause and run
+`just media-push`.
+
+`just status` shows a `media` section (and `media` in `--json`): how many items there are, how
+many derivations wait for a retry, how many items have no preview, and whether the items changed
+since the last successful media push. It reads only local files and makes no network request.
+`just reset extract` (and `all`) deletes the media cache but keeps the push record.
 
 `kal_entity` lists an entity's media and `kal_media` returns one thumbnail with its links
 (MCP tools, see `src/kal_mcp.py`).
@@ -76,11 +113,17 @@ are not affected.
 | `pillow-heif` (a declared dependency) | HEIC/HEIF thumbnails and view copies | `.heic` files are skipped with a warning |
 
 An H.264 `.mp4` or `.m4v` that is already ≤ 720p and 8-bit 4:2:0 (`yuv420p`), with AAC or MP3
-audio or no audio, is only re-muxed, which is fast. Anything taller, 4:4:4 or 10-bit H.264, audio
+audio or no audio, and not rotated, is only re-muxed, which is fast. Anything taller, 4:4:4 or 10-bit H.264, audio
 in any other codec such as PCM or Opus (browsers cannot play those), and any re-mux that would
 exceed the view cap, is re-encoded to ≤ 720p H.264 with AAC audio. Odd heights are rounded down
 to an even number. 10-bit and HDR video is converted to 8-bit without tone mapping, so its
 colours may look flat.
+
+Phones store a portrait clip as landscape frames plus a rotation. The manifest's `width` and
+`height` are the displayed size, the thumbnail is upright, and a rotated clip is always
+re-encoded so that the view copy's pixels are upright too. A re-mux would keep the sideways
+frames, and a player that ignores the rotation would show them sideways. Videos cached before
+this was recorded are derived once more on the next scan. Images are not affected.
 
 OCR reads the original at full resolution, except HEIC/HEIF: tesseract cannot open those, so they
 are read from the derived JPEG view copy (≤ 2048 px, upright). Each tool run has a time limit
@@ -112,14 +155,17 @@ is dropped from the uploaded manifest.
   too big, push stops and tells you how many items or how much OCR text to cut.
 - Your storage quota is checked **before** any file is uploaded, too. Push asks the server what it
   already holds and works out the highest usage this push will reach. It stops if that goes over
-  the quota, and tells you how much is over and how to make room: `--prune`, or `media_orig` off.
+  the quota, and tells you how much is over and how to make room: `just media-push --prune`, or
+  `media_orig` off. Without `--prune`, push never deletes anything to make room.
   If the server answers 507 (quota full) during the upload anyway, push stops the same way and
   does not replace the manifest.
 - **Per-file responses:** 400, 413 (the file is over its limit) and 415. Push skips that one file
   with a warning and continues. **Any other error response stops the run**, including 401, 402,
-  409 (another upload of the same file is in progress), 410, 411, 507 and 5xx, as do network
-  errors. Push uploads one file at a time, so a 409 most likely means another push to the same
-  account is running.
+  409, 410, 411, 507 and 5xx, as do network errors. A 409 means the server's media was wiped
+  while this push ran, another upload of the same file is in progress, or the manifest named
+  files the server no longer has: push stops with "run push again". After a wipe the next push uploads everything again, and its record
+  forgets the files the server no longer has. Push uploads one file at a time, so a 409 that is
+  not a wipe most likely means another push to the same account is running.
 - Files the server already has are not sent again. The exception is a thumbnail or view copy that
   the server holds at a different size (it was derived again after an upgrade). Push replaces
   it. Normally each old copy is deleted right before its own replacement is uploaded, so a run
@@ -128,8 +174,8 @@ is dropped from the uploaded manifest.
   push says so and **deletes all the old copies before the first upload** instead: usage then
   never rises above the final total, but if the run stops, those items show no preview until the
   next push. An original is identified by its content and is never replaced.
-- An older server without the usage endpoint gets no quota check and no multi-device warning, and
-  `--prune` stops with a message.
+- An older server without the usage endpoint gets no quota check, no multi-device warning and no
+  automatic cleanup, and `--prune` stops with a message.
 - The server allows 30 minutes per upload. A 1 GiB original needs a steady upload speed of about
   0.6 MiB/s to finish in time. On a slow connection, set `media_orig` off.
 
@@ -140,12 +186,25 @@ to the same account, the web view shows only the items from the device that push
 other device's files stay on the server and keep counting toward your storage. When the server
 holds items that this device does not list, push warns you before it replaces the manifest.
 
+**Automatic cleanup of this device's own files.** Push keeps a record in
+`~/.kal/media/pushed.json` (readable only by you) of the server files this device uploaded, or
+found already on the server for an item it listed, and for which server and account (a SHA-256
+hash of the push token, never the token itself). Every push deletes those
+of them that the new manifest no longer lists, so a photo you delete or stop embedding also leaves
+the server. Files this device has no record of are never deleted automatically: another device's
+files, and anything uploaded before the record existed (the first push with the record deletes
+nothing). Push only warns about them. The record is written even when a run stops, so a file
+uploaded before the stop can still be cleaned up later. A record made for another server address,
+or with another token, counts as no record: switching accounts on the same server deletes
+nothing from either account.
+
 `--prune` deletes every server file that the server has a record of and that the newly uploaded
-manifest does not list. It runs after the manifest upload succeeds, unless the quota check needs
-the room first. Then it runs before the upload, and if the run stops after that, the server's
-previous manifest can point at files that were already deleted until the next successful push.
-Without the flag, push never deletes anything. With `media_orig` off, push prints a line saying
-that the originals you uploaded earlier will be deleted.
+manifest does not list, whoever uploaded it. Both kinds of deletion run after the manifest upload
+succeeds. The one exception is `--prune` when the quota check needs the room: it then deletes
+before the upload, and if the run stops after that, the server's previous manifest can point at
+files that were already deleted until the next successful push.
+With `media_orig` off, the next push deletes the originals this device uploaded earlier, and
+prints a line saying so.
 
 If the server loses its records but keeps the stored files, the next push uploads and records
 this device's files again. Stored files that this device no longer lists stay unrecorded, so
@@ -168,8 +227,8 @@ this device's files again. Stored files that this device no longer lists stay un
   ```
 
   You can also set the env var `KAL_MEDIA_ORIG=0`. With either one, `orig` is never uploaded and
-  never listed. Originals that are already on the server are deleted only when you run
-  `push --prune`.
+  never listed. Originals that this device already uploaded are deleted by the next push; other
+  originals on the server only by `push --prune`.
 
 ## The cloud copy is for viewing, not a backup
 

@@ -8,6 +8,7 @@ Why it is needed
       old LanceDB versions   reclaims disk only.  The index is untouched      ~1s
       the index              the tables are rebuilt.  The extraction cache survives, so 0 LLM calls  ~20s
       the extraction cache   every LLM call is made again                     905 of them today
+                             (+ the media cache: thumbnails · view copies · OCR, re-derived by `just media`)
       the settings           config.json and .env back to their defaults      instant
 
   Not knowing, people mostly pick the strongest —— `rm -rf ~/.kal`, and then 905 LLM calls
@@ -94,6 +95,13 @@ def survey():
         except Exception:
             out["config"] = {"(unreadable)": ""}
     out["env"] = os.path.exists(os.path.join(REPO, ".env"))
+    #  The media cache (src/media.py): one folder per item + manifest.json.  pushed.json is NOT cache —— it is the
+    #  list of server files this device uploaded, and without it `just push` can no longer prune them.
+    md = os.path.join(home, "media")
+    if os.path.isdir(md):
+        out["media_items"] = sum(os.path.isdir(os.path.join(md, n)) for n in os.listdir(md))
+        out["media_bytes"] = sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(md)
+                                 for f in fs if f != "pushed.json")
     return out
 
 
@@ -117,6 +125,9 @@ def describe(level, s):
         mb = s["cache_bytes"] / 1e6
         rows.append(f"{s['cache_lines']:,} extraction cache line(s) ({mb:.0f}MB) — "
                     f"**every LLM call is made again**")
+        if s.get("media_items"):
+            rows.append(f"{s['media_items']:,} cached media item(s) ({s.get('media_bytes', 0) / 1e6:.0f}MB) — "
+                        f"`just media` derives them again (ffmpeg · tesseract, no LLM); the push record is kept")
     if level == "all":
         keys = ", ".join(s["config"]) or "(empty)"
         rows.append(f"{len(s['config'])} setting(s) in config.json [{keys}]"
@@ -149,6 +160,26 @@ def apply(level, s):
             if os.path.exists(p):
                 os.remove(p)
                 done.append(f"{f} deleted")
+        md = os.path.join(home, "media")
+        if os.path.isdir(md):
+            #  Not under a running media push: it holds .push.lock, and a reset + rescan beneath it let a second push
+            #  start on a fresh lock file —— the first one's prune then deleted the second's files (Codex round 7).
+            try:
+                import fcntl
+            except ImportError:         # Windows: no flock —— media.py does not lock there either
+                fcntl = None
+            lk = open(os.path.join(md, ".push.lock"), "a")
+            try:
+                if fcntl:
+                    fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lk.close()
+                raise SystemExit("a media push is running —— let it finish, then reset")
+            for n in os.listdir(md):
+                if n not in ("pushed.json", ".push.lock"):  # the push record is not cache; the lock must stay one file
+                    p = os.path.join(md, n)
+                    shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+            done.append("media cache deleted (the push record is kept)")
     if level == "all":
         cfg = os.path.join(home, "config.json")
         if os.path.exists(cfg):
@@ -278,6 +309,44 @@ def _selftest():
         for k in kept:
             assert os.path.exists(os.path.join(d, k)), f"{level}: {k} was deleted"
         ok += len(gone) + len(kept)
+
+    #  ⑤-a The media cache goes with `extract` (not `index`), and the push record stays: without it `just push`
+    #      can no longer tell this device's server files from another device's.
+    for level, gone in (("index", False), ("extract", True)):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, "media", "a" * 64))
+        for f in ("manifest.json", "pushed.json", "a" * 64 + "/meta.json"):
+            open(os.path.join(d, "media", f), "w").write("{}")
+        s = {"home": d, "db": os.path.join(d, "db"), "tables": {}, "old_versions": 0,
+             "cache_lines": 0, "cache_bytes": 0, "config": {}, "env": False}
+        apply(level, s)
+        assert os.path.exists(os.path.join(d, "media", "manifest.json")) != gone, f"{level}: media cache"
+        assert os.path.exists(os.path.join(d, "media", "a" * 64)) != gone, f"{level}: media item"
+        assert os.path.exists(os.path.join(d, "media", "pushed.json")), f"{level}: the push record was deleted"
+        ok += 3
+    #  ⑤-a2 Not under a running media push (it holds media/.push.lock): refused, nothing deleted —— and the lock file
+    #       itself survives a reset, so a later push locks the same file (Codex round 7).
+    import fcntl
+    d = tempfile.mkdtemp()
+    os.makedirs(os.path.join(d, "media"))
+    open(os.path.join(d, "media", "manifest.json"), "w").write("{}")
+    s = {"home": d, "db": os.path.join(d, "db"), "tables": {}, "old_versions": 0,
+         "cache_lines": 0, "cache_bytes": 0, "config": {}, "env": False}
+    with open(os.path.join(d, "media", ".push.lock"), "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        try:
+            apply("extract", s)
+            raise AssertionError("reset ran under a media push")
+        except SystemExit as e:
+            assert "media push is running" in str(e), e
+    assert os.path.exists(os.path.join(d, "media", "manifest.json")), "deleted under a running push"
+    apply("extract", s)
+    assert not os.path.exists(os.path.join(d, "media", "manifest.json"))
+    assert os.path.exists(os.path.join(d, "media", ".push.lock")), "the lock file went with the cache"
+    ok += 4
+    assert "media" in " ".join(describe("extract", dict(fake, media_items=2, media_bytes=1))), "the cache is not shown"
+    assert "media" not in " ".join(describe("index", dict(fake, media_items=2, media_bytes=1)))
+    ok += 2
 
     #  ⑤-b `apply` **never touches anything outside the path it was given.**
     #      Without this, the self-check deleted the real repository's `.env` (token included).

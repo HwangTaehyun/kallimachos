@@ -707,6 +707,454 @@ class PushTest(Base):
         self.assertLess(i.index(("DELETE", f"/api/media/blob/{shot}/view")),
                         [n for n, x in enumerate(self.fake.seen) if x[0] == "PUT"][0])
 
+    # ── automatic prune of this device's own uploads (pushed.json) ──
+    def keys_of(self, sha):
+        return {k for k in self.fake.usage if k.startswith(sha + "/")}
+
+    def drop_inline(self):
+        """The note stops embedding img/inline.png → that item leaves the next manifest."""
+        p = os.path.join(self.vault, "a.md")
+        with open(p, encoding="utf-8") as fh:
+            t = fh.read()
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(t.replace("![alt](img/inline.png)", ""))
+        self.scan()
+
+    def test_own_unlisted_uploads_are_deleted_without_prune(self):
+        other = "f" * 64
+        inline = self.by["vault:a.md#img/inline.png"]["sha256"]
+        self.fake.usage[f"{other}/thumb"] = 10                     # another device's file
+        self.push()
+        rec = os.path.join(self.home, "media", "pushed.json")
+        self.assertEqual(os.stat(rec).st_mode & 0o777, 0o600)
+        self.assertEqual(len(json.load(open(rec))["keys"]), 9)
+        self.drop_inline()
+        err = self.push()
+        deleted = {x[1].split("/api/media/blob/")[1] for x in self.fake.blobs("DELETE")}
+        self.assertEqual(deleted, {f"{inline}/{v}" for v in media.VARIANTS}, "only this device's own unlisted files")
+        self.assertIn(f"{other}/thumb", self.fake.usage, "another device's file is never deleted without --prune")
+        self.assertIn("1 item(s) this device does not list", err, "the other device is still warned about")
+        put_manifest = max(i for i, x in enumerate(self.fake.seen) if x[0] == "PUT" and x[1].endswith("/manifest"))
+        first_delete = min(i for i, x in enumerate(self.fake.seen) if x[0] == "DELETE")
+        self.assertLess(put_manifest, first_delete, "the automatic prune runs only after the manifest is in place")
+        self.assertEqual(len(json.load(open(rec))["keys"]), 6, "deleted keys leave the record")
+
+    def test_first_run_without_record_deletes_nothing(self):
+        shot = self.by["vault:a.md#shot.jpg"]["sha256"]
+        thumb = os.path.getsize(os.path.join(self.home, "media", shot, "thumb.webp"))
+        self.fake.usage = {f"{shot}/thumb": thumb, "e" * 64 + "/orig": 5}     # an unlisted key from before the record
+        self.fake.have.add(f"/api/media/blob/{shot}/thumb")
+        self.push()
+        self.assertEqual(self.fake.blobs("DELETE"), [])
+        keys = set(json.load(open(os.path.join(self.home, "media", "pushed.json")))["keys"])
+        self.assertIn(f"{shot}/thumb", keys, "a listed file already on the server is seeded into the record")
+        self.assertNotIn("e" * 64 + "/orig", keys)
+
+    def test_record_for_another_server_is_ignored(self):
+        self.push()
+        rec = os.path.join(self.home, "media", "pushed.json")
+        r = json.load(open(rec))
+        r["url"] = "https://elsewhere.example"
+        json.dump(r, open(rec, "w"))
+        self.drop_inline()
+        self.push()
+        self.assertEqual(self.fake.blobs("DELETE"), [], "keys recorded for another server prove nothing here")
+
+    def test_quota_without_prune_deletes_nothing_before_the_manifest(self):
+        self.push()
+        self.drop_inline()
+        inline = self.by["vault:a.md#img/inline.png"]["sha256"]
+        png(os.path.join(self.vault, "new.png"), "yellow")
+        with open(os.path.join(self.vault, "a.md"), "a") as fh:
+            fh.write("\n![[new.png]]\n")
+        _, by = self.scan()
+        d = os.path.join(self.home, "media", by["vault:a.md#new.png"]["sha256"])
+        need = sum(os.path.getsize(os.path.join(d, f)) for f in os.listdir(d) if f != "meta.json")
+        self.fake.quota = sum(self.fake.usage.values()) + need - 1   # 1 byte over; this device's own files would fit it
+        before = self.fake.manifest
+        with self.assertRaises(SystemExit) as cm:
+            self.push()
+        self.assertIn("media-push --prune", str(cm.exception))
+        self.assertEqual(self.fake.blobs("DELETE"), [], "no deletion before the manifest PUT without --prune")
+        self.assertEqual(len(self.keys_of(inline)), 3)
+        self.assertIs(self.fake.manifest, before, "the manifest was not replaced")
+
+    def test_old_server_keeps_the_record(self):
+        self.push()
+        self.fake.usage_status = 404
+        self.drop_inline()
+        self.push()
+        self.assertEqual(self.fake.blobs("DELETE"), [], "an older server cannot list: nothing to compare against")
+        keys = json.load(open(os.path.join(self.home, "media", "pushed.json")))["keys"]
+        self.assertEqual(len(keys), 9, "the unlisted keys stay recorded for a later server that can list")
+
+    def test_record_survives_a_stopped_run(self):
+        self.fake.fail = {"/orig": 402}
+        with self.assertRaises(SystemExit):
+            self.push()
+        rec = json.load(open(os.path.join(self.home, "media", "pushed.json")))
+        self.assertTrue(rec["keys"], "blobs uploaded before the stop stay this device's to prune")
+        self.assertNotIn("at", rec, "a stopped run is not a push status may call current")
+
+    def test_409_says_wiped_and_run_again(self):
+        for path in ("/view", "/manifest"):
+            with self.subTest(path=path):
+                self.fake.fail = {path: 409}
+                with self.assertRaises(SystemExit) as cm:
+                    self.push()
+                self.assertIn("wiped during this push", str(cm.exception))
+                self.assertIn("Run push again", str(cm.exception))
+
+    def test_after_a_server_wipe_everything_goes_up_again(self):
+        self.push()
+        self.fake.usage.clear()                               # DELETE /api/media on the server
+        self.fake.have.clear()
+        self.drop_inline()
+        self.fake.seen.clear()
+        self.push()
+        self.assertEqual(self.fake.blobs("DELETE"), [], "keys the server no longer has are not deleted")
+        self.assertEqual(len(self.fake.blobs()), 6, "every listed file is uploaded again")
+        keys = json.load(open(os.path.join(self.home, "media", "pushed.json")))["keys"]
+        self.assertEqual(len(keys), 6, "the wiped item's keys leave the record")
+
+    def sync(self, **env):
+        out = __import__("io").StringIO()
+        with mock.patch.dict(os.environ, env), mock.patch("sys.stdout", new=out), \
+                mock.patch("sys.stderr", new=__import__("io").StringIO()):
+            media.main(["media.py", "sync"])
+        return out.getvalue()
+
+    def test_sync_only_when_media_is_in_use(self):
+        os.remove(os.path.join(self.home, "media", "manifest.json"))
+        self.assertIn("not in use", self.sync(KAL_MEDIA_PUSH="1"))
+        self.assertEqual(self.fake.seen, [], "no media in use → no request at all")
+        os.makedirs(self.tmp + "/photos")
+        self.sync(KAL_MEDIA_DIRS=json.dumps([{"path": self.tmp + "/photos"}]), KAL_MEDIA_PUSH="1")
+        self.assertEqual(len(self.fake.manifest["media"]), 3, "media_dirs set → scanned and pushed")
+        rec = json.load(open(os.path.join(self.home, "media", "pushed.json")))
+        with open(os.path.join(self.home, "media", "manifest.json")) as fh:
+            self.assertEqual(rec["media_sha256"], media.media_hash(json.load(fh)))
+
+    def test_sync_uploads_only_after_an_explicit_push_or_opt_in(self):
+        out = self.sync()
+        self.assertIn("media_push", out)
+        self.assertEqual(self.fake.seen, [], "a local `just media` alone never starts uploading originals")
+        self.sync(KAL_MEDIA_PUSH="1")
+        self.assertEqual(len(self.fake.manifest["media"]), 3, "opted in → pushed")
+        self.fake.seen.clear()
+        self.sync()
+        self.assertTrue(self.fake.seen, "a record for this url + account keeps `just push` in sync")
+        self.fake.seen.clear()
+        self.sync(KAL_CLOUD_TOKEN="another-account")
+        self.assertEqual(self.fake.seen, [], "another account's record is no opt-in")
+
+    def test_record_for_another_account_is_ignored(self):
+        self.push()
+        rec = os.path.join(self.home, "media", "pushed.json")
+        self.assertNotIn("fixture", open(rec).read(), "the token itself is never stored")
+        self.drop_inline()
+        with mock.patch.dict(os.environ, {"KAL_CLOUD_TOKEN": "another-account"}):
+            self.push()
+        self.assertEqual(self.fake.blobs("DELETE"), [], "keys recorded under another token prove nothing here")
+
+    def test_missing_source_never_deletes(self):
+        drive = os.path.join(self.tmp, "drive")
+        os.makedirs(drive)
+        png(os.path.join(drive, "trip.png"), "orange")
+        dirs = json.dumps([{"path": drive, "alias": "drive"}])
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_DIRS": dirs}):
+            self.sync(KAL_MEDIA_PUSH="1")
+            self.assertEqual(len(self.fake.manifest["media"]), 4)
+            os.rename(drive, drive + ".unplugged")
+            before, self.fake.seen = self.fake.manifest, []
+            with self.assertRaises(SystemExit) as cm:
+                self.sync()
+            self.assertIn("refused", str(cm.exception))
+            self.assertEqual(self.fake.seen, [], "sync sends nothing —— no manifest, no deletion")
+            self.assertIs(self.fake.manifest, before)
+            m, _ = self.scan()                                  # explicit scan + push: manifest yes, deletion no
+            self.assertEqual(m["missing"], [drive])
+            self.push()
+            self.assertEqual(len(self.fake.manifest["media"]), 3)
+            self.assertNotIn("missing", self.fake.manifest, "local only")
+            self.assertEqual(self.fake.blobs("DELETE"), [])
+            with self.assertRaises(SystemExit):
+                self.push(prune=True)
+            self.assertEqual(self.fake.blobs("DELETE"), [], "--prune refuses too")
+        with mock.patch.dict(os.environ, {"KAL_VAULT": self.tmp + "/gone"}), self.assertRaises(SystemExit) as cm:
+            self.sync()                                         # a moved vault is a missing source as well
+        self.assertIn("refused", str(cm.exception))
+        self.assertEqual(self.fake.blobs("DELETE"), [])
+
+
+    def test_unreadable_subfolder_never_deletes(self):
+        # os.walk skips a folder it cannot open without a word: its photos read as deleted (Codex round 2)
+        if os.geteuid() == 0:
+            self.skipTest("root reads a chmod-000 folder anyway")
+        drive, sub = os.path.join(self.tmp, "drive"), os.path.join(self.tmp, "drive", "holiday")
+        os.makedirs(sub)
+        png(os.path.join(sub, "beach.png"), "navy")
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_DIRS": json.dumps([{"path": drive, "alias": "drive"}])}):
+            self.sync(KAL_MEDIA_PUSH="1")
+            n = len(self.fake.manifest["media"])
+            os.chmod(sub, 0)
+            try:
+                with self.assertRaises(SystemExit) as cm:
+                    self.sync()
+                self.assertIn("refused", str(cm.exception))
+                self.assertEqual(self.fake.blobs("DELETE"), [])
+                self.assertEqual(len(self.fake.manifest["media"]), n, "the manifest was not replaced")
+            finally:
+                os.chmod(sub, 0o755)
+
+    def test_unsearchable_folder_never_deletes(self):
+        # a folder with r but not x: its names can be listed, stat on each fails (EACCES) —— round 4
+        if os.geteuid() == 0:
+            self.skipTest("root searches any folder")
+        drive, sub = os.path.join(self.tmp, "drive"), os.path.join(self.tmp, "drive", "trip")
+        os.makedirs(sub)
+        png(os.path.join(sub, "dune.png"), "tan")
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_DIRS": json.dumps([{"path": drive, "alias": "drive"}])}):
+            self.sync(KAL_MEDIA_PUSH="1")
+            os.chmod(sub, 0o444)
+            try:
+                with self.assertRaises(SystemExit) as cm:
+                    self.sync()
+                self.assertIn("refused", str(cm.exception))
+                self.assertEqual(self.fake.blobs("DELETE"), [])
+            finally:
+                os.chmod(sub, 0o755)
+
+    def test_unsearchable_folder_hiding_a_subtree_never_deletes(self):
+        # in an r-without-x folder os.walk files a subfolder under the names; its stat fails, and the whole tree
+        # behind it read as deleted when only *.png names were watched (Codex round 5)
+        if os.geteuid() == 0:
+            self.skipTest("root searches any folder")
+        drive = os.path.join(self.tmp, "drive")
+        mid, deep = os.path.join(drive, "trips"), os.path.join(drive, "trips", "2026")
+        os.makedirs(deep)
+        png(os.path.join(deep, "fjord.png"), "teal")
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_DIRS": json.dumps([{"path": drive, "alias": "drive"}])}):
+            self.sync(KAL_MEDIA_PUSH="1")
+            os.chmod(mid, 0o444)
+            try:
+                with self.assertRaises(SystemExit) as cm:
+                    self.sync()
+                self.assertIn("refused", str(cm.exception))
+                self.assertEqual(self.fake.blobs("DELETE"), [])
+            finally:
+                os.chmod(mid, 0o755)
+
+    def test_walk_records_any_entry_it_cannot_stat(self):
+        # where readdir gives no file type, os.walk files a subfolder under the names and only stat can tell —— an
+        # EACCES there must be recorded whatever the name looks like (APFS gives the type, so this is simulated)
+        drive = os.path.join(self.tmp, "drive")
+        os.makedirs(drive)
+        open(os.path.join(drive, "trips"), "w").close()
+        real = os.stat
+
+        def denied(p, *a, **kw):
+            if str(p).endswith(os.sep + "trips"):
+                raise PermissionError(13, "Permission denied", p)
+            return real(p, *a, **kw)
+        media._UNREADABLE.clear()
+        with mock.patch.object(media.os, "stat", denied):
+            list(media.walk(drive))
+        self.assertEqual(media._UNREADABLE, [os.path.join(drive, "trips")])
+
+    def test_note_that_fails_to_read_never_deletes(self):
+        # stat and access pass, the read itself fails (EIO): the note's embeds must not read as deleted (round 5)
+        self.sync(KAL_MEDIA_PUSH="1")
+        real = open
+
+        def eio(path, *a, **kw):
+            if str(path).endswith("a.md"):
+                raise OSError(5, "Input/output error")
+            return real(path, *a, **kw)
+        with mock.patch("builtins.open", eio), self.assertRaises(SystemExit) as cm:
+            self.sync()
+        self.assertIn("refused", str(cm.exception))
+        self.assertEqual(self.fake.blobs("DELETE"), [])
+
+    def test_stop_before_publish_after_a_wipe_drops_the_old_success(self):
+        # the server lost everything (usage says so), then the run stopped before the manifest: not "current" (round 5)
+        rec = os.path.join(self.home, "media", "pushed.json")
+        self.push()
+        self.fake.have.clear()
+        self.fake.usage.clear()
+        shot = self.by["vault:a.md#shot.jpg"]["sha256"]
+        self.fake.fail = {f"{shot}/view": 500}
+        with self.assertRaises(SystemExit):
+            self.push()
+        with open(rec) as fh:
+            self.assertNotIn("media_sha256", json.load(fh))
+
+    def test_a_second_push_on_this_device_is_refused(self):
+        # publish-then-prune is not atomic: an older push pruning after a newer one published deleted its files (round 6)
+        import fcntl
+        with open(os.path.join(self.home, "media", ".push.lock"), "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            with self.assertRaises(SystemExit) as cm:
+                self.push()
+        self.assertIn("another media push", str(cm.exception))
+        self.assertEqual(self.fake.seen, [], "refused before any request")
+        self.push()                                         # released: the next one runs
+
+    def test_stale_usage_record_after_lost_objects_drops_the_old_success(self):
+        # objects gone but usage still lists them: needed is 0, HEAD says 404 —— a stopped re-upload is not "current"
+        rec = os.path.join(self.home, "media", "pushed.json")
+        self.push()
+        self.fake.have.clear()                              # storage lost the objects; usage kept its records
+        shot = self.by["vault:a.md#shot.jpg"]["sha256"]
+        self.fake.fail = {f"{shot}/view": 500}
+        with self.assertRaises(SystemExit):
+            self.push()
+        with open(rec) as fh:
+            self.assertNotIn("media_sha256", json.load(fh))
+
+    def test_push_record_keeps_sync_on_after_a_reset(self):
+        # reset drops manifest.json and keeps pushed.json: an embed-only vault must keep syncing (round 6)
+        self.sync(KAL_MEDIA_PUSH="1")
+        os.remove(os.path.join(self.home, "media", "manifest.json"))
+        self.fake.seen = []
+        out = self.sync()
+        self.assertNotIn("not in use", out)
+        self.assertTrue(self.fake.seen, "it scanned and pushed")
+
+    def test_underived_file_never_deletes(self):
+        # a file that no longer derives (a HEIC without its decoder, a read error) must not read as deleted (round 7)
+        self.sync(KAL_MEDIA_PUSH="1")
+        with mock.patch.object(media, "derive_image", return_value=None), mock.patch.object(media, "process",
+                lambda p, real=media.process: None if p.endswith("shot.jpg") else real(p)):
+            with self.assertRaises(SystemExit) as cm:
+                self.sync()
+        self.assertIn("refused", str(cm.exception))
+        self.assertEqual(self.fake.blobs("DELETE"), [])
+
+    def test_broken_config_stops_the_scan(self):
+        # read as "not set", a broken config dropped every media_dir and turned media_orig back on (round 7)
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_DIRS": "[not json"}), self.assertRaises(SystemExit) as cm:
+            media.scan()
+        self.assertIn("not valid JSON", str(cm.exception))
+        import kal_config
+        with mock.patch.object(kal_config, "read_file", return_value=({}, "config.json could not be read")), \
+                self.assertRaises(SystemExit):
+            media.scan()
+
+    def test_config_shape_errors_stop_scan_and_push(self):
+        # valid JSON of the wrong shape read as "no folders"; a broken config let an explicit push send originals (round 8)
+        with mock.patch.dict(os.environ, {"KAL_MEDIA_DIRS": '{"path": "/photos"}'}), self.assertRaises(SystemExit) as cm:
+            media.scan()
+        self.assertIn("must be a list", str(cm.exception))
+        import kal_config
+        with mock.patch.object(kal_config, "read_file", return_value=({"media_orig": "maybe"}, "")), \
+                self.assertRaises(SystemExit) as cm:
+            media.scan()
+        self.assertIn("media_orig", str(cm.exception))
+        with mock.patch.object(kal_config, "read_file", return_value=({}, "config.json could not be read")), \
+                self.assertRaises(SystemExit) as cm:
+            self.push()
+        self.assertIn("Nothing was sent", str(cm.exception))
+        self.assertEqual(self.fake.seen, [])
+
+    def test_config_behind_a_closed_folder_is_an_error(self):
+        # os.path.exists said False for a file in a folder it may not enter: media_orig:false read as on (round 9)
+        if os.geteuid() == 0:
+            self.skipTest("root enters any folder")
+        import kal_config
+        closed = os.path.join(self.tmp, "closed")
+        os.makedirs(closed)
+        cfg = os.path.join(closed, "config.json")
+        with open(cfg, "w") as fh:
+            fh.write('{"media_orig": false}')
+        os.chmod(closed, 0)
+        try:
+            d, err = kal_config.read_file(cfg)
+        finally:
+            os.chmod(closed, 0o755)
+        self.assertEqual(d, {})
+        self.assertIn("could not be read", err)
+        self.assertEqual(kal_config.read_file(os.path.join(self.tmp, "none.json")), ({}, ""), "absent is still no error")
+
+    def test_409_on_the_manifest_drops_the_old_success(self):
+        # every HEAD answered 200, then a wipe made the manifest PUT 409: not "current" (round 7)
+        rec = os.path.join(self.home, "media", "pushed.json")
+        self.push()
+        self.fake.fail = {"manifest": 409}
+        with self.assertRaises(SystemExit):
+            self.push()
+        with open(rec) as fh:
+            self.assertNotIn("media_sha256", json.load(fh))
+
+    def test_publish_then_prune_failure_drops_the_old_success(self):
+        # the manifest went up short (a refusal), then the run stopped: the old hash must not come back (round 4)
+        rec = os.path.join(self.home, "media", "pushed.json")
+        self.push()
+        shot = self.by["vault:a.md#shot.jpg"]["sha256"]
+        for v in ("view", "orig"):                          # gone from the server, and refused when re-sent
+            self.fake.have.discard(f"/api/media/blob/{shot}/{v}")
+            self.fake.usage.pop(f"{shot}/{v}", None)
+        self.fake.fail = {f"{shot}/view": 413, f"{shot}/orig": 415}
+        orig = media.urllib.request.urlopen
+
+        def down_on_delete(req, *a, **kw):                  # the prune of shot's thumb then fails
+            if req.get_method() == "DELETE":
+                raise media.urllib.error.URLError("down")
+            return orig(req, *a, **kw)
+        with mock.patch.object(media.urllib.request, "urlopen", down_on_delete), self.assertRaises(SystemExit):
+            self.push()
+        with open(rec) as fh:
+            self.assertNotIn("media_sha256", json.load(fh))
+
+    def test_broken_or_private_symlink_does_not_block_sync(self):
+        # neither is ever read, so neither is "a source that cannot be read" (Codex round 3)
+        if os.geteuid() == 0:
+            self.skipTest("root reads a chmod-000 file anyway")
+        drive, priv = os.path.join(self.tmp, "drive"), os.path.join(self.tmp, "priv")
+        os.makedirs(drive)
+        os.makedirs(priv)
+        png(os.path.join(drive, "ok.png"), "olive")
+        png(os.path.join(priv, "secret.png"), "maroon")
+        os.chmod(os.path.join(priv, "secret.png"), 0)
+        os.symlink(os.path.join(self.tmp, "nowhere.jpg"), os.path.join(drive, "orphan.jpg"))
+        os.symlink(os.path.join(priv, "secret.png"), os.path.join(drive, "peek.png"))
+        sock = __import__("socket").socket(__import__("socket").AF_UNIX)   # not a file: opening it killed the scan
+        sock.bind(os.path.join(drive, "s.png"))
+        self.addCleanup(sock.close)
+        dirs = json.dumps([{"path": drive, "alias": "drive"}, {"path": priv, "alias": "p", "private": True}])
+        try:
+            with mock.patch.dict(os.environ, {"KAL_MEDIA_DIRS": dirs}):
+                m, _ = self.scan()
+                self.assertNotIn("missing", m)
+                self.sync(KAL_MEDIA_PUSH="1")
+        finally:
+            os.chmod(os.path.join(priv, "secret.png"), 0o644)
+
+    def test_partial_push_after_a_wipe_drops_the_old_success(self):
+        # a full push, a server wipe, then a push where a file is refused: the manifest went up short, so the
+        # earlier "has it all" hash must not survive (Codex round 3)
+        rec = os.path.join(self.home, "media", "pushed.json")
+        self.push()
+        with open(rec) as fh:
+            self.assertIn("media_sha256", json.load(fh))
+        self.fake.have.clear()                              # the server's media was wiped
+        self.fake.usage.clear()
+        shot = self.by["vault:a.md#shot.jpg"]["sha256"]
+        self.fake.fail = {f"{shot}/view": 413, f"{shot}/orig": 415}
+        self.push()
+        with open(rec) as fh:
+            self.assertNotIn("media_sha256", json.load(fh))
+
+    def test_refused_file_keeps_status_behind(self):
+        # the published manifest is short of a refused item: the record must not say "the cloud has it all"
+        shot = self.by["vault:a.md#shot.jpg"]["sha256"]
+        rec = os.path.join(self.home, "media", "pushed.json")
+        self.fake.fail = {f"{shot}/view": 413, f"{shot}/orig": 415}
+        self.push()
+        self.assertNotIn("media_sha256", json.load(open(rec)))
+        self.fake.fail = {}
+        self.push()
+        self.assertIn("media_sha256", json.load(open(rec)))
 
 class ScanExtraTest(Base):
     def test_no_doc_basis(self):
@@ -952,6 +1400,89 @@ class VideoTest(Base):
         d = os.path.join(self.home, "media", by["vault:a.md#pcm.mp4"]["sha256"])
         streams = media.probe_video(os.path.join(d, "view.mp4"))["streams"]
         self.assertEqual([s["codec_name"] for s in streams if s["codec_type"] == "audio"], ["aac"])
+
+    def test_rotated_clip_is_upright(self):
+        # A phone's portrait clip: 320x240 frames + a 90° display matrix.  Before: width/height 320x240 and a re-muxed
+        # view that kept the sideways frames (measured).  Now: 240x320, and the view's pixels are upright.
+        src = os.path.join(self.tmp, "src.mp4")
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=5", "-t", "1",
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p", src], check=True)
+        v = os.path.join(self.vault, "portrait.mp4")
+        r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-display_rotation", "90", "-i", src, "-c", "copy", v])
+        if r.returncode:
+            self.skipTest("this ffmpeg has no -display_rotation")
+        with open(os.path.join(self.vault, "a.md"), "a") as fh:
+            fh.write("\n![[portrait.mp4]]\n")
+        _, by = self.scan()
+        clip = by["vault:a.md#portrait.mp4"]
+        self.assertEqual((clip["width"], clip["height"]), (240, 320))
+        d = os.path.join(self.home, "media", clip["sha256"])
+        vs = media.probe_video(os.path.join(d, "view.mp4"))["streams"][0]
+        self.assertEqual((vs["width"], vs["height"]), (240, 320))
+        self.assertFalse([x for x in vs.get("side_data_list", []) if x.get("rotation")], "no matrix left to obey")
+        with Image.open(os.path.join(d, "thumb.webp")) as im:
+            self.assertLess(im.width, im.height)
+
+    def test_rotation_migration_waits_for_ffmpeg(self):
+        # a video cached before `rotation` existed is re-derived once —— but not without ffmpeg: that would drop the
+        # cached view, and push would then delete the cloud's preview (Codex round 2)
+        self.clip("old.mp4", "320x240", "yuv420p")
+        _, by = self.scan()
+        mj = os.path.join(self.home, "media", by["vault:a.md#old.mp4"]["sha256"], "meta.json")
+        with open(mj) as fh:
+            meta = json.load(fh)
+        del meta["rotation"]
+        with open(mj, "w") as fh:
+            json.dump(meta, fh)
+        real = media.have
+        with mock.patch.object(media, "have", lambda t: t not in ("ffmpeg", "ffprobe") and real(t)), \
+                mock.patch.object(media, "derive_video", wraps=media.derive_video) as d:
+            _, by = self.scan()
+        d.assert_not_called()
+        self.assertIn("view", by["vault:a.md#old.mp4"]["variants"])
+
+    def test_failed_rederive_keeps_the_cached_copy(self):
+        # a migration re-derive whose transcode fails must not replace a working view: push would delete the cloud's
+        # preview (Codex round 8).  And it is not retried on every scan after that.
+        self.clip("keep.mp4", "320x240", "yuv420p")
+        _, by = self.scan()
+        d = os.path.join(self.home, "media", by["vault:a.md#keep.mp4"]["sha256"])
+        with open(os.path.join(d, "meta.json")) as fh:
+            meta = json.load(fh)
+        del meta["rotation"]                                # out of date in both ways a migration can be
+        meta["derive_version"] = media.DERIVE_VERSION - 1
+        with open(os.path.join(d, "meta.json"), "w") as fh:
+            json.dump(meta, fh)
+        real = media.derive_video
+
+        def no_view(p, out):
+            m = real(p, out)
+            if os.path.isfile(os.path.join(out, "view.mp4")):
+                os.remove(os.path.join(out, "view.mp4"))
+            return m
+        with mock.patch.object(media, "derive_video", no_view):
+            _, by = self.scan()
+        self.assertIn("view", by["vault:a.md#keep.mp4"]["variants"])
+        self.assertTrue(os.path.isfile(os.path.join(d, "view.mp4")))
+        self.assertFalse(os.path.exists(d + ".prev"))
+        with mock.patch.object(media, "derive_video", wraps=media.derive_video) as dv:
+            self.scan()
+        dv.assert_not_called()
+
+    def test_interrupted_rederive_restores_the_cache(self):
+        # a run stopped mid re-derive leaves <sha>.prev; the next scan must put it back, not delete it (round 9)
+        self.clip("stop.mp4", "320x240", "yuv420p")
+        _, by = self.scan()
+        d = os.path.join(self.home, "media", by["vault:a.md#stop.mp4"]["sha256"])
+        os.rename(d, d + ".prev")                           # as if killed inside _derive: a half-made folder
+        os.makedirs(d)
+        open(os.path.join(d, "thumb.webp"), "w").close()
+        with mock.patch.object(media, "derive_video", wraps=media.derive_video) as dv:
+            _, by = self.scan()
+        dv.assert_not_called()
+        self.assertIn("view", by["vault:a.md#stop.mp4"]["variants"])
+        self.assertTrue(os.path.isfile(os.path.join(d, "view.mp4")))
+        self.assertFalse(os.path.exists(d + ".prev"))
 
     def test_remux_over_view_cap_is_reencoded(self):
         self.clip("small.mp4", "320x240", "yuv420p")

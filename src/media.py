@@ -3,6 +3,9 @@
 
     python src/media.py scan            collect → derive (thumb / view / OCR) → link → $KAL_HOME/media/manifest.json
     python src/media.py push [--prune]  upload what the cloud does not have yet, then the manifest
+    python src/media.py sync            scan + push, only once media is in use (a manifest exists or `media_dirs`
+                                        is set; embeds alone do not count) and opted in (see Push) —— `just push`
+                                        runs this after the graph
 
 Sources
   (a) local media embedded in vault notes:  ![[file.png]]  and  ![alt](relative/path.png)
@@ -39,8 +42,10 @@ Push
   Each variant over its server cap (thumb 1 MiB · view 300 MiB · orig 1 GiB) is skipped with a warning.
   Per-file statuses: 400 / 413 / 415 on a blob → that file is skipped with a warning and the run goes on.  An item
   left with neither view nor orig is dropped from the uploaded manifest.  ANY other non-2xx response (401, 402,
-  409, 410, 411, 507, 5xx, …) and any network error stop the run.  (HEAD 404 only means "not there yet → upload", and
-  a 404/405 from /api/media/usage means an older server: no quota precheck, no multi-device warning, no prune.)
+  409, 410, 411, 507, 5xx, …) and any network error stop the run.  A 409 on a PUT says the media was wiped during
+  this push (or another push holds that file): run push again —— keys the server no longer has leave the record.  (HEAD 404 only means "not there yet → upload", and
+  a 404/405 from /api/media/usage means an older server: no quota precheck, no multi-device warning, no prune
+  of either kind —— the record keeps the keys for later.)
   Before any request: the manifest is checked against every rule of the server's validateManifest, field types
   included (a violation stops the run with the list), and against its 16 MiB limit.  Before any blob: the peak usage of this push is
   checked against the storage quota (GET /api/media/usage).  A 507 mid-run (quota full) stops the run.
@@ -49,13 +54,32 @@ Push
   the usage peak of that order would go over the quota —— then (and push says so) all of them are deleted before
   the first upload, and if the run stops, those items have no preview until the next push.  orig is
   content-addressed and never replaced.
-  The uploaded manifest REPLACES the server's (last push wins) —— one device per account.  When the server holds
-  items this device does not list, push says so.  `push --prune` then deletes every recorded server file the
-  uploaded manifest does not list; without the flag nothing is ever deleted.  Normally it runs after the manifest
-  is in place; when the quota check needs the room it runs BEFORE the upload, and if the run then stops, the
-  server's previous manifest can point at deleted files until the next successful push.
+  The uploaded manifest REPLACES the server's (last push wins) —— one device per account.
+  $KAL_HOME/media/pushed.json (0600, written atomically, also when a run stops) records which server keys THIS
+  device uploaded —— or found already there for an item it listed —— to which URL and account (a sha256 of the
+  token, never the token).  Every push deletes those of them the uploaded manifest no longer lists, only after the
+  manifest is in place.  Unlisted keys this device did not record (another device's, or from before the record
+  existed: the first run deletes nothing) are only warned about; `push --prune` deletes every recorded server file
+  the uploaded manifest does not list.  A record for another URL or another token counts as none.  Without --prune
+  nothing is deleted before the manifest PUT: a push that does not fit the quota stops.  With --prune, when the
+  quota needs the room, the prune runs BEFORE the upload, and if the run then stops, the server's previous manifest
+  can point at deleted files until the next successful push.  With media_orig off, the originals this device uploaded are
+  deleted by the next push.  A successful push also records `at` and `media_sha256` (the items' hash), which
+  `just status` compares offline.
+  A missing source never causes a deletion: scan names every source it could not read (the vault, a public
+  media_dirs folder: missing, unreadable, not a directory; or an unreadable subfolder, photo, video or note
+  inside them) under `missing` in manifest.json (never sent); push then
+  deletes nothing and `--prune` refuses.
+  `sync` (run by `just push`) sends nothing when a source is missing, and runs at all only once this device pushed
+  media to this URL + account itself (a pushed.json record) or `"media_push": true` / KAL_MEDIA_PUSH=1 opts in.
   A server that lost its records but kept the objects: push uploads and records this device's files again;
   objects this device no longer lists stay unrecorded (so not prunable) until the account is deleted.
+
+Video rotation
+  A phone's portrait clip is landscape frames + a rotation (display matrix, or an old `rotate` tag).  width/height
+  are the displayed ones, the poster is upright (ffmpeg applies the rotation), and a rotated clip is always
+  re-encoded so the view copy's pixels are upright (a re-mux kept them sideways behind the matrix).  Videos cached
+  before `rotation` was recorded are derived once more; images are not.
 """
 import contextlib
 import datetime
@@ -65,12 +89,19 @@ import mimetypes
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+try:                            # POSIX; without it (Windows) a second concurrent push is not refused
+    import fcntl
+except ImportError:
+    fcntl = None
 
 import vault_path
 from frontmatter import FM_RE
@@ -112,6 +143,31 @@ def warn(msg):
 
 # ───────────────────────── config ─────────────────────────
 
+def config_error():
+    """A setting that cannot be read → its message, else "".  Read as "not set", a broken config.json dropped every
+    media_dir (their photos then read as deleted) and turned media_orig back on (Codex round 7) —— scan stops."""
+    import kal_config
+    cfg, err = kal_config.read_file()
+    if err:
+        return err
+    raw = os.environ.get("KAL_MEDIA_DIRS")
+    if raw:
+        try:
+            lst, src = json.loads(raw), "KAL_MEDIA_DIRS"
+        except ValueError:
+            return "KAL_MEDIA_DIRS is not valid JSON"
+    else:
+        lst, src = cfg.get("media_dirs", []), "config.json media_dirs"
+    #  The shape too: valid JSON that is not a list of {"path": …} read as "no folders" (Codex round 8).
+    if not (isinstance(lst, list) and all(isinstance(d, dict) and isinstance(d.get("path"), str) and d["path"]
+                                          for d in lst)):
+        return f'{src} must be a list of {{"path": "...", "alias": "...", "private": false}}'
+    for k, ok in (("media_orig", (True, False, 0, 1, "0", "1")), ("media_push", (True, False, 0, 1, "0", "1"))):
+        if k in cfg and cfg[k] not in ok:
+            return f"config.json {k} must be true or false"
+    return ""
+
+
 def media_dirs():
     """env KAL_MEDIA_DIRS (JSON) > config.json `media_dirs` > []  —— the order every other setting follows."""
     raw = os.environ.get("KAL_MEDIA_DIRS")
@@ -131,6 +187,16 @@ def media_dirs():
             out.append({"path": p, "alias": str(d.get("alias") or os.path.basename(p)),
                         "private": bool(d.get("private"))})
     return out
+
+
+def want_push():
+    """env KAL_MEDIA_PUSH ("1" = on) > config.json `media_push` > off.  On → `just push` uploads media (originals
+    included) even before this device ran `just media-push` itself."""
+    raw = os.environ.get("KAL_MEDIA_PUSH")
+    if raw is not None:
+        return raw.strip() == "1"
+    import kal_config
+    return kal_config.read_file()[0].get("media_push", False) in (True, 1, "1")
 
 
 def want_orig():
@@ -240,11 +306,34 @@ def is_media(path):
 def walk(root, skip=()):
     """Every non-hidden file under root.  A folder whose REAL path is a folder in `skip` (the private media dirs) or
     inside one is not entered at all.  Directory symlinks are never followed (os.walk's default)."""
-    for dp, dn, fn in os.walk(root):
+    #  An unreadable subfolder or file is recorded, not skipped: os.walk drops it silently, and push would then read
+    #  its files as deleted (Codex review round 2, 2026-10-09).  scan() adds _UNREADABLE to the manifest's `missing`.
+    for dp, dn, fn in os.walk(root, onerror=lambda e: _UNREADABLE.append(e.filename)):
         dn[:] = [d for d in dn if not d.startswith(".") and not under(os.path.join(dp, d), skip)]
         for f in fn:
             if not f.startswith("."):
-                yield os.path.join(dp, f)
+                p = os.path.join(dp, f)
+                #  Only a regular file outside the private dirs counts as unreadable: a broken symlink or one into a private
+                #  folder is never read anyway, and reporting it would block every sync for good (Codex round 3).  stat, not
+                #  isfile: in a folder that can be listed but not searched (r without x) stat fails with EACCES, and isfile
+                #  answered False —— the photos read as deleted (round 4).
+                watched = os.path.splitext(f)[1].lower() in IMG_EXT | VID_EXT | {".md"} and not under(p, skip)
+                try:
+                    st = os.stat(p)
+                except FileNotFoundError:   # a broken symlink, or gone since the listing
+                    continue
+                except OSError:     # any entry, not only *.png: in an r-without-x folder os.walk files a subfolder
+                    if not under(p, skip):  # under the names, and whole trees hide behind it (Codex round 5)
+                        _UNREADABLE.append(p)
+                    continue
+                if not stat.S_ISREG(st.st_mode):    # a socket, fifo or device is not a file: hashing one killed the scan
+                    continue
+                if watched and not os.access(p, os.R_OK):
+                    _UNREADABLE.append(p)           # an unreadable photo, video or note (notes carry embeds and sidecar links)
+                    continue
+                yield p
+
+_UNREADABLE = []
 
 
 def inside(path, root):
@@ -330,7 +419,10 @@ def collect(vault, dirs, docs):
         try:
             with open(note, encoding="utf-8") as fh:
                 text = fh.read()
-        except (OSError, UnicodeDecodeError):
+        except OSError:            # EIO etc.: its embeds would read as deleted (Codex round 5)
+            _UNREADABLE.append(note)
+            continue
+        except UnicodeDecodeError:  # not text at all —— the same on every scan, nothing was lost
             continue
         flag = docs.get(rel)
         if (flag and flag[1]) or doc_meta(text)[2] or _blocked_by_path(rel):
@@ -499,7 +591,16 @@ def derive_video(path, out_dir):
     vs = next((s for s in pr.get("streams", []) if s.get("codec_type") == "video"), {})
     aus = [s for s in pr.get("streams", []) if s.get("codec_type") == "audio"]
     fmt = pr.get("format", {})
-    meta = {"kind": "video", "width": vs.get("width"), "height": vs.get("height"), "ocr": "",
+    #  Phones store a portrait clip as landscape frames + a rotation (display matrix side data; older files a
+    #  `rotate` tag).  width/height are the DISPLAYED ones; the poster is upright because ffmpeg applies it.
+    rot = next((d["rotation"] for d in vs.get("side_data_list", []) if "rotation" in d),
+               vs.get("tags", {}).get("rotate", 0))
+    try:
+        rot = int(float(rot)) % 360
+    except (TypeError, ValueError):
+        rot = 0
+    w, h = (vs.get("height"), vs.get("width")) if rot % 180 == 90 else (vs.get("width"), vs.get("height"))
+    meta = {"kind": "video", "width": w, "height": h, "rotation": rot, "ocr": "",
             "duration_s": round(float(fmt["duration"]), 2) if fmt.get("duration") else None,
             "taken_at": (fmt.get("tags", {}).get("creation_time") or "")[:19] or None}
     if not have("ffmpeg"):
@@ -522,8 +623,10 @@ def derive_video(path, out_dir):
         # AAC or MP3 is only re-muxed (fast); anything taller, 4:4:4 / 10-bit, PCM / Opus / other audio (browsers
         # cannot play those in mp4), or a re-mux over the server's view cap, is re-encoded to ≤720p H.264 + AAC ——
         # a 4K clip must not stay 4K.  10-bit / HDR goes to 8-bit without tone mapping: colours may look flat.
+        # A rotated clip is re-encoded too: a re-mux keeps sideways frames + the matrix (measured: 320x240 rot 90),
+        # which a player that ignores the matrix shows sideways; the re-encode bakes it in (240x320, no matrix).
         ok = False
-        if (vs.get("codec_name") == "h264" and vs.get("pix_fmt") == "yuv420p"
+        if (vs.get("codec_name") == "h264" and not rot and vs.get("pix_fmt") == "yuv420p"
                 and all(a.get("codec_name") in ("aac", "mp3") for a in aus)
                 and os.path.splitext(path)[1].lower() in (".mp4", ".m4v") and (vs.get("height") or 1 << 30) <= 720):
             ok = (run(["ffmpeg", "-v", "error", "-y", "-i", path, "-c", "copy", "-map_metadata", "-1",
@@ -549,7 +652,16 @@ def process(path):
     sha = sha256_of(path)       # ponytail: re-hashes every file each run; cache by (path, size, mtime) if slow
     d = os.path.join(media_dir(), sha)
     mj = os.path.join(d, "meta.json")
-    prev_retries = 0
+    prev_retries, old = 0, None
+    prev = d + ".prev"
+    if os.path.isdir(prev):
+        #  A run stopped mid re-derive: .prev is the last complete cache.  Back in place unless the new one finished
+        #  (its meta.json is written last); deleting it lost the working preview on the next scan (Codex round 9).
+        if os.path.isfile(mj):
+            shutil.rmtree(prev, ignore_errors=True)
+        else:
+            shutil.rmtree(d, ignore_errors=True)
+            os.rename(prev, d)
     if os.path.isfile(mj):
         try:
             with open(mj, encoding="utf-8") as fh:
@@ -568,13 +680,48 @@ def process(path):
             #  A timeout is not a verdict: the tool was present, so `tools` alone would cache the gap forever (round 2).
             #  `sha in _SEEN`: a retry is per scan, not per path —— three copies of one file used to spend the first
             #  attempt and both retries in a single scan (Codex round 4).
-            if (meta.get("derive_version") == DERIVE_VERSION and not later and (not meta.get("retry") or sha in _SEEN)
+            #  A video cached before `rotation` was recorded may be a portrait clip with swapped width/height: derived
+            #  once more (videos only —— bumping DERIVE_VERSION would also re-run OCR on every image).  Only when ffprobe and
+            #  ffmpeg are both here: without them the re-derive loses the view copy the cache has, and push would then
+            #  delete the cloud's preview (Codex review round 2).
+            if (meta.get("derive_version") == DERIVE_VERSION and not later
+                    and (meta.get("kind") != "video" or "rotation" in meta or not (have("ffprobe") and have("ffmpeg")))
+                    and (not meta.get("retry") or sha in _SEEN)
                     and all(os.path.isfile(os.path.join(d, f)) for f in meta["files"].values())):
                 return meta
+            if all(os.path.isfile(os.path.join(d, f)) for f in meta["files"].values()):
+                old = meta          # complete, only out of date: kept aside until the new derivation proves no worse
         except (OSError, ValueError, KeyError):
             pass
+    if old:
+        os.rename(d, prev)
     shutil.rmtree(d, ignore_errors=True)        # no stale copy from an older derivation may be picked up below
     os.makedirs(d, exist_ok=True)
+    meta = _derive(path, d, ext, sha, prev_retries)
+    if old:
+        #  A re-derive that comes out with fewer variants (a transcode that failed, a decoder gone) or none must not
+        #  replace a working cache: push would drop the item and delete the cloud's previews (Codex round 8).
+        if meta is None or set(old["variants"]) - set(meta["variants"]):
+            shutil.rmtree(d, ignore_errors=True)
+            os.rename(prev, d)
+            warn(f"{os.path.basename(path)}: re-derive came out with less than the cached copy —— kept the cached one")
+            #  Marked current, or every scan re-encodes it again; a newly installed tool (`tools`) still re-derives it.
+            old.update(derive_version=DERIVE_VERSION, tools=[t for t in TOOLS[old["kind"]] if have(t)])
+            if old.get("kind") == "video":
+                old.setdefault("rotation", 0)
+            old.pop("retry", None)
+            tmp = os.path.join(d, "meta.json.tmp")
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(old, fh, ensure_ascii=False)
+            os.replace(tmp, os.path.join(d, "meta.json"))
+            return old
+        shutil.rmtree(prev, ignore_errors=True)
+    return meta
+
+
+def _derive(path, d, ext, sha, prev_retries):
+    """process()'s fresh derivation into the empty folder d → meta (written to d/meta.json) or None."""
+    mj = os.path.join(d, "meta.json")
     _TIMED_OUT.clear()
     _SEEN.add(sha)
     meta = derive_image(path, d, ext) if ext in IMG_EXT else derive_video(path, d)
@@ -661,23 +808,34 @@ def source_of(rec, path, vault):
 def scan():
     _WARNED.clear()
     _SEEN.clear()
+    _UNREADABLE.clear()
     md = media_dir()
     if os.path.isdir(md) and not os.access(md, os.W_OK):
         #  The plugin mounts this folder read-only into its container; on Linux docker creates a missing bind-mount
         #  folder as root, and every derive below would then die on a PermissionError (2026-10-09).
         sys.exit(f"{md} is not writable (docker creates a missing mounted folder as root on Linux) —— "
                  f"sudo chown -R $(id -u):$(id -g) {md}")
+    err = config_error()
+    if err:
+        sys.exit(f"media: {err} —— fix it first (read as \"not set\", folders would look deleted).  Nothing was changed.")
     vault = vault_path.vault()
     ents_rows, docs = load_graph()
     ents = Entities(ents_rows, docs, load_texts)
     dirs = media_dirs()
     found = collect(vault, dirs, docs)
+    #  A source that cannot be read (an unplugged drive, a moved vault) would read as "every file in it was deleted".
+    #  The manifest names it, and push then deletes nothing (sync does not push at all).
+    missing = [p for p in [vault] + [d["path"] for d in dirs if not d["private"]]
+               if not (os.path.isdir(p) and os.access(p, os.R_OK | os.X_OK))] + sorted(set(_UNREADABLE))
     private = [d["path"] for d in dirs if d["private"]]
-    out, n_new = {}, 0
+    out, n_new, underived = {}, 0, []
     for path in sorted(found):
         rec = found[path]
         meta = process(path)
         if meta is None:
+            #  Not derived (unreadable, or no decoder —— a HEIC without pillow-heif): left out, so it would read as
+            #  deleted.  Named under `missing` like an unreadable folder: push deletes nothing (Codex round 7).
+            underived.append(path)
             continue
         links, dcs = build_links(rec, meta, path, ents, private)
         m = out.get(meta["sha256"])
@@ -716,6 +874,11 @@ def scan():
         media = media[:MAX_MEDIA]
     manifest = {"version": 1, "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "media": media}
+    missing += underived
+    if missing:
+        manifest["missing"] = missing
+        warn("could not read " + ", ".join(missing) + " —— its files are left out, and no push deletes anything "
+             "until a scan reads every source again")
     os.makedirs(media_dir(), exist_ok=True)
     mp = os.path.join(media_dir(), "manifest.json")
     with open(mp + ".tmp", "w", encoding="utf-8") as fh:
@@ -801,8 +964,51 @@ def _num(x):
 
 SOFT = (400, 413, 415)          # the server refused this one file —— skip it, the run goes on; anything else stops
 KEY_RE = re.compile(r"[0-9a-f]{64}/(thumb|view|orig)")
-FREE_SPACE = ("To make room: `push --prune` deletes server files this device no longer lists, and "
+FREE_SPACE = ("To make room: `just media-push --prune` deletes the server files the manifest does not list (any "
+              "device's) before the upload, and "
               "`\"media_orig\": false` in config.json (or KAL_MEDIA_ORIG=0) keeps originals on this device.")
+
+
+def pushed_path():
+    return os.path.join(media_dir(), "pushed.json")
+
+
+def media_hash(manifest):
+    """Identity of a manifest's items (not of `generated_at`, which changes on every scan) —— `status` compares it."""
+    return hashlib.sha256(json.dumps(manifest.get("media", []), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def account_of(token):
+    """The push record's account identity: a hash of the token, never the token itself."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def is_mine(prev, url, token):
+    """A record counts only for the same server AND the same account —— another one's keys prove nothing here."""
+    return (str(prev.get("url") or "").rstrip("/") == url and bool(token)
+            and prev.get("account") == account_of(token))
+
+
+def read_pushed():
+    """This device's push record ({} when there is none).  A corrupt one reads as none: nothing is auto-deleted."""
+    try:
+        with open(pushed_path(), encoding="utf-8") as fh:
+            rec = json.load(fh)
+        return rec if isinstance(rec, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        warn(f"{pushed_path()} unreadable ({e}) —— no automatic prune this time")
+        return {}
+
+
+def write_pushed(rec):
+    os.makedirs(media_dir(), exist_ok=True)
+    tmp = pushed_path() + ".tmp"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as fh:
+        json.dump(rec, fh)
+    os.chmod(tmp, 0o600)                    # O_CREAT's mode does not apply to a .tmp left by an earlier crash
+    os.replace(tmp, pushed_path())
 
 
 def push(prune=False):
@@ -813,6 +1019,17 @@ def push(prune=False):
     mp = os.path.join(media_dir(), "manifest.json")
     if not os.path.isfile(mp):
         sys.exit("no manifest —— run `just media` first")
+    err = config_error()
+    if err:     # read as "not set", media_orig would turn back on and send originals with GPS (Codex round 8)
+        sys.exit(f"media push: {err} —— fix it first.  Nothing was sent.")
+    #  One push at a time on this device, held to the end: push A publishes, push B publishes a newer manifest, then
+    #  A's prune deleted files B had just listed (Codex round 6).  Released by the OS when the process ends.
+    lock = open(os.path.join(media_dir(), ".push.lock"), "a")
+    try:
+        if fcntl:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit("another media push is running on this device —— let it finish, then push again")
     with open(mp, encoding="utf-8") as fh:
         manifest = json.load(fh)
     auth = {"Authorization": f"Bearer {token}"}
@@ -840,12 +1057,27 @@ def push(prune=False):
             if e.code in soft:
                 warn(f"{method} {u.replace(url, '')} → {e.code} {detail}".rstrip())
                 return e.code, b""
+            if e.code == 409 and method == "PUT":
+                nonlocal short     # the server lost what this device listed: not "has it all" (Codex round 7)
+                short = True
+                #  The server answers 409 when its media was wiped (DELETE /api/media) during this push, or while
+                #  another push holds the same file.  Its body tells the two apart only in prose; both mean "again".
+                sys.exit(f"push stopped: {u.replace(url, '')} → 409 —— the server's media was wiped during this push, "
+                         "another push of the same file is running, or the manifest referenced files the server no "
+                         "longer has.  The manifest was not replaced.  Run push again.")
             if e.code == 507:       # not this file's fault: nothing after it would fit either
                 sys.exit("push stopped: the server's storage quota is full (507).  The manifest was not replaced.  "
                          + FREE_SPACE)
             sys.exit(f"push failed: {method} {u.replace(url, '')} → {e.code} {detail}")
         except urllib.error.URLError as e:
             sys.exit(f"push failed: {method} {u.replace(url, '')} → {e.reason}")
+
+    missing = manifest.pop("missing", None)     # local only: not part of what the server stores
+    if missing and prune:
+        sys.exit("the last scan could not read " + ", ".join(missing) + " —— `--prune` would delete its files from "
+                 "the server.  Nothing was sent.  Reconnect it (or drop it from media_dirs) and run `just media`.")
+    if missing:
+        warn("the last scan could not read " + ", ".join(missing) + " —— nothing is deleted from the server this push")
 
     def body_of(media):
         return json.dumps(dict(manifest, media=media), ensure_ascii=False).encode("utf-8")
@@ -891,8 +1123,16 @@ def push(prune=False):
     if usage is None and prune:
         sys.exit("this server cannot list its media (no /api/media/usage) —— nothing to prune.  Nothing was uploaded.")
     server = (usage or {}).get("bytes") or {}
+    #  The keys THIS device uploaded (or found already there for an item it listed) to THIS server: every push
+    #  deletes those of them the new manifest no longer lists.  Anything else unlisted is another device's (or
+    #  predates the record) and only `--prune` deletes it.
+    prev = read_pushed()
+    same = is_mine(prev, url, token)        # a record for another server or account is not this one's
+    mine = set(prev.get("keys") or []) if same else set()
+    if usage is not None:
+        mine &= set(server)     # gone from the server (a wipe, a lost record): not ours to track; re-uploads re-add
     local = {m["sha256"] for m in manifest["media"]}
-    foreign = {k.split("/")[0] for k in server if k.split("/")[0] not in local}
+    foreign = {k.split("/")[0] for k in server if k.split("/")[0] not in local and k not in mine}
     if foreign and not prune:
         warn(f"the server holds {len(foreign)} item(s) this device does not list.  The manifest is replaced (last "
              "push wins), so the web view will now show only this device's items.  If that is intended, "
@@ -902,8 +1142,9 @@ def push(prune=False):
         """A derived copy the server records at another size (re-derived since) —— replaced, never orig."""
         return v != "orig" and server.get(k, size) != size
 
-    def prune_now(keep):
-        gone = [k for k in server if k not in keep and KEY_RE.fullmatch(k)]
+    def prune_now(keep, only=None):
+        """Delete the server's keys not in `keep` —— all of them (--prune) or only those in `only` (this device's)."""
+        gone = [k for k in server if k not in keep and KEY_RE.fullmatch(k) and (only is None or k in only)]
         n_orig = sum(k.endswith("/orig") for k in gone)
         if n_orig and not keep_orig:
             print(f"media prune: media_orig is off —— {n_orig} original(s) uploaded earlier will be deleted from "
@@ -911,85 +1152,139 @@ def push(prune=False):
         freed = 0
         for k in gone:
             call("DELETE", f"{url}/api/media/blob/{k}")
+            mine.discard(k)
             size = server.pop(k)
             freed += size if isinstance(size, int) else 0
-        print(f"media prune: deleted {len(gone)} blob(s) · {freed / (1 << 20):.1f} MiB freed")
+        if gone or only is None:
+            print(f"media prune: deleted {len(gone)} blob(s) · {freed / (1 << 20):.1f} MiB freed"
+                  + ("" if only is None else " (files this device uploaded earlier and no longer lists)"))
         return freed
 
-    # 4. the quota must fit at the peak (--prune may free room first).  Two orders:
-    #    in place      each stale copy is deleted right before its own re-upload (a stop leaves at most one item
-    #                  without a preview); usage moves step by step, so its peak is the running maximum (`rise`).
-    #    delete-first  every stale copy is deleted before the first upload; usage only falls, then only rises, so
-    #                  the peak is the end state, total − freed + needed.  Used only when in place would not fit.
-    keep = {f"{m['sha256']}/{v}" for m, paths in zip(media, plan) for v in paths}
-    replace, freed, needed, level, rise = set(), 0, 0, 0, 0
-    for m, paths in zip(media, plan):
-        for v, p in paths.items():
-            k, size = f"{m['sha256']}/{v}", os.path.getsize(p)
-            if stale(k, v, size):
-                replace.add(k)
-                old = server[k] if isinstance(server[k], int) else 0
-                freed += old
-                level -= old
-            if k not in server or k in replace:
-                needed += size
-                level += size
-                rise = max(rise, level)
-    need = needed - freed
-    quota, total = (usage or {}).get("quota") or 0, (usage or {}).get("total") or 0
-    over = total + need - quota
-    if quota and over > 0:
-        freeable = sum(s for k, s in server.items() if k not in keep and KEY_RE.fullmatch(k) and isinstance(s, int))
-        if not (prune and over <= freeable):
-            sys.exit(f"push stopped before uploading: this push adds {need / (1 << 20):.1f} MiB, the server holds "
-                     f"{total / (1 << 20):.1f} of {quota / (1 << 20):.1f} MiB —— {over / (1 << 20):.1f} MiB over the storage quota"
-                     + (f" ({freeable / (1 << 20):.1f} MiB prunable)" if prune else "") + ".  Nothing was uploaded.  "
-                     + FREE_SPACE)
-        print(f"media prune: {over / (1 << 20):.1f} MiB over the quota —— pruning before the upload")
-        total -= prune_now(keep)
-    delete_first = bool(quota) and total + rise > quota
-    if delete_first and replace:
-        print(f"media push: replacing in place would peak {(total + rise - quota) / (1 << 20):.1f} MiB over the quota "
-              f"—— deleting all {len(replace)} stale preview(s) first; if the run stops, those items have no preview "
-              "until the next push")
+    done = published = short = False
+    try:
+        # 4. the quota must fit at the peak (--prune may free room first).  Two orders:
+        #    in place      each stale copy is deleted right before its own re-upload (a stop leaves at most one item
+        #                  without a preview); usage moves step by step, so its peak is the running maximum (`rise`).
+        #    delete-first  every stale copy is deleted before the first upload; usage only falls, then only rises, so
+        #                  the peak is the end state, total − freed + needed.  Used only when in place would not fit.
+        keep = {f"{m['sha256']}/{v}" for m, paths in zip(media, plan) for v in paths}
+        replace, freed, needed, level, rise = set(), 0, 0, 0, 0
+        for m, paths in zip(media, plan):
+            for v, p in paths.items():
+                k, size = f"{m['sha256']}/{v}", os.path.getsize(p)
+                if stale(k, v, size):
+                    replace.add(k)
+                    old = server[k] if isinstance(server[k], int) else 0
+                    freed += old
+                    level -= old
+                if k not in server or k in replace:
+                    needed += size
+                    level += size
+                    rise = max(rise, level)
+        short = needed > 0          # the server lacks something this device lists (new items, or wiped)
+        need = needed - freed
+        quota, total = (usage or {}).get("quota") or 0, (usage or {}).get("total") or 0
+        over = total + need - quota
+        #  without --prune nothing is deleted before the manifest is in place; a missing source deletes nothing at all
+        only = None if prune else (set() if missing else mine)
+        if quota and over > 0:
+            freeable = sum(s for k, s in server.items() if k not in keep and KEY_RE.fullmatch(k) and isinstance(s, int)
+                           ) if prune else 0
+            if not over <= freeable:
+                sys.exit(f"push stopped before uploading: this push adds {need / (1 << 20):.1f} MiB, the server holds "
+                         f"{total / (1 << 20):.1f} of {quota / (1 << 20):.1f} MiB —— {over / (1 << 20):.1f} MiB over the storage quota"
+                         + (f" ({freeable / (1 << 20):.1f} MiB prunable)" if prune else "") + ".  Nothing was uploaded.  "
+                         + FREE_SPACE)
+            print(f"media prune: {over / (1 << 20):.1f} MiB over the quota —— pruning before the upload")
+            total -= prune_now(keep, only)
+        delete_first = bool(quota) and total + rise > quota
+        if delete_first and replace:
+            print(f"media push: replacing in place would peak {(total + rise - quota) / (1 << 20):.1f} MiB over the quota "
+                  f"—— deleting all {len(replace)} stale preview(s) first; if the run stops, those items have no preview "
+                  "until the next push")
 
-    # 5. stale derived copies are deleted (the server would also answer HEAD 200 for the old copy) —— all up front or
-    #    each right before its own upload, as step 4 chose.  Then blobs; one refused file does not stop the run.
-    for k in sorted(replace) if delete_first else ():
-        call("DELETE", f"{url}/api/media/blob/{k}")
-    up = skipped = refused = sent = 0
-    for m, paths in zip(media, plan):
-        for v, p in list(paths.items()):
-            k, u = f"{m['sha256']}/{v}", f"{url}/api/media/blob/{m['sha256']}/{v}"
-            size = os.path.getsize(p)
-            if k in replace and not delete_first:
-                call("DELETE", u)
-            if k not in replace and call("HEAD", u)[0] != 404:
-                skipped += 1
-                continue
-            with open(p, "rb") as fh:      # streamed, not read whole —— an original can be up to 1 GiB
-                st = call("PUT", u, fh, variant_ct(m, v, p), size, soft=SOFT)[0]
-            if st in SOFT:
-                del paths[v]
-                refused += 1
-                continue
-            up += 1
-            sent += size
-        m["variants"] = [v for v in VARIANTS if v in paths]
-    media = [m for m in media if "view" in m["variants"] or "orig" in m["variants"]]
-    call("PUT", f"{url}/api/media/manifest", body_of(media), "application/json")
-    print(f"media push: uploaded {up} · already there {skipped} · refused {refused} · {sent / (1 << 20):.1f} MiB · "
-          f"manifest {len(media)} files")
+        # 5. stale derived copies are deleted (the server would also answer HEAD 200 for the old copy) —— all up front or
+        #    each right before its own upload, as step 4 chose.  Then blobs; one refused file does not stop the run.
+        for k in sorted(replace) if delete_first else ():
+            call("DELETE", f"{url}/api/media/blob/{k}")
+        up = skipped = refused = sent = 0
+        for m, paths in zip(media, plan):
+            for v, p in list(paths.items()):
+                k, u = f"{m['sha256']}/{v}", f"{url}/api/media/blob/{m['sha256']}/{v}"
+                size = os.path.getsize(p)
+                if k in replace and not delete_first:
+                    call("DELETE", u)
+                if k not in replace and call("HEAD", u)[0] != 404:
+                    mine.add(k)         # listed by this device: from now on it is this device's to prune
+                    skipped += 1
+                    continue
+                short = True            # the server lacks it (HEAD 404, or a stale copy): not "has it all" yet
+                with open(p, "rb") as fh:      # streamed, not read whole —— an original can be up to 1 GiB
+                    st = call("PUT", u, fh, variant_ct(m, v, p), size, soft=SOFT)[0]
+                if st in SOFT:
+                    del paths[v]
+                    refused += 1
+                    continue
+                mine.add(k)
+                up += 1
+                sent += size
+            m["variants"] = [v for v in VARIANTS if v in paths]
+        media = [m for m in media if "view" in m["variants"] or "orig" in m["variants"]]
+        call("PUT", f"{url}/api/media/manifest", body_of(media), "application/json")
+        published = True            # the server's manifest is now this run's, whatever follows
+        print(f"media push: uploaded {up} · already there {skipped} · refused {refused} · {sent / (1 << 20):.1f} MiB · "
+              f"manifest {len(media)} files")
 
-    # 6. --prune: delete what the uploaded manifest does not list (only after it is safely in place)
-    if prune:
-        prune_now({f"{m['sha256']}/{v}" for m in media for v in m["variants"]})
+        # 6. delete what the uploaded manifest does not list (only after it is safely in place): every unlisted key
+        #    with --prune, else only those this device uploaded.  An older server lists nothing (`server` is {}).
+        prune_now({f"{m['sha256']}/{v}" for m in media for v in m["variants"]}, only)
+        done = True
+    finally:
+        #  Written even when the run stops: a blob uploaded before the stop is this device's and must stay
+        #  prunable.  `at` / `media_sha256` move only on success —— `status` reads them as "the cloud has this".
+        rec = {"url": url, "account": account_of(token), "keys": sorted(mine)}
+        #  "Has it all" only when every local item went up whole: a refused file (400/413/415) leaves the published
+        #  manifest short, and status must keep saying "behind" (Codex review round 2).
+        if done and not refused and len(media) == len(manifest["media"]):
+            rec.update(at=int(time.time()), media_sha256=media_hash(manifest))
+        elif same and not published and not short:     # a stopped run changed nothing on the server's side of "has it all"…
+            rec.update({k: prev[k] for k in ("at", "media_sha256") if k in prev})
+        #  …but a finished, partial one did: it replaced the manifest, so an older success hash would read "current"
+        #  (Codex round 3: wipe, then a push with refusals kept the old hash)
+        write_pushed(rec)
+
+
+def sync():
+    """`just push`'s media step: scan + push, but only when
+      · media is in use —— a manifest exists (`just media` ran), `media_dirs` is set, or this device has a push record
+        for this server + account, and
+      · this device already pushed media to this server + account itself (a pushed.json record for them), or
+        `media_push` / KAL_MEDIA_PUSH=1 opts in —— originals go up with their EXIF/GPS, so a local `just media`
+        alone never starts uploads;
+    and never when the scan could not read the vault or a media_dirs folder: an unplugged drive would read as
+    deleted photos, so nothing is sent (no manifest, no deletion)."""
+    url = (os.environ.get("KAL_CLOUD_URL") or "").rstrip("/")
+    mine = is_mine(read_pushed(), url, os.environ.get("KAL_CLOUD_TOKEN") or "")
+    #  A push record for this server + account is "in use" too: `reset` drops the manifest and keeps pushed.json, and
+    #  an embed-only vault (no media_dirs) then stopped syncing deletions for good (Codex round 6).
+    if not (os.path.isfile(os.path.join(media_dir(), "manifest.json")) or media_dirs() or mine):
+        print("media: not in use (no manifest, no media_dirs) —— skipped.  `just media` starts it")
+        return
+    if not (want_push() or mine):
+        print("media: not uploaded —— run `just media-push` once (originals keep their EXIF/GPS unless media_orig "
+              "is off), or set \"media_push\": true in config.json (KAL_MEDIA_PUSH=1); `just push` then keeps it in sync")
+        return
+    if scan().get("missing"):
+        sys.exit("media sync refused: the scan could not read a source (above) —— pushing would delete its files from "
+                 "the server.  Nothing was sent.  Reconnect it, or remove it from media_dirs.")
+    push()
 
 
 def main(argv):
-    if len(argv) < 2 or argv[1] not in ("scan", "push") or set(argv[2:]) - ({"--prune"} if argv[1] == "push" else set()):
+    if (len(argv) < 2 or argv[1] not in ("scan", "push", "sync")
+            or set(argv[2:]) - ({"--prune"} if argv[1] == "push" else set())):
         sys.exit(__doc__)
-    scan() if argv[1] == "scan" else push(prune="--prune" in argv[2:])
+    {"scan": scan, "sync": sync}.get(argv[1], lambda: push(prune="--prune" in argv[2:]))()
 
 
 if __name__ == "__main__":

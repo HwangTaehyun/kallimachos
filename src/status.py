@@ -14,6 +14,8 @@ What is inspected (all measured, nothing guessed)
   ⑤ artifact (graph_export · galaxy.html) mtime vs meta.built_at → has the export fallen behind
   ⑥ push.json (what `just push` last uploaded) vs the index's newest mtime and meta.built_at → is the
      cloud copy behind (printed under "cloud"; JSON key `push` —— one thing, named after the file that holds it)
+  ⑦ media/manifest.json + each item's meta.json vs media/pushed.json → items, derivations waiting for a retry or
+     without a preview, and whether the media changed since the last media push (JSON key `media`; offline)
 
 Usage:
     python status.py            a table for people
@@ -110,6 +112,37 @@ def _push_state(home=None, db=None):
             return rec
         rec["stale"] = rec["stale"] or rec["rebuilt"]
     return rec
+
+
+def _media_state(home=None):
+    """Photos and videos (src/media.py), read offline.  None when media was never used.
+
+    `retry`: derivations that timed out and run again on the next scan.  `no_preview`: items left without a view copy
+    (a failed or tool-less derivation —— the cloud shows only the original).  `behind`: the manifest's items differ from
+    what the last successful media push recorded, or there was none."""
+    md = os.path.join(home or KAL_HOME, "media")
+    mp, pp = os.path.join(md, "manifest.json"), os.path.join(md, "pushed.json")
+    if not (os.path.isfile(mp) or os.path.isfile(pp)):
+        return None
+    import media
+    try:
+        manifest = json.load(open(mp)) if os.path.isfile(mp) else {"media": []}
+        rec = json.load(open(pp)) if os.path.isfile(pp) else {}
+    except (OSError, ValueError) as e:
+        return {"error": f"media record unreadable: {e}"}
+    retry = no_preview = 0
+    for m in manifest.get("media", []):
+        try:
+            meta = json.load(open(os.path.join(md, m["sha256"], "meta.json")))
+        except (OSError, ValueError, KeyError):
+            meta = {}                   # cache gone (reset) —— the next scan derives it again
+        if meta.get("retry"):
+            retry += 1
+        elif "view" not in (m.get("variants") or []):
+            no_preview += 1
+    return {"items": len(manifest.get("media", [])), "retry": retry, "no_preview": no_preview,
+            "pushed_at": rec.get("at"), "url": rec.get("url"),
+            "behind": rec.get("media_sha256") != media.media_hash(manifest)}
 
 
 def _fs_free():
@@ -1741,6 +1774,42 @@ def _selftest():
     assert "error" in _push_state(home=_t, db=_dbd), "a corrupt push.json must be reported, not swallowed"
     shutil.rmtree(_t)
     print("  ✅ status self-check —— push record: absent · never(URL set) · other URL · current · behind · corrupt each read as itself")
+    #  `--json` stdout is JSON and nothing else —— the web API parses it; lr_extract's "sending to the LLM" line
+    #  used to land there first.
+    import contextlib as _cl, io as _io
+    _out, _argv = _io.StringIO(), sys.argv
+    sys.argv = ["status.py", "--json"]
+    try:
+        with _cl.redirect_stdout(_out), _cl.redirect_stderr(_io.StringIO()):
+            main()
+    finally:
+        sys.argv = _argv
+    json.loads(_out.getvalue())             # raises on any stray line
+    print("  ✅ status self-check —— `status --json` prints only JSON on stdout")
+    #  media: never used → None · counts · behind until a push records this manifest · then current · corrupt → error.
+    import media as _media
+    _t = tempfile.mkdtemp(); _md = os.path.join(_t, "media"); os.makedirs(_md)
+    assert _media_state(home=_t) is None, "media never used must read as None, not an error"
+    _man = {"version": 1, "media": [{"sha256": "a" * 64, "variants": ["thumb", "view"]},
+                                    {"sha256": "b" * 64, "variants": ["orig"]},
+                                    {"sha256": "c" * 64, "variants": ["orig"]}]}
+    json.dump(_man, open(os.path.join(_md, "manifest.json"), "w"))
+    os.makedirs(os.path.join(_md, "c" * 64))
+    json.dump({"retry": True}, open(os.path.join(_md, "c" * 64, "meta.json"), "w"))
+    _ms = _media_state(home=_t)
+    assert (_ms["items"], _ms["retry"], _ms["no_preview"], _ms["behind"]) == (3, 1, 1, True), _ms
+    json.dump({"url": "u", "keys": [], "at": 1, "media_sha256": _media.media_hash(_man)}, open(os.path.join(_md, "pushed.json"), "w"))
+    assert _media_state(home=_t)["behind"] is False, "a manifest the last media push recorded must not read as behind"
+    _man["generated_at"] = "later"          # a rescan with the same items is not a change
+    json.dump(_man, open(os.path.join(_md, "manifest.json"), "w"))
+    assert _media_state(home=_t)["behind"] is False, "generated_at alone must not read as behind"
+    _man["media"].pop()
+    json.dump(_man, open(os.path.join(_md, "manifest.json"), "w"))
+    assert _media_state(home=_t)["behind"] is True, "an item removed after the push must read as behind"
+    open(os.path.join(_md, "pushed.json"), "w").write("{not json")
+    assert "error" in _media_state(home=_t), "a corrupt pushed.json must be reported, not swallowed"
+    shutil.rmtree(_t)
+    print("  ✅ status self-check —— media: never used · items · retry · no preview · behind · current · corrupt each read as itself")
     #  gate era: paths configured + no meta `gate` row → stale; row present → not; nothing configured → never stale.
     assert _gate_stale("Private", None) is True, "paths configured + no gate row → stale"
     assert _gate_stale("Private", "row") is False, "paths configured + row gate → fine"
@@ -1788,6 +1857,7 @@ def main():
 
     st = collect()
     st["push"] = _push_state()
+    st["media"] = _media_state()
     st["recommend"] = recommend(st)
     if a.json:
         print(json.dumps(st, ensure_ascii=False, indent=1))
@@ -1867,6 +1937,21 @@ def main():
                 print(f"    ⚠ the index changed after that push —— the cloud copy is behind.  just push")
             else:
                 print(f"    ✅ the cloud copy is as new as the index  (local record —— a delete or revoke on the server is not visible here)")
+    ms = st.get("media")
+    if ms:
+        print(f"\n  media")
+        if ms.get("error"):
+            print(f"    ⚠ {ms['error']}")
+        else:
+            print(f"    items {ms['items']:,}"
+                  + (f" · {ms['retry']} waiting for a retry (next  just media)" if ms["retry"] else "")
+                  + (f" · {ms['no_preview']} without a preview" if ms["no_preview"] else ""))
+            if not ms.get("pushed_at"):
+                print(f"    never pushed —— just push")
+            elif ms["behind"]:
+                print(f"    ⚠ changed since the last media push ({_ago(ms['pushed_at'])}) —— just push")
+            else:
+                print(f"    ✅ the cloud has these items  (last media push {_ago(ms['pushed_at'])} → {ms.get('url') or '?'})")
     #  Gate era (schema_v3 meta `gate`): an index built before 2026-09-05 carries no_llm=False for KAL_NO_LLM paths, and
     #  every reader that trusts the row serves them.  Say so when paths are configured (R4, sync lens).
     if st.get("gate_stale"):

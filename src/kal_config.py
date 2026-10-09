@@ -128,14 +128,16 @@ def read_file(path=None):
     The error is handed back as the second return value.
     """
     p = path or CONFIG_PATH
-    if not os.path.exists(p):
-        return {}, ""
     try:
+        #  Only "not there" is "no settings": os.path.exists also said False for a file behind a folder it may not
+        #  enter, and media_orig:false then read as on (Codex review 2026-10-09, round 9).
         with open(p, encoding="utf-8") as fh:
             d = json.load(fh)
         if not isinstance(d, dict):
             return {}, f"{p} is not a JSON object"
         return d, ""
+    except FileNotFoundError:
+        return {}, ""
     except Exception as e:
         return {}, f"{p} could not be read: {type(e).__name__}: {e}"
 
