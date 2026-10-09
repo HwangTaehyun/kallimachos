@@ -340,8 +340,12 @@ def collect():
         except Exception as e:
             drift_error = drift_error or f"{type(e).__name__}: {e}"
     try:
+        import contextlib
         import lr_extract
-        pending_docs = {c["doc"] for c in lr_extract.pending_extraction()["pending_chunks"]}
+        #  lr_extract prints what would go to the LLM on stdout; `status --json`'s stdout must be JSON only.  Moved
+        #  here, not in lr_extract: its stderr is what the cloud repository build must keep free of folder names.
+        with contextlib.redirect_stdout(sys.stderr):
+            pending_docs = {c["doc"] for c in lr_extract.pending_extraction()["pending_chunks"]}
         if pending_docs:
             for f in sorted(glob.glob(f"{VAULT}/**/*.md", recursive=True)):
                 if is_skipped(f):
