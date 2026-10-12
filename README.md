@@ -1,7 +1,7 @@
 <h1 align="center">Kallimachos</h1>
 
 <p align="center">
-  <strong>Give Claude a memory of everything you wrote.</strong><br/>
+  <strong>Give your coding agents the decisions you've already made.</strong><br/>
   Your Obsidian vault — and, if you want them, your Claude Code sessions — become one knowledge graph, served over MCP with a source behind every answer.
 </p>
 
@@ -31,7 +31,7 @@ Kallimachos is a **local pipeline plus an MCP server** for your own writing. It 
 
 Then it hands that graph to Claude over MCP. When you ask *"what did we decide on auth in that March review?"*, the answer comes back **with the documents it came from**. Every entity and relation response carries `docs` and `refs`, so you can open what it cited and check it.
 
-Extraction runs **on your machine, on your own Claude subscription** (`claude -p`). Indexing, embeddings and search are fully local. Nothing requires a server.
+Extraction is started **from your machine, on your own Claude subscription** (`claude -p`) — it sends note text (and, when you distill them, session logs) to Anthropic through your own `claude` CLI; mark notes `no_llm` to keep them out. Indexing, embeddings and search are fully local. Nothing requires a server.
 
 ## Why not just let Claude grep your notes?
 
@@ -145,7 +145,7 @@ The decision note and the **conversation where the decision actually happened** 
 
 ## Quick start
 
-**Requirements:** Python 3.11+, [`uv`](https://docs.astral.sh/uv/) and [`just`](https://github.com/casey/just) — every path below starts with a `just` recipe. Docker for the web UI and the MCP plugin. The `claude` CLI for the extraction step **and** for installing the plugin.
+**Requirements:** Python 3.13+ (`pyproject.toml`), [`uv`](https://docs.astral.sh/uv/) and [`just`](https://github.com/casey/just) — every path below starts with a `just` recipe. Docker for the web UI and the MCP plugin. The `claude` CLI for the extraction step **and** for installing the plugin.
 
 > ⚠ **Indexing is not extraction.** `schema_v3.py` builds chunks and the search index; it creates
 > the entity and relation tables **empty**. `kal_search` and `kal_doc` work at that point, but
